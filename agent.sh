@@ -156,9 +156,22 @@ claude_run() {
         cmd_args+=("--dangerously-skip-permissions")
     fi
 
-    # System prompt
-    if [ -n "$SYSTEM_PROMPT" ]; then
-        cmd_args+=("--system-prompt" "$SYSTEM_PROMPT")
+    # System prompt with auto-append from claude-system-prompt.md
+    local final_system_prompt="$SYSTEM_PROMPT"
+    if [ -f "/home/agent/claude-system-prompt.md" ]; then
+        local claude_system_content
+        claude_system_content=$(cat /home/agent/claude-system-prompt.md)
+        if [ -n "$final_system_prompt" ]; then
+            final_system_prompt="${final_system_prompt}
+
+${claude_system_content}"
+        else
+            final_system_prompt="$claude_system_content"
+        fi
+    fi
+
+    if [ -n "$final_system_prompt" ]; then
+        cmd_args+=("--system-prompt" "$final_system_prompt")
     fi
 
     # Task prompt
