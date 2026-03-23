@@ -1,0 +1,233 @@
+[
+  {
+    "id": "bootstrap_process_manager",
+    "name": "Bootstrap Process Manager",
+    "description": "PID 1 entrypoint that manages Caddy gateway and Streamlit portal, auto-restarts crashed services",
+    "category": "core",
+    "enabled": true
+  },
+  {
+    "id": "heartbeat_cycle_runner",
+    "name": "Heartbeat Cycle Runner",
+    "description": "Single-cycle execution engine triggered via docker exec; loads memory, executes prompts via Claude SDK",
+    "category": "core",
+    "enabled": true
+  },
+  {
+    "id": "caddy_gateway",
+    "name": "Caddy Gateway",
+    "description": "HTTP reverse proxy on port 8080; routes to Streamlit, file browser, and static files; dynamic reconfiguration via admin API",
+    "category": "core",
+    "enabled": true
+  },
+  {
+    "id": "streamlit_portal",
+    "name": "Streamlit Web Portal",
+    "description": "Multi-tab web portal at /app/ with hot-reload; dashboard, chat, and grouped feature tabs",
+    "category": "core",
+    "enabled": true
+  },
+  {
+    "id": "memory_persistence",
+    "name": "Memory Persistence",
+    "description": "JSON-based persistent memory system (state, cycles, journal, goals); survives container restarts",
+    "category": "core",
+    "enabled": true
+  },
+  {
+    "id": "message_queue",
+    "name": "Message Queue",
+    "description": "Inbox/outbox message passing for goals, messages, and human-needs-input signals",
+    "category": "core",
+    "enabled": true
+  },
+  {
+    "id": "prompt_selection",
+    "name": "Prompt Selection Engine",
+    "description": "Automatic prompt routing based on agent state: bootstrap, self-heal, goal execution, or evolution",
+    "category": "core",
+    "enabled": true
+  },
+  {
+    "id": "file_browser",
+    "name": "File Browser",
+    "description": "Caddy-served file browser at /_/ for browsing agent filesystem with download links",
+    "category": "core",
+    "enabled": true
+  },
+  {
+    "id": "cycle_start",
+    "name": "Cycle Start Briefing",
+    "description": "Startup briefing combining memory repair, state summary, recent journal, inbox peek, and evolve recommendation",
+    "category": "memory",
+    "enabled": true
+  },
+  {
+    "id": "cycle_close",
+    "name": "Cycle Close Automation",
+    "description": "Auto-close cycles by updating state, marking completion with duration, appending journal entry",
+    "category": "memory",
+    "enabled": true
+  },
+  {
+    "id": "memory_repair",
+    "name": "Memory Repair",
+    "description": "Detects and auto-repairs corrupted JSON memory files; restores from backups or safe defaults",
+    "category": "memory",
+    "enabled": true
+  },
+  {
+    "id": "memory_backup",
+    "name": "Memory Backup",
+    "description": "Timestamped snapshots of critical memory files; supports restore and pruning (keeps max 20)",
+    "category": "memory",
+    "enabled": true
+  },
+  {
+    "id": "journal_archival",
+    "name": "Journal Archival",
+    "description": "Archives old journal entries (>20 cycles) to keep active journal lean for fast loading",
+    "category": "memory",
+    "enabled": true
+  },
+  {
+    "id": "keepass_credentials",
+    "name": "KeePass Credential Manager",
+    "description": "Local KeePass database for API keys, passwords, and secrets; CLI and portal UI",
+    "category": "security",
+    "enabled": true
+  },
+  {
+    "id": "portal_auth",
+    "name": "Portal Basic Auth",
+    "description": "Caddy-based basic authentication for the web portal; managed via Caddy Admin API",
+    "category": "security",
+    "enabled": false
+  },
+  {
+    "id": "chat_interface",
+    "name": "Chat Interface",
+    "description": "Claude SDK chat UI with streaming responses, tool use display, and persistent history",
+    "category": "communication",
+    "enabled": true
+  },
+  {
+    "id": "metrics_collector",
+    "name": "Metrics Collector",
+    "description": "Time-series metrics for Streamlit response time, CPU, memory, and disk usage",
+    "category": "observability",
+    "enabled": true
+  },
+  {
+    "id": "self_test",
+    "name": "Self-Test Suite",
+    "description": "Comprehensive test suite validating API endpoints, memory files, disk health, processes, and imports",
+    "category": "observability",
+    "enabled": true
+  },
+  {
+    "id": "health_check",
+    "name": "Health Check",
+    "description": "Multi-service health check with retry logic for Streamlit and Caddy endpoints",
+    "category": "observability",
+    "enabled": true
+  },
+  {
+    "id": "app_render_check",
+    "name": "App Render Check",
+    "description": "Headless AppTest framework catching syntax errors, missing imports, and runtime exceptions",
+    "category": "observability",
+    "enabled": true
+  },
+  {
+    "id": "cycle_report",
+    "name": "Cycle Reporting",
+    "description": "Summary reports of agent activity showing recent cycles with duration, type, and category",
+    "category": "observability",
+    "enabled": true
+  },
+  {
+    "id": "milestone_report",
+    "name": "Milestone Reporting",
+    "description": "Narrative growth snapshots at significant cycle intervals (25, 50, 75, 100...)",
+    "category": "observability",
+    "enabled": true
+  },
+  {
+    "id": "maintenance",
+    "name": "Auto Maintenance",
+    "description": "Memory validation, journal archival, log cleanup, zombie process detection, and disk usage reporting",
+    "category": "observability",
+    "enabled": true
+  },
+  {
+    "id": "task_scheduler",
+    "name": "Task Scheduler",
+    "description": "Evaluates scheduled_tasks.json for due tasks; supports interval, once, and cron schedules",
+    "category": "automation",
+    "enabled": true
+  },
+  {
+    "id": "service_manager",
+    "name": "Service Manager",
+    "description": "Manages background services (optional port 8083-8090); start, stop, status, health, and cleanup",
+    "category": "automation",
+    "enabled": true
+  },
+  {
+    "id": "portal_hostname",
+    "name": "Portal Hostname",
+    "description": "Configures public hostname for agent when exposed via proxy; injected into system prompt",
+    "category": "automation",
+    "enabled": false
+  },
+  {
+    "id": "workspace_file_upload",
+    "name": "Workspace File Upload",
+    "description": "Upload files from local machine to /agent/workspace/ via portal with subdirectory support",
+    "category": "portal",
+    "enabled": true
+  },
+  {
+    "id": "command_center",
+    "name": "Command Center",
+    "description": "Portal tab for sending goals/messages, running scripts, and browsing command history",
+    "category": "portal",
+    "enabled": true
+  },
+  {
+    "id": "memory_viewer",
+    "name": "Memory Viewer",
+    "description": "Portal tab for browsing journal, logs, goals, and memory files with cross-file search",
+    "category": "portal",
+    "enabled": true
+  },
+  {
+    "id": "system_diagnostics",
+    "name": "System Diagnostics",
+    "description": "Portal tab for health checks, error tracking, validation, services, and script inventory",
+    "category": "portal",
+    "enabled": true
+  },
+  {
+    "id": "overview_dashboard",
+    "name": "Overview Dashboard",
+    "description": "Portal tab with suggestions, goal performance, evolution balance, and activity summary",
+    "category": "portal",
+    "enabled": true
+  },
+  {
+    "id": "agent_browser",
+    "name": "Agent Browser",
+    "description": "Headless Chromium automation via agent-browser CLI for web interaction and scraping",
+    "category": "automation",
+    "enabled": true
+  },
+  {
+    "id": "telegram_bridge",
+    "name": "Telegram Bridge",
+    "description": "Bridges inbox/outbox with a Telegram bot; polls for incoming messages, forwards outbox to Telegram, auto-discovers chat ID",
+    "category": "communication",
+    "enabled": false
+  }
+]

@@ -1,0 +1,12 @@
+[server]
+runOnSave = true
+fileWatcherType = "poll"
+port = 8081
+address = "0.0.0.0"
+headless = true
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "dark"

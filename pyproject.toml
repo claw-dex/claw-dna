@@ -1,0 +1,22 @@
+[project]
+name = "agent"
+version = "1.0.0"
+description = "claw-dex/claw-dna - v1/base - Python dependencies"
+requires-python = ">=3.11"
+# ── Dependencies ─────────────────────────────────────────────
+# The agent can add packages here and run `uv sync` to install.
+# Streamlit serves the portal with built-in hot-reload (runOnSave=true).
+dependencies = [
+    "streamlit",
+    "streamlit-autorefresh",
+    "hydralit-components",
+    "numpy<2.0",
+    "plotly",
+    "claude-agent-sdk",
+    "pykeepass",
+    "memvid-sdk",
+    "fastembed",
+]
+
+[tool.uv]
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]

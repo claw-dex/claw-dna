@@ -1,0 +1,27 @@
+{
+    admin localhost:2019
+    auto_https off
+}
+
+:8080 {
+    # Streamlit dashboard (baseUrlPath=/app/ handles the prefix)
+    handle /app/* {
+        reverse_proxy localhost:8081
+    }
+
+    # File browser for entire filesystem
+    handle /_/* {
+        @blocked_credentials path /home/agent/.config/gws /home/agent/.config/gws/* /home/agent/.keepass /home/agent/.keepass/* /home/agent/.ssh /home/agent/.ssh/*
+        respond @blocked_credentials 403
+
+        root * /
+        uri strip_prefix /_
+        file_server browse
+    }
+
+    # Welcome page & static assets
+    handle {
+        root * /agent/web
+        file_server
+    }
+}

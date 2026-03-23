@@ -205,3 +205,8 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Agent
+messages/inbox.json
+messages/outbox.json
+memory/logs/
