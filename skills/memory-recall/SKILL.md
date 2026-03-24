@@ -44,11 +44,12 @@ uv run python scripts/memory-recall.py --timeline --since 2026-03-01
 
 ## How it works
 
-- **Semantic search** (default): Uses `mem.ask(question, context_only=True, k=N)` to find entries whose embedded text is semantically similar to the question. Returns context snippets without invoking an LLM.
+- **Semantic search** (default): Pre-computes a query embedding using fastembed (`BAAI/bge-small-en-v1.5`), then calls `mem.find(question, k=N, query_embedding=qvec)` for vector similarity search. Falls back to lexical search if embedding fails. Returns context snippets without invoking an LLM.
 - **Timeline mode** (`--timeline`): Uses `mem.timeline(limit=N)` to list entries chronologically. Useful for browsing recent history or filtering by date range.
 
 ## Integration with cycle scripts
 
-- **cycle-close.py** stores each journal entry into the `.mv2` file after closing a cycle (step 9).
-- **cycle-start.py** automatically recalls up to 10 memories older than 24h and includes them in the `[LONG-TERM MEMORY]` briefing section.
+- **cycle-close.py** stores each journal entry into the `.mv2` file after closing a cycle (step 9). Uses fastembed to pre-compute embeddings and stores via `mem.put_many([document], embeddings=[embedding])`.
+- **cycle-start.py** automatically recalls up to 10 memories older than 24h using fastembed query embeddings and includes them in the `[LONG-TERM MEMORY]` briefing section.
 - This script provides on-demand access to the same memory store.
+- All three scripts use the same fastembed model (`BAAI/bge-small-en-v1.5`) for consistent embeddings.

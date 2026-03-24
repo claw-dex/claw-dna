@@ -37,6 +37,24 @@ from collections import Counter
 MEMORY = Path("/agent/memory")
 MESSAGES = Path("/agent/messages")
 MV2_PATH = MEMORY / "long_term_memory.mv2"
+EMBED_MODEL = "BAAI/bge-small-en-v1.5"
+
+_embedder = None
+
+
+def get_embedder():
+    """Lazy-load fastembed TextEmbedding model (cached across calls)."""
+    global _embedder
+    if _embedder is None:
+        from fastembed import TextEmbedding
+        _embedder = TextEmbedding(EMBED_MODEL)
+    return _embedder
+
+
+def embed_query(text):
+    """Embed a single query string, returns float list."""
+    model = get_embedder()
+    return list(model.embed([text]))[0].tolist()
 
 # ── Flags ───────────────────────────────────────────────────────────────────────
 args = sys.argv[1:]
@@ -637,8 +655,9 @@ def _build_recall_query(inbox, goals) -> str:
 def _fetch_old_memories(limit: int = 10, inbox=None, goals=None) -> list:
     """Fetch memories older than 24h from long-term semantic memory (memvid).
 
-    Uses lexical search (BM25) with a query derived from inbox messages
-    or the latest non-completed goal. Returns a list of hit dicts.
+    Uses fastembed pre-computed embeddings for semantic search, with lexical
+    fallback. Query is derived from inbox messages or the latest non-completed
+    goal. Returns a list of hit dicts.
     Returns [] on any error or if memvid is not installed / file missing.
     """
     if not MV2_PATH.exists():
@@ -652,7 +671,12 @@ def _fetch_old_memories(limit: int = 10, inbox=None, goals=None) -> list:
         return []
     try:
         mem = memvid_sdk.use('basic', str(MV2_PATH), read_only=True)
-        results = mem.find(query, k=50, mode="sem")
+        try:
+            qvec = embed_query(query)
+            results = mem.find(query, k=50, query_embedding=qvec)
+        except Exception:
+            # Fallback to lexical search if vector search fails
+            results = mem.find(query, k=50)
         hits = results.get("hits", []) if isinstance(results, dict) else []
         # Filter for entries older than 24 hours
         cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)

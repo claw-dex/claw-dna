@@ -30,6 +30,24 @@ from pathlib import Path
 
 MEMORY = Path("/agent/memory")
 MV2_PATH = MEMORY / "long_term_memory.mv2"
+EMBED_MODEL = "BAAI/bge-small-en-v1.5"
+
+_embedder = None
+
+
+def get_embedder():
+    """Lazy-load fastembed TextEmbedding model (cached across calls)."""
+    global _embedder
+    if _embedder is None:
+        from fastembed import TextEmbedding
+        _embedder = TextEmbedding(EMBED_MODEL)
+    return _embedder
+
+
+def embed_query(text):
+    """Embed a single query string, returns float list."""
+    model = get_embedder()
+    return list(model.embed([text]))[0].tolist()
 
 
 def parse_args(argv):
@@ -105,26 +123,66 @@ def main():
 
 
 def _run_query(mem, opts):
-    """Run semantic search query."""
+    """Run semantic search query using fastembed vectors + mem.find()."""
     question = opts["question"]
     k = opts["k"]
 
-    result = mem.ask(question, context_only=True, k=k, mode="sem")
-    context = result.get("context", "") if isinstance(result, dict) else str(result)
+    try:
+        qvec = embed_query(question)
+        result = mem.find(question, k=k, query_embedding=qvec)
+    except Exception:
+        # Fallback to lexical search if vector search fails
+        result = mem.find(question, k=k)
+
+    hits = result.get("hits", []) if isinstance(result, dict) else []
+    total = result.get("total_hits", len(hits)) if isinstance(result, dict) else 0
 
     if opts["json_mode"]:
+        items = []
+        for i, h in enumerate(hits, 1):
+            items.append({
+                "rank": i,
+                "score": h.get("score"),
+                "title": h.get("title", ""),
+                "snippet": h.get("snippet", ""),
+                "tags": h.get("tags", []),
+                "frame_id": h.get("frame_id"),
+            })
         print(json.dumps({
             "query": question,
             "k": k,
-            "context": context,
+            "total_hits": total,
+            "results": items,
         }, indent=2))
     else:
         print(f'[MEMORY RECALL] "{question}" (k={k})\n')
-        if context:
-            print(context)
-        else:
+        if not hits:
             print("No matching memories found.")
-        print(f"\n[MEMORY RECALL] Done.")
+        else:
+            for i, h in enumerate(hits, 1):
+                score = h.get("score", 0)
+                title = h.get("title", "untitled")
+                snippet = h.get("snippet", "")
+                tags = h.get("tags", [])
+                # Extract cycle/date from tags or title
+                cycle_tag = next((t for t in tags if t.startswith("cycle:")), "")
+                date_tag = next((t for t in tags if t.startswith("date:")), "")
+
+                header = f"── Result {i}/{len(hits)} (score: {score:.4f})"
+                if cycle_tag:
+                    header += f" | {cycle_tag}"
+                if date_tag:
+                    header += f" | {date_tag}"
+                print(f"{header} ──")
+                print(f"  {title}")
+                if snippet:
+                    lines = snippet.splitlines()
+                    preview = "\n    ".join(lines[:4])
+                    print(f"    {preview}")
+                    if len(lines) > 4:
+                        print(f"    ... ({len(lines) - 4} more lines)")
+                print()
+        print(f"[MEMORY RECALL] {len(hits)} result(s) returned (total matches: {total}).")
 
 
 def _run_timeline(mem, opts):

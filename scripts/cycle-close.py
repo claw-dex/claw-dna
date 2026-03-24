@@ -70,6 +70,24 @@ from pathlib import Path
 MEMORY = Path("/agent/memory")
 SCRIPTS = Path("/agent/scripts")
 MV2_PATH = MEMORY / "long_term_memory.mv2"
+EMBED_MODEL = "BAAI/bge-small-en-v1.5"
+
+_embedder = None
+
+
+def get_embedder():
+    """Lazy-load fastembed TextEmbedding model (cached across calls)."""
+    global _embedder
+    if _embedder is None:
+        from fastembed import TextEmbedding
+        _embedder = TextEmbedding(EMBED_MODEL)
+    return _embedder
+
+
+def embed_text(text):
+    """Embed a single text string, returns float list."""
+    model = get_embedder()
+    return list(model.embed([text]))[0].tolist()
 
 
 # ── Inlined: normalize_cycles logic ─────────────────────────────────────────
@@ -500,21 +518,22 @@ def _store_to_memvid(journal_entry: dict) -> None:
         text = _compose_entry_text(journal_entry)
         tags = [t for t in [ctype, category, status] if t]
 
-        mem.put(
-            title=f"Cycle {cycle}: {summary[:100]}",
-            label=ctype,
-            text=text,
-            metadata={
+        document = {
+            "title": f"Cycle {cycle}: {summary[:100]}",
+            "label": ctype,
+            "text": text,
+            "metadata": {
                 "date": timestamp,
                 "cycle": str(cycle),
                 "type": ctype,
                 "status": status,
                 "category": category,
             },
-            tags=tags,
-            enable_embedding=True,
-            embedding_model="bge-small",
-        )
+            "tags": tags,
+        }
+
+        embedding = embed_text(text)
+        mem.put_many([document], embeddings=[embedding])
         mem.seal()
         print(f"  ✓ memvid — stored cycle {cycle} to long_term_memory.mv2")
     except Exception as e:
