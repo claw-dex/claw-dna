@@ -224,3 +224,4 @@ memory/*
 !memory/capabilities.json
 !memory/MEMORY.md
 !memory/services.json
+!memory/scheduled_tasks.json

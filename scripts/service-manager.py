@@ -9,6 +9,7 @@ Usage:
     python3 service-manager.py list                          # Show all managed services
     python3 service-manager.py start <name> [<port>] -- <cmd...>  # Start a service
     python3 service-manager.py stop <name>                   # Stop a service
+    python3 service-manager.py restart <name>                # Restart a service
     python3 service-manager.py status <name>                 # Check one service
     python3 service-manager.py health                        # Health check all services
     python3 service-manager.py cleanup                       # Remove dead entries
@@ -201,6 +202,95 @@ def cmd_stop(name):
     _update_state_services(services)
 
 
+def cmd_restart(name):
+    services = _load()
+    if name not in services:
+        print(f"Error: no service named '{name}'")
+        sys.exit(1)
+
+    # Get the stored service information
+    info = services[name]
+    port = info.get("port")
+    command = info.get("command")
+
+    if not command:
+        print(f"Error: no command stored for service '{name}'")
+        sys.exit(1)
+
+    pid = info.get("pid")
+    was_running = isinstance(pid, int) and _pid_alive(pid)
+
+    # Stop the service if it's running
+    if was_running:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            # Wait up to 3 seconds
+            for _ in range(30):
+                if not _pid_alive(pid):
+                    break
+                time.sleep(0.1)
+            else:
+                os.kill(pid, signal.SIGKILL)
+                time.sleep(0.5)
+            print(f"Stopped '{name}' (PID {pid})")
+        except Exception as e:
+            print(f"Error stopping '{name}': {e}")
+            sys.exit(1)
+
+    # Start the service with the stored command
+    # Reuse existing log paths if available, otherwise generate new ones
+    if info.get("stdout_log") and info.get("stderr_log"):
+        stdout_log = Path(info["stdout_log"])
+        stderr_log = Path(info["stderr_log"])
+    else:
+        log_dir = Path("/agent/memory/logs")
+        log_dir.mkdir(exist_ok=True)
+        stdout_log = log_dir / f"service-{name}.stdout.log"
+        stderr_log = log_dir / f"service-{name}.stderr.log"
+
+    with open(stdout_log, "a") as out, open(stderr_log, "a") as err:
+        proc = subprocess.Popen(
+            command,
+            stdout=out,
+            stderr=err,
+            start_new_session=True,  # Detach from parent
+        )
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    services[name] = {
+        "pid": proc.pid,
+        "port": port,
+        "command": command,
+        "started": now,
+        "stdout_log": str(stdout_log),
+        "stderr_log": str(stderr_log),
+    }
+    _save(services)
+    _update_state_services(services)
+
+    # Wait briefly and verify it's still running
+    time.sleep(1)
+    if _pid_alive(proc.pid):
+        port_msg = f" on port {port}" if port is not None else ""
+        status_msg = "Restarted" if was_running else "Started"
+        print(f"{status_msg} '{name}'{port_msg} (PID {proc.pid})")
+        print(f"  stdout: {stdout_log}")
+        print(f"  stderr: {stderr_log}")
+    else:
+        # Read tail of stderr log for error context
+        error_tail = ""
+        try:
+            content = stderr_log.read_text()
+            lines = content.strip().splitlines()[-20:]
+            error_tail = "\n".join(lines)
+        except Exception:
+            pass
+        print(f"Error: '{name}' started but exited immediately.")
+        if error_tail:
+            print(error_tail)
+        sys.exit(1)
+
+
 def cmd_status(name):
     services = _load()
     if name not in services:
@@ -286,6 +376,8 @@ if __name__ == "__main__":
             sys.exit(1)
     elif cmd == "stop":
         cmd_stop(sys.argv[2])
+    elif cmd == "restart":
+        cmd_restart(sys.argv[2])
     elif cmd == "status":
         cmd_status(sys.argv[2])
     elif cmd == "health":

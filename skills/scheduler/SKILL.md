@@ -1,6 +1,6 @@
 ---
 name: scheduler
-description: Evaluate and inject due scheduled tasks from scheduled_tasks.json into inbox.json. Supports interval (every N minutes), once (fire once then disable), and cron-like schedule types. Use at cycle start to check for due tasks (--check), or to list all scheduled tasks and their next run times (--list). Typically invoked automatically by cycle-start.py.
+description: Evaluate and inject due scheduled tasks (cron) from scheduled_tasks.json into inbox.json. Supports interval (every N minutes), once (fire once then disable), and cron-like schedule types. Use at cycle start to check for due tasks (--check), or to list all scheduled tasks and their next run times (--list). Typically invoked automatically by cycle-start.py.
 ---
 
 # scheduler

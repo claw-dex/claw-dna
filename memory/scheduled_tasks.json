@@ -1,0 +1,42 @@
+[
+  {
+    "id": "daily-check",
+    "schedule_type": "interval",
+    "interval_minutes": 360,
+    "type": "message",
+    "content": "Check system health and resource usage",
+    "enabled": true,
+    "last_run": null,
+    "priority": 3
+  },
+  {
+    "id": "morning-briefing",
+    "schedule_type": "cron",
+    "schedule": "0 8 * * 1-5",
+    "type": "message",
+    "content": "Generate and send morning briefing with tasks, email inbox, and recent cycles",
+    "enabled": false,
+    "last_run": null,
+    "priority": 2
+  },
+  {
+    "id": "weekly-cleanup",
+    "schedule_type": "cron",
+    "schedule": "0 2 * * 0",
+    "type": "goal",
+    "content": "Archive old logs and clean temporary files",
+    "enabled": true,
+    "last_run": "2026-03-23T02:00:00+00:00",
+    "priority": 3
+  },
+  {
+    "id": "one-time-reminder",
+    "schedule_type": "once",
+    "run_at": "2026-03-25T14:30:00+00:00",
+    "type": "message",
+    "content": "Remind the user to follow up on pending action items",
+    "enabled": false,
+    "last_run": null,
+    "priority": 1
+  }
+]
