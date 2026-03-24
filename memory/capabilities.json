@@ -229,5 +229,12 @@
     "description": "Bridges inbox/outbox with a Telegram bot; polls for incoming messages, forwards outbox to Telegram, auto-discovers chat ID",
     "category": "communication",
     "enabled": false
+  },
+  {
+    "id": "whatsapp_bridge",
+    "name": "WhatsApp Bridge",
+    "description": "Bridges inbox/outbox with WhatsApp Business Cloud API; receives messages via webhook, forwards outbox to WhatsApp, auto-discovers owner phone",
+    "category": "communication",
+    "enabled": false
   }
 ]

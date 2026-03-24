@@ -12,6 +12,19 @@
     "stdout_log": "/agent/memory/logs/service-telegram_bridge.stdout.log",
     "stderr_log": "/agent/memory/logs/service-telegram_bridge.stderr.log"
   },
+  "whatsapp_bridge": {
+    "pid": null,
+    "port": 8082,
+    "command": [
+      "uv",
+      "run",
+      "python",
+      "/agent/services/whatsapp_bridge.py"
+    ],
+    "started": null,
+    "stdout_log": "/agent/memory/logs/service-whatsapp_bridge.stdout.log",
+    "stderr_log": "/agent/memory/logs/service-whatsapp_bridge.stderr.log"
+  },
   "claude_remote": {
     "pid": null,
     "port": null,
