@@ -1,6 +1,6 @@
 ---
 name: service-manager
-description: Manage agent background processes. Use to register a new background service (start), stop one (stop), restart one (restart), check its status (status), health-check all registered services (health), list all entries (list), or remove dead/stale entries (cleanup). Example: starting a webhook listener or a custom API service.
+description: Manage agent background processes. Use to register a new background service (start), stop one (stop), remove one permanently (remove), restart one (restart), check its status (status), health-check all registered services (health), list all entries (list), or remove dead/stale entries (cleanup). Example: starting a webhook listener or a custom API service.
 ---
 
 # service-manager
@@ -33,7 +33,8 @@ If service require a port, chose a port in range 8083–8090. Ports 8080 (Caddy)
 |------------|-------------|
 | `list` | List all registered services with their port, PID liveness, and status |
 | `start NAME PORT -- CMD...` | Register and start a service |
-| `stop NAME` | Stop a running service (sends SIGTERM, then SIGKILL after timeout) |
+| `stop NAME` | Stop a running service and keep its entry for restart |
+| `remove NAME` | Stop (if running) and remove a service entry entirely |
 | `restart NAME` | Restart a registered service (stops if running, then starts with stored command) |
 | `status NAME` | Check the status of one service |
 | `health` | Health-check all registered services (verifies PIDs and ports) |
@@ -66,8 +67,11 @@ uv run python scripts/service-manager.py status webhook
 # Health-check all services
 uv run python scripts/service-manager.py health
 
-# Stop the service
+# Stop the service (keeps entry for restart)
 uv run python scripts/service-manager.py stop webhook
+
+# Remove a service entirely
+uv run python scripts/service-manager.py remove webhook
 
 # Restart the service (uses stored command and port)
 uv run python scripts/service-manager.py restart webhook

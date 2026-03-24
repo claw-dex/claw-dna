@@ -8,7 +8,8 @@ Port is optional — polling/background services don't need one.
 Usage:
     python3 service-manager.py list                          # Show all managed services
     python3 service-manager.py start <name> [<port>] -- <cmd...>  # Start a service
-    python3 service-manager.py stop <name>                   # Stop a service
+    python3 service-manager.py stop <name>                   # Stop a service (keeps entry)
+    python3 service-manager.py remove <name>                 # Stop and remove a service
     python3 service-manager.py restart <name>                # Restart a service
     python3 service-manager.py status <name>                 # Check one service
     python3 service-manager.py health                        # Health check all services
@@ -44,6 +45,24 @@ def _pid_alive(pid):
         os.kill(pid, 0)
         return True
     except (OSError, ProcessLookupError):
+        return False
+
+
+def _kill_pid(name, pid):
+    """Send SIGTERM, wait up to 3s, then SIGKILL. Returns True on success."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+        for _ in range(30):
+            if not _pid_alive(pid):
+                break
+            time.sleep(0.1)
+        else:
+            os.kill(pid, signal.SIGKILL)
+            time.sleep(0.5)
+        print(f"Stopped '{name}' (PID {pid})")
+        return True
+    except Exception as e:
+        print(f"Error stopping '{name}': {e}")
         return False
 
 
@@ -180,26 +199,34 @@ def cmd_stop(name):
         sys.exit(1)
 
     pid = services[name].get("pid")
-    if pid and _pid_alive(pid):
-        try:
-            os.kill(pid, signal.SIGTERM)
-            # Wait up to 3 seconds
-            for _ in range(30):
-                if not _pid_alive(pid):
-                    break
-                time.sleep(0.1)
-            else:
-                os.kill(pid, signal.SIGKILL)
-                time.sleep(0.5)
-            print(f"Stopped '{name}' (PID {pid})")
-        except Exception as e:
-            print(f"Error stopping '{name}': {e}")
+    if isinstance(pid, int) and _pid_alive(pid):
+        if not _kill_pid(name, pid):
+            sys.exit(1)
     else:
         print(f"'{name}' was not running")
+
+    # Preserve entry so the service can be restarted from the UI
+    services[name]["pid"] = None
+    services[name]["started"] = None
+    _save(services)
+    _update_state_services(services)
+
+
+def cmd_remove(name):
+    """Stop (if running) and remove a service entry entirely."""
+    services = _load()
+    if name not in services:
+        print(f"Error: no service named '{name}'")
+        sys.exit(1)
+
+    pid = services[name].get("pid")
+    if isinstance(pid, int) and _pid_alive(pid):
+        _kill_pid(name, pid)
 
     del services[name]
     _save(services)
     _update_state_services(services)
+    print(f"Removed '{name}'")
 
 
 def cmd_restart(name):
@@ -222,19 +249,7 @@ def cmd_restart(name):
 
     # Stop the service if it's running
     if was_running:
-        try:
-            os.kill(pid, signal.SIGTERM)
-            # Wait up to 3 seconds
-            for _ in range(30):
-                if not _pid_alive(pid):
-                    break
-                time.sleep(0.1)
-            else:
-                os.kill(pid, signal.SIGKILL)
-                time.sleep(0.5)
-            print(f"Stopped '{name}' (PID {pid})")
-        except Exception as e:
-            print(f"Error stopping '{name}': {e}")
+        if not _kill_pid(name, pid):
             sys.exit(1)
 
     # Start the service with the stored command
@@ -303,8 +318,9 @@ def cmd_status(name):
     alive = _pid_alive(pid) if isinstance(pid, int) else False
     port_up = _port_in_use(port) if port is not None else None
 
+    pid_str = str(pid) if pid is not None else "n/a"
     print(f"Service: {name}")
-    print(f"  PID:      {pid} ({'alive' if alive else 'dead'})")
+    print(f"  PID:      {pid_str} ({'alive' if alive else 'stopped'})")
     if port is not None:
         print(f"  Port:     {port} ({'responding' if port_up else 'not responding'})")
     else:
@@ -334,7 +350,8 @@ def cmd_health():
             port_label = "no port"
         if status != "OK":
             all_ok = False
-        print(f"  {status:<10} {name} ({port_label}, PID {pid})")
+        pid_str = str(pid) if pid is not None else "n/a"
+        print(f"  {status:<10} {name} ({port_label}, PID {pid_str})")
 
     print()
     print("Overall:", "HEALTHY" if all_ok else "ISSUES DETECTED")
@@ -376,6 +393,8 @@ if __name__ == "__main__":
             sys.exit(1)
     elif cmd == "stop":
         cmd_stop(sys.argv[2])
+    elif cmd == "remove":
+        cmd_remove(sys.argv[2])
     elif cmd == "restart":
         cmd_restart(sys.argv[2])
     elif cmd == "status":

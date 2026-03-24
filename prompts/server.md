@@ -220,7 +220,7 @@ All write functions call `_cache_clear_all()` after mutation.
 | `update_goal_status(goal_index, new_status)` | Update goal status by index (AtomicJSON) |
 | `delete_inbox_item(item_index)` | Delete single inbox item by index (AtomicJSON) |
 | `clear_outbox()` | Archive outbox to `outbox_history.json` (dedup by timestamp), then clear |
-| `remove_service(name)` | Remove from both `state.json` and `services.json` |
+| `remove_service(name)` | Stop (if running) and remove a service via `service-manager.py` |
 | `stop_service(name)` | Stop running service via `service-manager.py` (15s timeout) |
 | `start_service(name)` | Restart dead service using saved command from `services.json` |
 | `create_scheduled_task(task_data)` | Add new scheduled task to `scheduled_tasks.json` (AtomicJSON) |

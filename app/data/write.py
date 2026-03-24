@@ -155,33 +155,23 @@ def clear_outbox():
 
 
 def remove_service(name):
-    """Remove a registered service from both state.json and services.json."""
-    removed_any = False
-
-    # Remove from state.json
-    state_path = f"{MEMORY_DIR}/state.json"
+    """Stop (if running) and remove a service via service-manager.py."""
+    if not _valid_service_name(name):
+        return {"ok": False, "error": "Invalid service name"}
+    script_path = os.path.join(SCRIPTS_DIR, "service-manager.py")
     try:
-        with open(state_path) as f:
-            state = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        state = {}
-    if name in state.get("services", {}):
-        del state["services"][name]
-        _write_json_atomic(state_path, state, indent=2)
-        removed_any = True
-
-    # Remove from services.json
-    services_path = f"{MEMORY_DIR}/services.json"
-    svc_data = _read_json_safe(services_path, {}) or {}
-    if name in svc_data:
-        del svc_data[name]
-        _write_json_atomic(services_path, svc_data, indent=2)
-        removed_any = True
-
-    _cache_clear_all()
-    if not removed_any:
-        return {"ok": False, "error": f"Service '{name}' not found"}
-    return {"ok": True, "removed": name}
+        result = subprocess.run(
+            ["uv", "run", "python", script_path, "remove", name],
+            capture_output=True, text=True, timeout=15, cwd=AGENT_DIR,
+        )
+        _cache_clear_all()
+        if result.returncode == 0:
+            return {"ok": True, "removed": name}
+        return {"ok": False, "error": result.stdout.strip() or result.stderr.strip()}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "Remove timed out (15s)"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 def _valid_service_name(name):
