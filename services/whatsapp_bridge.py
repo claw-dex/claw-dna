@@ -4,7 +4,7 @@ WhatsApp Bridge Service
 =======================
 Bridges the agent's inbox/outbox with WhatsApp via the Business Cloud API.
 
-- Runs a webhook HTTP server on port 8082 to receive incoming WhatsApp messages
+- Runs a webhook HTTP server on port 8083 to receive incoming WhatsApp messages
 - Polls outbox.json every 60s and sends unsent messages to WhatsApp
 - Tracks sent message hashes to prevent duplicates (survives restarts)
 - Auto-discovers owner from the first message received
@@ -17,7 +17,7 @@ Setup:
        uv run python scripts/keepass.py store --title "WHATSAPP_PHONE_NUMBER_ID" --username whatsapp --password "<phone_number_id>"
        uv run python scripts/keepass.py store --title "WHATSAPP_VERIFY_TOKEN" --username whatsapp --password "<your_secret>"
   3. Start via service manager:
-       uv run python scripts/service-manager.py start whatsapp_bridge 8082 -- uv run python services/whatsapp_bridge.py
+       uv run python scripts/service-manager.py start whatsapp_bridge 8083 -- uv run python services/whatsapp_bridge.py
   4. Configure the webhook URL in Meta Developer Portal:
        https://<public-url>/system/whatsapp-bridge/webhook
      with your chosen verify token
@@ -77,7 +77,7 @@ KEEPASS_WHATSAPP_CHAT_ID         = "WHATSAPP_CHAT_ID"
 KEEPASS_WHATSAPP_OWNER_USERNAME  = "WHATSAPP_OWNER_USERNAME"
 
 GRAPH_API_BASE = "https://graph.facebook.com/v21.0"
-WEBHOOK_PORT   = 8082
+WEBHOOK_PORT   = 8083
 WEBHOOK_PATH   = "/system/whatsapp-bridge/webhook"
 OUTBOX_INTERVAL = 60   # How often to check outbox (seconds)
 STATE_JSON = BASE / "memory" / "state.json"
@@ -468,9 +468,11 @@ def register_caddy_route():
         }],
     }
     try:
-        # Add route to the first server's routes
-        resp = requests.post(
-            f"{CADDY_ADMIN}/config/apps/http/servers/srv0/routes",
+        # First, remove any stale route with the same ID (ignore errors)
+        requests.delete(f"{CADDY_ADMIN}/id/{CADDY_ROUTE_ID}", timeout=5)
+        # Insert route at position 0 so it takes priority over catch-all groups
+        resp = requests.put(
+            f"{CADDY_ADMIN}/config/apps/http/servers/srv0/routes/0",
             json=route,
             timeout=10,
         )
@@ -1025,7 +1027,7 @@ def main():
             "  uv run python scripts/keepass.py store --title 'WHATSAPP_VERIFY_TOKEN' --username whatsapp --password '<your_secret>'\n"
             "\n"
             "Step 4: Start the bridge\n"
-            "  uv run python scripts/service-manager.py start whatsapp_bridge 8082 -- uv run python services/whatsapp_bridge.py\n"
+            "  uv run python scripts/service-manager.py start whatsapp_bridge 8083 -- uv run python services/whatsapp_bridge.py\n"
             "\n"
             "Step 5: Configure the webhook in Meta Developer Portal\n"
             "  → Webhook URL: https://<public-url>/system/whatsapp-bridge/webhook\n"

@@ -14,7 +14,7 @@
   },
   "whatsapp_bridge": {
     "pid": null,
-    "port": 8082,
+    "port": 8083,
     "command": [
       "uv",
       "run",
