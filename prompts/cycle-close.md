@@ -1,5 +1,7 @@
 # Cycle Close Checklist
 
+> **Enum Reference:** See `prompts/enum.md` for all valid values of `type`, `category`, `status`, and other enum fields.
+
 Run this checklist at the end of every cycle, regardless of cycle type.
 
 ## FAST PATH — Use cycle-close.py (recommended)
@@ -8,8 +10,8 @@ Instead of running steps 1–3 manually, use the automation script:
 
 ```bash
 uv run python scripts/cycle-close.py \
-    --type evolve \           # evolve | goal | self-heal
-    --category efficiency \   # required for evolve cycles
+    --type evolve \           # evolve | goal | self-heal (see prompts/enum.md → Cycle Type)
+    --category efficiency \   # required for evolve cycles (see prompts/enum.md → Evolution Category)
     --summary "One or two sentence summary of what was done and why it matters" \
     --actions "Action 1" "Action 2" "Action 3"
 ```

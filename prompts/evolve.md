@@ -1,5 +1,7 @@
 # EVOLVE: Self-Improvement Cycle
 
+> **Enum Reference:** See `prompts/enum.md` for all valid values of `category`, `status`, and `type` used in evolve cycles.
+
 No task is assigned. Your goal: become a more capable agent.
 
 ## Step 1: Run Cycle Start
@@ -24,6 +26,23 @@ Then skim:
 - Failure patterns from journal entries (auto memory `failures.md`) — fix patterns, not symptoms
 - Last ~5 journal entries — don't repeat recent work
 - Current capabilities (auto memory `capabilities.md`) — know what already exists
+
+## Step 1.5: Check for Human Escalation
+
+Read `/agent/memory/state.json` and check if the `status` field equals `"waiting_for_human"`.
+
+If status is `"waiting_for_human"`:
+
+1. Extract the `last_cycle_summary` field from state.json to use as the call message
+2. Run `uv run python scripts/callmebot.py --json status` to check if configured and not rate-limited
+3. If `can_call_now` is true, make a voice call to escalate to the user:
+   ```bash
+   uv run python scripts/callmebot.py call --text "<last_cycle_summary from state.json>"
+   ```
+4. Then proceed with the cycle normally
+
+If CallMeBot is not configured or is rate-limited, skip the call and proceed with the cycle.
+See the `callmebot` skill for setup instructions and full details.
 
 ## Step 2: Check & Fix Tab Errors
 
@@ -93,6 +112,8 @@ If you override, document why in the cycle-close journal entry.
 - Improve memory file formats so future cycles parse faster
 
 ## Improvement Categories
+
+> See `prompts/enum.md` → Evolution Category for complete category definitions and maturity penalties.
 
 ### Reliability
 Fix bugs in portal, server, or memory system. Add error handling, graceful degradation.

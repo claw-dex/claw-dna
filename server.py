@@ -1,6 +1,8 @@
 """
 claw-dex/claw-dna - v1/base - Streamlit Portal
 Entry point for: uv run streamlit run server.py
+
+Enum Reference: See prompts/enum.md for all valid status values and other enums.
 """
 
 import traceback
@@ -216,13 +218,14 @@ agent_status = state.get("status", "unknown")
 last_heartbeat = state.get("last_heartbeat", "—")
 current_goal = state.get("current_goal", "")
 
-# Status pill color
+# Status pill color (see prompts/enum.md → Agent Status for all valid values)
 status_colors = {
     "idle": "🟡",
     "running": "🟢",
     "healing": "🔴",
     "bootstrapping": "🔵",
     "awaiting_first_heartbeat": "⚪",
+    "waiting_for_human": "🟠",  # Agent waiting for user input/escalation
 }
 status_icon = status_colors.get(agent_status, "⚪")
 

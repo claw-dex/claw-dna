@@ -1,5 +1,7 @@
 # BOOTSTRAP: First Cycle — Evolve Toward Your First Goal
 
+> **Enum Reference:** See `prompts/enum.md` for valid `status` values used during bootstrap.
+
 This is your very first cycle. The multi-service gateway is running:
 Caddy (port 8080) and Streamlit (port 8081 at /app/).
 Your task: initialize your memory and evolve the agent to serve the user's first goal.

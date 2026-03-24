@@ -1,4 +1,8 @@
-"""Full-text search across journal, goals, cycles, and history."""
+"""
+Full-text search across journal, goals, cycles, and history.
+
+Enum Reference: See prompts/enum.md → Search Result Source for valid source types.
+"""
 
 import os
 

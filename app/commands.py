@@ -1,4 +1,8 @@
-"""Tab: Command Center — goal/message form, scheduled tasks, goals, inbox/outbox, command history."""
+"""
+Tab: Command Center — goal/message form, scheduled tasks, goals, inbox/outbox, command history.
+
+Enum Reference: See prompts/enum.md → Message Type for valid command types, Goal Status for status values.
+"""
 
 import html as _html
 from datetime import datetime, timezone
@@ -6,6 +10,9 @@ from datetime import datetime, timezone
 import streamlit as st
 
 # ── Status / type styling constants ──────────────────────────
+# See prompts/enum.md for complete enum definitions
+
+# Goal Status colors and icons
 _STATUS_COLORS = {
     "completed": "#4CAF50", "failed": "#F44336",
     "in_progress": "#2196F3", "in-progress": "#2196F3", "pending": "#FF9800",
@@ -14,8 +21,30 @@ _STATUS_ICONS = {
     "completed": "✅", "failed": "❌",
     "in_progress": "🔄", "in-progress": "🔄", "pending": "⏳",
 }
-_TYPE_COLORS = {"goal": "#2196F3", "message": "#9C27B0", "bash": "#FF9800"}
-_TYPE_ICONS = {"goal": "🎯", "message": "💬", "bash": "⚡"}
+
+# Message Type colors and icons (inbox + outbox)
+_TYPE_COLORS = {
+    # Inbox types
+    "goal": "#2196F3",
+    "message": "#9C27B0",
+    "bash": "#FF9800",
+    # Outbox types
+    "response": "#4CAF50",
+    "needs_human": "#F44336",
+    "goal_complete": "#4CAF50",
+    "goal_failed": "#F44336",
+}
+_TYPE_ICONS = {
+    # Inbox types
+    "goal": "🎯",
+    "message": "💬",
+    "bash": "⚡",
+    # Outbox types
+    "response": "📤",
+    "needs_human": "🆘",
+    "goal_complete": "✅",
+    "goal_failed": "❌",
+}
 
 
 def _badge(text, color):

@@ -1,5 +1,7 @@
 # SELF-HEAL: Web Portal is Unhealthy
 
+> **Enum Reference:** See `prompts/enum.md` for valid `status` and `type` values used during self-heal cycles.
+
 TOP PRIORITY. Do not work on any other goal until the portal is healthy.
 The portal is your only communication channel with the user.
 

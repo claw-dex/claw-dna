@@ -1,5 +1,7 @@
 # Agent Web Portal — Architecture Reference
 
+> **Enum Reference:** See `prompts/enum.md` for all enum values (agent status, message types, etc.) used in the portal.
+
 ## Multi-Service Gateway (v1)
 
 ```

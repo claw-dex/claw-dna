@@ -27,7 +27,7 @@ Usage:
     uv run python scripts/cycle-close.py --help
 
 Required flags:
-    --type TYPE           Cycle type: evolve | goal | self-heal
+    --type TYPE           Cycle type: evolve | goal | self-heal (see prompts/enum.md → Cycle Type)
     --summary TEXT        1-2 sentence summary of what was done and why it matters
 
 Optional flags:

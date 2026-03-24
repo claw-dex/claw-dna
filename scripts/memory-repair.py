@@ -13,6 +13,8 @@ Usage:
     python3 memory-repair.py --json       # output machine-readable JSON
 
 Exit code: 0 = all ok (or repaired), 1 = unrecoverable issues remain.
+
+Enum Reference: See prompts/enum.md for default status values used in repairs.
 """
 
 import json

@@ -1,4 +1,8 @@
-"""State and services loaders."""
+"""
+State and services loaders.
+
+Enum Reference: See prompts/enum.md → Agent Status for valid status values.
+"""
 
 import os
 import time

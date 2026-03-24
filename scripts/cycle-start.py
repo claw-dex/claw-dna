@@ -19,6 +19,8 @@ Usage:
 
 Exit codes: 0 = healthy, 1 = memory issues found (check output).
 
+Enum Reference: See prompts/enum.md for agent status values and other enums.
+
 Added in cycle 14 (efficiency): replaces two separate uv run invocations at cycle start.
 Enhanced in cycle 129 (efficiency): inlined journal-archive logic — saves ~1.5s uv-run startup when auto-archive triggers (every ~5 cycles).
 """

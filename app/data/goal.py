@@ -1,4 +1,8 @@
-"""Goal loaders and stats."""
+"""
+Goal loaders and stats.
+
+Enum Reference: See prompts/enum.md → Goal Status for valid status values.
+"""
 
 from app.data._cache import _mfile_cache, _mmfile_cache
 from app.shared import GOALS_PATH, MEMORY_DIR

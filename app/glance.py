@@ -8,11 +8,22 @@ import streamlit as st
 from app.data import load_goals, load_inbox, load_outbox, load_scheduled_tasks
 
 # ── Styling constants (local copy to avoid coupling to commands.py) ──
+# See prompts/enum.md for complete enum definitions
 _STATUS_COLORS = {
     "completed": "#4CAF50", "failed": "#F44336",
     "in_progress": "#2196F3", "in-progress": "#2196F3", "pending": "#FF9800",
 }
-_TYPE_COLORS = {"goal": "#2196F3", "message": "#9C27B0", "bash": "#FF9800"}
+_TYPE_COLORS = {
+    # Inbox types
+    "goal": "#2196F3",
+    "message": "#9C27B0",
+    "bash": "#FF9800",
+    # Outbox types
+    "response": "#4CAF50",
+    "needs_human": "#F44336",
+    "goal_complete": "#4CAF50",
+    "goal_failed": "#F44336",
+}
 
 MAX_ITEMS = 10
 CONTAINER_HEIGHT = 320

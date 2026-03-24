@@ -5,10 +5,13 @@
 #  Called externally via: docker exec [container-name] /agent/heartbeat.sh
 #
 #  Prompt hierarchy:
-#    1. First cycle (no state) → BOOTSTRAP prompt (build portal)
-#    2. Portal unhealthy       → SELF-HEAL prompt (fix portal)
-#    3. User command in inbox  → GOAL prompt (do user's task)
-#    4. Otherwise              → EVOLVE prompt (self-improve)
+#    1. First cycle (no state)          → BOOTSTRAP prompt (build portal)
+#    2. Portal unhealthy                → SELF-HEAL prompt (fix portal)
+#    3. No evolve in last 5 cycles      → EVOLVE prompt (prevent starvation)
+#    4. Last 5 cycles all evolve        → GOAL prompt (prevent evolve loop)
+#    5. User command in inbox           → GOAL prompt (do user's task)
+#    6. Active goal in progress         → GOAL prompt (continue working)
+#    7. Otherwise                       → EVOLVE prompt (self-improve)
 #
 #  Uses:
 #    --system-prompt         → fixed context (constitution, memory, container info)
@@ -163,7 +166,19 @@ select_prompt() {
         return
     fi
 
-    # 5. User command waiting in inbox or active goal in progress
+    # 5. Force goal if last 5 cycles are all evolve (prevents evolve loop starvation)
+    local all_evolve
+    all_evolve=$(jq -r '
+        if length < 5 then false
+        else (. | reverse | .[0:5] | all(.type == "evolve"))
+        end
+    ' /agent/memory/cycles.json 2>/dev/null || echo false)
+    if [ "$all_evolve" = "true" ]; then
+        echo "goal"
+        return
+    fi
+
+    # 6. User command waiting in inbox or active goal in progress
     #    (only reached after bootstrap is done and server is healthy)
     local inbox_size
     inbox_size=$(jq 'length' /agent/messages/inbox.json 2>/dev/null || echo 0)
@@ -180,7 +195,7 @@ select_prompt() {
         return
     fi
 
-    # 6. All clear — self-evolve
+    # 7. All clear — self-evolve
     echo "evolve"
 }
 

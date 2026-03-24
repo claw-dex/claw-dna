@@ -1,4 +1,8 @@
-"""Action suggestions for the Agent Overview tab."""
+"""
+Action suggestions for the Agent Overview tab.
+
+Enum Reference: See prompts/enum.md → Suggestion Priority, Suggestion Category, Evolution Category.
+"""
 
 import os
 from datetime import datetime, timezone

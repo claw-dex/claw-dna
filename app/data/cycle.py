@@ -1,4 +1,8 @@
-"""Cycle loaders — cycles, velocity, cycle logs, balance, activity."""
+"""
+Cycle loaders — cycles, velocity, cycle logs, balance, activity.
+
+Enum Reference: See prompts/enum.md → Cycle Status, Cycle Type, Evolution Category.
+"""
 
 import glob
 import json

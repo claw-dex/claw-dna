@@ -1,5 +1,7 @@
 # GOAL: Process Inbox or Continue In-Progress Goals
 
+> **Enum Reference:** See `prompts/enum.md` for all valid values of `status`, `type`, and other enum fields used in this prompt.
+
 This prompt is triggered when either:
 - **New commands** are waiting in /agent/messages/inbox.json, OR
 - **In-progress goals** exist in /agent/memory/goal.json (inbox may be empty)
@@ -28,7 +30,7 @@ Commands arrive via POST /api/command with this schema:
 {"type": "<string>", "content": "<string>", "timestamp": "<ISO 8601>"}
 ```
 
-Three command types exist:
+Three command types exist (see `prompts/enum.md` → Message Type):
 
 - **"goal"** — a trackable objective; queued in /agent/messages/inbox.json.
   You are responsible for saving it to /agent/memory/goal.json (see Goal Tracking below)
@@ -145,7 +147,7 @@ goals. If the intent is the same, skip adding it and work on the existing goal i
 
 ### Goal Status Lifecycle
 
-You MUST update goal status in `/agent/memory/goal.json` as you work:
+You MUST update goal status in `/agent/memory/goal.json` as you work (see `prompts/enum.md` → Goal Status):
 
 - **"pending"** → goal received but not yet started
 - **"in-progress"** → you are actively working on this goal (set when you begin)
