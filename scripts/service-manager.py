@@ -66,6 +66,64 @@ def _kill_pid(name, pid):
         return False
 
 
+def _find_orphan_pids(command, exclude_pids=None):
+    """Find PIDs of running processes matching the service command.
+
+    Returns a list of (pid, cmdline) tuples.
+    """
+    if not command:
+        return []
+
+    # Extract identifying token from the command list
+    non_flag = [a for a in command if not a.startswith("-")]
+    pattern = None
+    # Prefer: first non-interpreter arg ending with a script extension
+    for arg in non_flag[1:]:
+        if arg.endswith((".py", ".sh", ".js")):
+            pattern = arg
+            break
+    # Fallback: first non-interpreter arg containing "/" (a path)
+    if not pattern:
+        for arg in non_flag[1:]:
+            if "/" in arg:
+                pattern = arg
+                break
+    # Last resort: second non-flag token
+    if not pattern:
+        pattern = non_flag[1] if len(non_flag) >= 2 else (non_flag[0] if non_flag else None)
+    if not pattern:
+        return []
+
+    try:
+        result = subprocess.run(
+            ["pgrep", "-af", pattern],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return []
+
+    exclude = exclude_pids or set()
+    my_pid = os.getpid()
+    orphans = []
+    for line in result.stdout.strip().split("\n"):
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) < 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        cmdline = parts[1]
+        if pid == my_pid or pid == 1 or pid in exclude:
+            continue
+        if cmdline.startswith("pgrep ") or "service-manager.py" in cmdline:
+            continue
+        orphans.append((pid, cmdline))
+    return orphans
+
+
 def _port_in_use(port):
     """Check if a port is in use via curl."""
     try:
@@ -77,6 +135,46 @@ def _port_in_use(port):
         return r.stdout.strip() != "000"
     except Exception:
         return False
+
+
+def _find_port_holders(port):
+    """Find PIDs holding a port using lsof. Returns list of (pid, cmdline) tuples."""
+    try:
+        r = subprocess.run(
+            ["lsof", "-ti", f":{port}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            return []
+        pids = set()
+        for line in r.stdout.strip().split("\n"):
+            try:
+                pids.add(int(line.strip()))
+            except ValueError:
+                continue
+        if not pids:
+            return []
+        # Get command lines for all PIDs
+        ps = subprocess.run(
+            ["ps", "-p", ",".join(str(p) for p in pids), "-o", "pid=,args="],
+            capture_output=True, text=True, timeout=5,
+        )
+        holders = []
+        if ps.returncode == 0:
+            for line in ps.stdout.strip().split("\n"):
+                parts = line.strip().split(None, 1)
+                if len(parts) == 2:
+                    try:
+                        holders.append((int(parts[0]), parts[1]))
+                    except ValueError:
+                        continue
+        # Include any PIDs that ps didn't report
+        reported = {h[0] for h in holders}
+        for pid in pids - reported:
+            holders.append((pid, "unknown"))
+        return holders
+    except Exception:
+        return []
 
 
 def _update_state_services(services):
@@ -139,9 +237,25 @@ def cmd_start(name, port, command):
         print(f"Error: '{name}' is already running (PID {existing_pid})")
         sys.exit(1)
 
+    # Check for orphan processes matching the command
+    orphans = _find_orphan_pids(command, exclude_pids={existing_pid} if isinstance(existing_pid, int) else None)
+    if orphans:
+        print(f"Error: found existing process(es) matching '{name}':")
+        for pid, cmdline in orphans:
+            print(f"  PID {pid}: {cmdline}")
+        print(f"\nKill them manually (e.g. kill <pid>) before starting.")
+        sys.exit(1)
+
     # Check if port in use
     if port is not None and _port_in_use(port):
-        print(f"Error: port {port} is already in use")
+        holders = _find_port_holders(port)
+        if holders:
+            print(f"Error: port {port} is already in use:")
+            for hpid, hcmd in holders:
+                print(f"  PID {hpid}: {hcmd}")
+        else:
+            print(f"Error: port {port} is already in use")
+        print(f"\nKill the process(es) holding the port before starting.")
         sys.exit(1)
 
     # Start the process
@@ -251,6 +365,27 @@ def cmd_restart(name):
     if was_running:
         if not _kill_pid(name, pid):
             sys.exit(1)
+
+    # Check for orphan processes
+    orphans = _find_orphan_pids(command, exclude_pids={pid} if isinstance(pid, int) else None)
+    if orphans:
+        print(f"Error: orphan process(es) still running for '{name}':")
+        for opid, cmdline in orphans:
+            print(f"  PID {opid}: {cmdline}")
+        print(f"\nKill them manually before restarting.")
+        sys.exit(1)
+
+    # Check if port in use (could be held by an unrelated process)
+    if port is not None and _port_in_use(port):
+        holders = _find_port_holders(port)
+        if holders:
+            print(f"Error: port {port} is already in use:")
+            for hpid, hcmd in holders:
+                print(f"  PID {hpid}: {hcmd}")
+        else:
+            print(f"Error: port {port} is already in use")
+        print(f"\nKill the process(es) holding the port before restarting.")
+        sys.exit(1)
 
     # Start the service with the stored command
     # Reuse existing log paths if available, otherwise generate new ones
