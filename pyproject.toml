@@ -14,8 +14,6 @@ dependencies = [
     "plotly",
     "claude-agent-sdk",
     "pykeepass",
-    "memvid-sdk",
-    "fastembed",
 ]
 
 [tool.uv]

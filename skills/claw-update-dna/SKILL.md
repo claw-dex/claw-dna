@@ -239,17 +239,43 @@ git stash pop
 git log --oneline -5
 git status
 
-# 2. If pyproject.toml changed, sync dependencies
-uv sync
+# 2. Check what changed — this informs Steps 8 and 9
+git diff HEAD@{1}..HEAD --name-only
 
-# 3. If portal files changed, verify portal health
+# 3. If seed/install.sh changed → proceed to Step 8
+# 4. If pyproject.toml changed → proceed to Step 9
+
+# 5. If portal files changed, verify portal health
 curl -s http://localhost:8081/app/_stcore/health
 
-# 4. If portal is broken, trigger a restart
+# 6. If portal is broken, trigger a restart
 bash scripts/server-restart.sh --verify
 ```
 
-### Step 8: Sync Dependencies (if needed)
+### Step 8: Install New OS-Level Dependencies (if needed)
+
+If `seed/install.sh` was modified by the pull, new OS-level dependencies have been introduced and must be installed.
+
+**Detection:**
+
+```bash
+# Check if seed/install.sh was changed in the incoming commits
+git diff HEAD@{1}..HEAD --name-only | grep -q 'seed/install.sh'
+```
+
+If the file was changed:
+
+```bash
+# Re-execute the install script to pick up new dependencies
+chmod +x seed/install.sh
+bash seed/install.sh
+```
+
+> **Why re-run the entire script:** `install.sh` is designed to be idempotent — already-installed tools will be skipped or quickly verified. Re-running the full script is simpler and safer than trying to extract and execute only the new portions.
+
+> **Edge case — partial failure:** If the script fails midway, inspect the output to identify which dependency failed. Fix the issue (e.g., network, permissions) and re-run. Already-installed dependencies will not be affected.
+
+### Step 9: Sync Python Dependencies (if needed)
 
 If `pyproject.toml` was modified (either by the pull or in the stash):
 
@@ -292,6 +318,7 @@ git reset --hard origin/v1/base
 | Stash succeeds but files remain dirty | `git checkout -- <files>` — they're saved in the stash already |
 | `cannot rebase: unstaged changes` | Clean remaining dirty files with `git checkout --` before rebase |
 | Portal broken after pull | `bash scripts/server-restart.sh --verify` |
+| `seed/install.sh` changed | Re-run `bash seed/install.sh` to install new OS-level dependencies |
 | `pyproject.toml` changed | Run `uv sync` immediately |
 | Diverged history (force-push on remote) | `git fetch origin && git reset --hard origin/v1/base` (destructive — confirm with user) |
 | Authentication failure on fetch | Check GitHub credentials / SSH keys — may need human intervention |

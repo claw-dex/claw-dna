@@ -69,25 +69,6 @@ from pathlib import Path
 
 MEMORY = Path("/agent/memory")
 SCRIPTS = Path("/agent/scripts")
-MV2_PATH = MEMORY / "long_term_memory.mv2"
-EMBED_MODEL = "BAAI/bge-small-en-v1.5"
-
-_embedder = None
-
-
-def get_embedder():
-    """Lazy-load fastembed TextEmbedding model (cached across calls)."""
-    global _embedder
-    if _embedder is None:
-        from fastembed import TextEmbedding
-        _embedder = TextEmbedding(EMBED_MODEL)
-    return _embedder
-
-
-def embed_text(text):
-    """Embed a single text string, returns float list."""
-    model = get_embedder()
-    return list(model.embed([text]))[0].tolist()
 
 
 # ── Inlined: normalize_cycles logic ─────────────────────────────────────────
@@ -469,73 +450,34 @@ def _sync_auto_memory() -> None:
         print(f"  ⚠ auto memory sync failed (non-fatal): {e}")
 
 
-# ── Long-term memory (memvid) ────────────────────────────────────────────────
-
-def _compose_entry_text(entry: dict) -> str:
-    """Compose readable text from a journal entry for semantic embedding."""
-    parts = []
-    goal = entry.get("goal", "")
-    if goal:
-        parts.append(f"Goal: {goal}")
-    summary = entry.get("summary", "")
-    if summary and summary != goal:
-        parts.append(f"Summary: {summary}")
-    actions = entry.get("actions", [])
-    if actions:
-        parts.append("Actions: " + "; ".join(actions))
-    category = entry.get("category", "")
-    if category:
-        parts.append(f"Category: {category}")
-    learnings = entry.get("learnings", {})
-    if isinstance(learnings, dict) and learnings:
-        for key in ("approach", "key_decisions", "reusable_patterns", "pitfalls"):
-            val = learnings.get(key)
-            if val:
-                parts.append(f"{key.replace('_', ' ').title()}: {val}")
-    return "\n".join(parts)
-
+# ── Long-term memory (memvid via memory-ingest.py) ───────────────────────────
 
 def _store_to_memvid(journal_entry: dict) -> None:
-    """Store a journal entry into long-term semantic memory (memvid).
+    """Store a journal entry into long-term semantic memory via memory-ingest.py.
 
-    Non-fatal: if memvid operations fail, prints a warning but exits normally.
+    Calls memory-ingest.py --append-json with the journal entry JSON. Uses the memvid
+    CLI with bge-base embeddings (no Python SDK or fastembed dependency needed).
+
+    Non-fatal: if the ingest fails, prints a warning but exits normally.
     """
-    try:
-        import memvid_sdk
-    except ImportError:
-        print("  ⚠ memvid — not installed, skipping long-term memory store")
+    ingest_script = SCRIPTS / "memory-ingest.py"
+    if not ingest_script.exists():
+        print("  ⚠ memvid — memory-ingest.py not found, skipping long-term memory store")
         return
 
+    cycle = journal_entry.get("cycle", "?")
+    entry_json = json.dumps(journal_entry)
+
     try:
-        mem = memvid_sdk.use('basic', str(MV2_PATH), mode='auto')
-        cycle = journal_entry.get("cycle", 0)
-        summary = journal_entry.get("summary", "")
-        ctype = journal_entry.get("type", "")
-        status = journal_entry.get("status", "")
-        category = journal_entry.get("category", "")
-        timestamp = journal_entry.get("timestamp", now_iso())
-
-        text = _compose_entry_text(journal_entry)
-        tags = [t for t in [ctype, category, status] if t]
-
-        document = {
-            "title": f"Cycle {cycle}: {summary[:100]}",
-            "label": ctype,
-            "text": text,
-            "metadata": {
-                "date": timestamp,
-                "cycle": str(cycle),
-                "type": ctype,
-                "status": status,
-                "category": category,
-            },
-            "tags": tags,
-        }
-
-        embedding = embed_text(text)
-        mem.put_many([document], embeddings=[embedding])
-        mem.seal()
-        print(f"  ✓ memvid — stored cycle {cycle} to long_term_memory.mv2")
+        result = subprocess.run(
+            [sys.executable, str(ingest_script), "--append-json", entry_json, "--quiet"],
+            capture_output=True, text=True, cwd="/agent", timeout=60,
+        )
+        if result.returncode == 0:
+            print(f"  ✓ memvid — stored cycle {cycle} to long_term_memory.mv2")
+        else:
+            stderr = result.stderr.strip()[:120]
+            print(f"  ⚠ memvid store failed (non-fatal): {stderr}")
     except Exception as e:
         print(f"  ⚠ memvid store failed (non-fatal): {e}")
 

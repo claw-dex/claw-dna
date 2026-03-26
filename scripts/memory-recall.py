@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-memory-recall.py — Query long-term semantic memory (memvid).
+memory-recall.py — Query long-term semantic memory (memvid CLI).
 
 Searches the agent's long-term memory store for entries matching a
-natural-language question. Returns relevant context without invoking an LLM.
+natural-language question using the `memvid` CLI (hybrid lexical + semantic).
 
 Usage:
     uv run python scripts/memory-recall.py "What did I work on last week?"
@@ -16,38 +16,34 @@ Required:
     QUESTION          Natural-language query (first positional argument)
 
 Optional:
+    --mv2 PATH        Path to the .mv2 file (default: /agent/memory/long_term_memory.mv2)
     --k N             Number of results to return (default: 5)
     --json            Output as JSON instead of formatted text
     --timeline        Show timeline entries instead of semantic search
-    --since DATE      Filter timeline entries since DATE (ISO format)
+    --since DATE      Filter entries since DATE (ISO format or unix timestamp)
+    --until DATE      Filter entries until DATE (ISO format or unix timestamp)
 
-Exit codes: 0 = success, 1 = error (missing args, file not found, import error)
+Exit codes: 0 = success, 1 = error (missing args, file not found, CLI error)
 """
 
 import json
+import shutil
+import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 MEMORY = Path("/agent/memory")
 MV2_PATH = MEMORY / "long_term_memory.mv2"
-EMBED_MODEL = "BAAI/bge-small-en-v1.5"
-
-_embedder = None
+MEMVID_BIN = "memvid"
 
 
-def get_embedder():
-    """Lazy-load fastembed TextEmbedding model (cached across calls)."""
-    global _embedder
-    if _embedder is None:
-        from fastembed import TextEmbedding
-        _embedder = TextEmbedding(EMBED_MODEL)
-    return _embedder
-
-
-def embed_query(text):
-    """Embed a single query string, returns float list."""
-    model = get_embedder()
-    return list(model.embed([text]))[0].tolist()
+def _check_memvid():
+    """Ensure the memvid CLI is available."""
+    if not shutil.which(MEMVID_BIN):
+        print("ERROR: memvid CLI not found. Install with:", file=sys.stderr)
+        print("  curl -fsSL https://raw.githubusercontent.com/memvid/preflight-installer/main/install.sh | bash", file=sys.stderr)
+        sys.exit(1)
 
 
 def parse_args(argv):
@@ -55,9 +51,11 @@ def parse_args(argv):
     result = {
         "question": None,
         "k": 5,
+        "mv2": None,
         "json_mode": False,
         "timeline": False,
         "since": None,
+        "until": None,
         "help": False,
     }
     i = 0
@@ -72,6 +70,9 @@ def parse_args(argv):
             except ValueError:
                 print(f"ERROR: --k must be an integer, got: {args[i]!r}", file=sys.stderr)
                 sys.exit(1)
+        elif a == "--mv2" and i + 1 < len(args):
+            i += 1
+            result["mv2"] = args[i]
         elif a == "--json":
             result["json_mode"] = True
         elif a == "--timeline":
@@ -79,10 +80,53 @@ def parse_args(argv):
         elif a == "--since" and i + 1 < len(args):
             i += 1
             result["since"] = args[i]
+        elif a == "--until" and i + 1 < len(args):
+            i += 1
+            result["until"] = args[i]
         elif not a.startswith("--") and result["question"] is None:
             result["question"] = a
         i += 1
     return result
+
+
+def _run_cmd(cmd):
+    """Run a memvid CLI command, return parsed JSON output."""
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        print(f"ERROR: {' '.join(cmd[:3])} failed: {result.stderr.strip()}", file=sys.stderr)
+        sys.exit(1)
+    return json.loads(result.stdout)
+
+
+def _parse_date_to_unix(value):
+    """Convert a date string (ISO format) or integer to a unix timestamp string.
+
+    Returns the string representation of the unix timestamp, or exits on error.
+    """
+    try:
+        return str(int(value))
+    except ValueError:
+        pass
+    try:
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return str(int(dt.timestamp()))
+    except ValueError:
+        print(f"ERROR: Invalid date format: {value!r}. Use ISO format (2026-03-25) or unix timestamp.", file=sys.stderr)
+        sys.exit(1)
+
+
+def _clean_snippet(text):
+    """Strip internal memvid metadata lines from snippet text."""
+    lines = []
+    for line in text.splitlines():
+        if line.startswith(("uri: mv2://", "tags: ", "labels: ",
+                            "category: ", "extractous_metadata:", "memvid.",
+                            "metadata: {")):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
 
 
 def main():
@@ -97,45 +141,40 @@ def main():
         print("Usage: uv run python scripts/memory-recall.py \"your question here\"", file=sys.stderr)
         sys.exit(1)
 
-    if not MV2_PATH.exists():
-        print(f"ERROR: {MV2_PATH} not found. Run at least one cycle-close to create it.", file=sys.stderr)
+    mv2 = Path(opts["mv2"]) if opts["mv2"] else MV2_PATH
+    if not mv2.exists():
+        print(f"ERROR: {mv2} not found. Run at least one cycle-close to create it.", file=sys.stderr)
         sys.exit(1)
 
-    try:
-        import memvid_sdk
-    except ImportError:
-        print("ERROR: memvid-sdk not installed. Run: uv add memvid-sdk", file=sys.stderr)
-        sys.exit(1)
+    _check_memvid()
 
-    try:
-        mem = memvid_sdk.use('basic', str(MV2_PATH), mode='open')
-    except Exception as e:
-        print(f"ERROR: Failed to open {MV2_PATH}: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    try:
-        if opts["timeline"]:
-            _run_timeline(mem, opts)
-        else:
-            _run_query(mem, opts)
-    finally:
-        mem.seal()
+    if opts["timeline"]:
+        _run_timeline(opts, mv2)
+    else:
+        _run_query(opts, mv2)
 
 
-def _run_query(mem, opts):
-    """Run semantic search query using fastembed vectors + mem.find()."""
+def _run_query(opts, mv2):
+    """Run hybrid search via memvid CLI."""
     question = opts["question"]
     k = opts["k"]
 
-    try:
-        qvec = embed_query(question)
-        result = mem.find(question, k=k, query_embedding=qvec)
-    except Exception:
-        # Fallback to lexical search if vector search fails
-        result = mem.find(question, k=k)
+    cmd = [
+        MEMVID_BIN, "find", str(mv2),
+        "--query", question,
+        "--top-k", str(k),
+        "--json",
+    ]
+    if opts.get("since"):
+        cmd.extend(["--since", _parse_date_to_unix(opts["since"])])
+    if opts.get("until"):
+        cmd.extend(["--until", _parse_date_to_unix(opts["until"])])
+    data = _run_cmd(cmd)
+    hits = data.get("hits", [])
+    total = data.get("metadata", {}).get("total_hits", len(hits))
 
-    hits = result.get("hits", []) if isinstance(result, dict) else []
-    total = result.get("total_hits", len(hits)) if isinstance(result, dict) else 0
+    # Sort by score descending
+    hits.sort(key=lambda h: h.get("score", 0), reverse=True)
 
     if opts["json_mode"]:
         items = []
@@ -144,8 +183,8 @@ def _run_query(mem, opts):
                 "rank": i,
                 "score": h.get("score"),
                 "title": h.get("title", ""),
-                "snippet": h.get("snippet", ""),
-                "tags": h.get("tags", []),
+                "snippet": _clean_snippet(h.get("text", "")),
+                "tags": h.get("metadata", {}).get("tags", []),
                 "frame_id": h.get("frame_id"),
             })
         print(json.dumps({
@@ -162,9 +201,9 @@ def _run_query(mem, opts):
             for i, h in enumerate(hits, 1):
                 score = h.get("score", 0)
                 title = h.get("title", "untitled")
-                snippet = h.get("snippet", "")
-                tags = h.get("tags", [])
-                # Extract cycle/date from tags or title
+                snippet = _clean_snippet(h.get("text", ""))
+                tags = h.get("metadata", {}).get("tags", [])
+
                 cycle_tag = next((t for t in tags if t.startswith("cycle:")), "")
                 date_tag = next((t for t in tags if t.startswith("date:")), "")
 
@@ -185,17 +224,21 @@ def _run_query(mem, opts):
         print(f"[MEMORY RECALL] {len(hits)} result(s) returned (total matches: {total}).")
 
 
-def _run_timeline(mem, opts):
-    """Show timeline entries."""
+def _run_timeline(opts, mv2):
+    """Show timeline entries via memvid CLI."""
     k = opts["k"]
     since = opts["since"]
 
-    kwargs = {"limit": k}
+    cmd = [MEMVID_BIN, "timeline", str(mv2), "--json", "--limit", str(k)]
     if since:
-        kwargs["since"] = since
+        cmd.extend(["--since", _parse_date_to_unix(since)])
+    if opts.get("until"):
+        cmd.extend(["--until", _parse_date_to_unix(opts["until"])])
 
-    entries = mem.timeline(**kwargs)
-    items = entries if isinstance(entries, list) else entries.get("entries", [])
+    items = _run_cmd(cmd)
+    # CLI returns a JSON array for timeline
+    if isinstance(items, dict):
+        items = items.get("entries", [])
 
     if opts["json_mode"]:
         print(json.dumps({
@@ -209,12 +252,11 @@ def _run_timeline(mem, opts):
               (f" (since {since})" if since else ""))
         print()
         for entry in items:
-            meta = entry.get("metadata", {})
-            cycle = meta.get("cycle", "?")
-            date = (meta.get("date", "") or "")[:16]
-            title = entry.get("title", "")[:80]
-            label = entry.get("label", "")
-            print(f"  [{date}] Cycle {cycle} ({label}): {title}")
+            ts = entry.get("timestamp", "")
+            frame_id = entry.get("frame_id", "?")
+            preview = entry.get("preview", "")[:80]
+            uri = entry.get("uri", "")
+            print(f"  [ts={ts}] Frame {frame_id}: {preview}")
         print(f"\n[MEMORY TIMELINE] Done.")
 
 

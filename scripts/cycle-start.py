@@ -37,24 +37,7 @@ from collections import Counter
 MEMORY = Path("/agent/memory")
 MESSAGES = Path("/agent/messages")
 MV2_PATH = MEMORY / "long_term_memory.mv2"
-EMBED_MODEL = "BAAI/bge-small-en-v1.5"
-
-_embedder = None
-
-
-def get_embedder():
-    """Lazy-load fastembed TextEmbedding model (cached across calls)."""
-    global _embedder
-    if _embedder is None:
-        from fastembed import TextEmbedding
-        _embedder = TextEmbedding(EMBED_MODEL)
-    return _embedder
-
-
-def embed_query(text):
-    """Embed a single query string, returns float list."""
-    model = get_embedder()
-    return list(model.embed([text]))[0].tolist()
+SCRIPTS = Path("/agent/scripts")
 
 # ── Flags ───────────────────────────────────────────────────────────────────────
 args = sys.argv[1:]
@@ -652,47 +635,35 @@ def _build_recall_query(inbox, goals) -> str:
     return ""
 
 
-def _fetch_old_memories(limit: int = 10, inbox=None, goals=None) -> list:
-    """Fetch memories older than 24h from long-term semantic memory (memvid).
+def _fetch_old_memories(limit: int = 50, inbox=None, goals=None) -> list:
+    """Fetch memories older than 24h from long-term semantic memory via memory-recall.py.
 
-    Uses fastembed pre-computed embeddings for semantic search, with lexical
-    fallback. Query is derived from inbox messages or the latest non-completed
-    goal. Returns a list of hit dicts.
-    Returns [] on any error or if memvid is not installed / file missing.
+    Shells out to memory-recall.py --json --until <24h_ago> for hybrid search.
+    Query is derived from inbox messages or the latest non-completed goal.
+    Returns a list of result dicts with keys: rank, score, title, snippet, tags.
+    Returns [] on any error or if memory-recall.py / .mv2 file is missing.
     """
     if not MV2_PATH.exists():
         return []
     query = _build_recall_query(inbox, goals)
     if not query:
         return []
-    try:
-        import memvid_sdk
-    except ImportError:
+    recall_script = SCRIPTS / "memory-recall.py"
+    if not recall_script.exists():
         return []
+    # Only recall entries older than 24 hours
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
+    until_ts = str(int(cutoff.timestamp()))
     try:
-        mem = memvid_sdk.use('basic', str(MV2_PATH), read_only=True)
-        try:
-            qvec = embed_query(query)
-            results = mem.find(query, k=50, query_embedding=qvec)
-        except Exception:
-            # Fallback to lexical search if vector search fails
-            results = mem.find(query, k=50)
-        hits = results.get("hits", []) if isinstance(results, dict) else []
-        # Filter for entries older than 24 hours
-        cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
-        old = []
-        for hit in hits:
-            meta = hit.get("metadata", {})
-            date_str = meta.get("date", "")
-            if not date_str:
-                continue
-            try:
-                entry_dt = datetime.datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-                if entry_dt < cutoff:
-                    old.append(hit)
-            except (ValueError, TypeError):
-                continue
-        return old[:limit]
+        result = subprocess.run(
+            [sys.executable, str(recall_script), query,
+             "--k", str(limit), "--until", until_ts, "--json"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            return []
+        data = json.loads(result.stdout)
+        return data.get("results", [])
     except Exception:
         return []
 
@@ -876,11 +847,10 @@ def print_full(repair, state, goals, cycles_info, failures, journal, capabilitie
     if old_memories:
         print(f"\n[LONG-TERM MEMORY]  {len(old_memories)} recalled (>24h old):")
         for m in old_memories:
-            meta = m.get("metadata", {})
-            cycle = meta.get("cycle", "?")
-            date = (meta.get("date", "") or "")[:16]
             title = m.get("title", "")[:80]
-            print(f"  [{date}] Cycle {cycle}: {title}")
+            score = m.get("score")
+            score_str = f" (score: {score:.4f})" if score is not None else ""
+            print(f"  {title}{score_str}")
 
     # ── Evolve Recommendation (only in evolve mode) ────────────────
     if EVOLVE_MODE:
@@ -994,9 +964,10 @@ def print_json_output(repair, state, goals, cycles_info, failures, journal, capa
         "capabilities_count": capabilities.get("total", 0),
         "evolve_suggestion": suggested,
         "old_memories": [
-            {"cycle": m.get("metadata", {}).get("cycle", "?"),
+            {"rank": m.get("rank"),
+             "score": m.get("score"),
              "title": m.get("title", "")[:100],
-             "date": m.get("metadata", {}).get("date", "")}
+             "snippet": m.get("snippet", "")[:200]}
             for m in (old_memories or [])
         ],
     }, indent=2))
@@ -1104,7 +1075,7 @@ def main():
     portal = portal_health()
 
     # Step 3b: Fetch long-term memories (once, shared across output modes)
-    old_memories = _fetch_old_memories(limit=10, inbox=inbox, goals=goals)
+    old_memories = _fetch_old_memories(limit=50, inbox=inbox, goals=goals)
 
     # Step 4: Output
     if JSON_MODE:

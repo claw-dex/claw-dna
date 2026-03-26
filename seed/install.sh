@@ -21,4 +21,9 @@ chmod +x "$SCRIPT_DIR/install_gcloud.sh"
 echo "==> Installing Google Workspace CLI"
 sudo npm install -g @googleworkspace/cli
 
+# ── Memvid CLI ────────────────────────────────────────────────
+echo "==> Installing Memvid CLI"
+chmod +x "$SCRIPT_DIR/install_memvid.sh"
+"$SCRIPT_DIR/install_memvid.sh"
+
 echo "==> Seed install complete"
