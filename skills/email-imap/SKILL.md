@@ -1,6 +1,6 @@
 ---
 name: email-imap
-description: IMAP email client for the agent. Fetches and verifies email via IMAP using credentials stored in KeePass (entry "Email IMAP"). Supports any IMAP provider — the server host is read from the KeePass entry's URL field. Use to verify email authentication (auth) or fetch inbox emails with filtering (fetch). Credentials are stored via the keepass skill with title "Email IMAP", username as email address, password as app/account password, and url as the IMAP server host. Example scenarios: checking for new unread emails, fetching recent inbox messages, or verifying IMAP connectivity.
+description: IMAP email client for the agent. Fetches, searches, deletes, and verifies email via IMAP using credentials stored in KeePass (entry "Email IMAP"). Supports any IMAP provider — the server host is read from the KeePass entry's URL field. Use to verify email authentication, fetch inbox emails with filtering, search by IMAP criteria, or delete messages by UID. Credentials are stored via the keepass skill with title "Email IMAP", username as email address, password as app/account password, and url as the IMAP server host.
 ---
 
 # email-imap
@@ -29,15 +29,20 @@ uv run python scripts/keepass.py store --title "Email IMAP" --username "you@exam
 | Subcommand | Description |
 |------------|-------------|
 | `auth` | Verify IMAP credentials by attempting login |
-| `fetch` | Fetch email headers (subject, from, date) |
+| `fetch` | Fetch email headers (uid, subject, from, date) |
+| `search` | Search email headers by text, subject, or sender |
+| `delete` | Delete one or more emails by UID |
 
 ## Flags
 
 | Flag | Applies to | Description |
 |------|-----------|-------------|
-| `--mailbox NAME` | `fetch` | IMAP mailbox to search (default: `INBOX`) |
-| `--filter TYPE` | `fetch` | Filter: `unseen`, `seen`, or `all` (default: `all`) |
-| `--max N` | `fetch` | Max emails to return (default: `20`) |
+| `--mailbox NAME` | `fetch`, `search`, `delete` | IMAP mailbox to operate on (default: `INBOX`) |
+| `--filter TYPE` | `fetch`, `search` | Filter: `unseen`, `seen`, or `all` (default: `all`) |
+| `--max N` | `fetch`, `search` | Max emails to return (default: `20`) |
+| `--query TEXT` | `search` | Required search query string |
+| `--field TYPE` | `search` | Search field: `subject`, `from`, or `text` (default: `text`) |
+| `--uid UID [UID ...]` | `delete` | One or more IMAP UIDs to delete |
 
 ## Exit Codes
 
@@ -66,4 +71,14 @@ uv run python scripts/email_imap.py fetch --mailbox "[Gmail]/All Mail" --filter 
 
 # Fetch latest 5 unread emails
 uv run python scripts/email_imap.py fetch --filter unseen --max 5
+
+# Search for messages with "invoice" anywhere in the indexed text
+uv run python scripts/email_imap.py search --query "invoice"
+
+# Search by sender
+uv run python scripts/email_imap.py search --field from --query "billing@example.com"
+
+# Delete messages by UID
+uv run python scripts/email_imap.py delete --uid 12345
+uv run python scripts/email_imap.py delete --mailbox "[Gmail]/All Mail" --uid 12345 12346
 ```

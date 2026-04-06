@@ -9,6 +9,8 @@ The IMAP host is read from the entry's URL field (defaults to imap.gmail.com).
 Usage:
     python3 email_imap.py auth [--json]
     python3 email_imap.py fetch [--mailbox INBOX] [--filter unseen|seen|all] [--max 20] [--json]
+    python3 email_imap.py search --query TEXT [--field subject|from|text] [--mailbox INBOX] [--filter unseen|seen|all] [--max 20] [--json]
+    python3 email_imap.py delete --uid UID [--uid UID ...] [--mailbox INBOX] [--json]
 
 Exit codes:
     0 = success
@@ -96,29 +98,122 @@ def _print_json(data):
     print(json.dumps(data, indent=2, default=str))
 
 
+def _connect_and_login(timeout=25):
+    """Open an IMAP SSL connection and authenticate."""
+    email_addr, password, host = _get_credentials()
+
+    try:
+        conn = imaplib.IMAP4_SSL(host, IMAP_PORT, timeout=timeout)
+    except Exception as exc:
+        _print_json({"error": f"Cannot connect to {host}:{IMAP_PORT}: {exc}"})
+        return None, None
+
+    try:
+        conn.login(email_addr, password)
+        return conn, email_addr
+    except imaplib.IMAP4.error as exc:
+        _print_json({"error": f"Authentication failed: {exc}"})
+        try:
+            conn.logout()
+        except Exception:
+            pass
+        return None, None
+    except Exception as exc:
+        _print_json({"error": f"Connection error: {exc}"})
+        try:
+            conn.logout()
+        except Exception:
+            pass
+        return None, None
+
+
+def _select_mailbox(conn, mailbox, readonly):
+    """Select a mailbox and return True on success."""
+    status, _ = conn.select(mailbox, readonly=readonly)
+    if status != "OK":
+        _print_json({"error": f"Cannot select mailbox '{mailbox}'"})
+        return False
+    return True
+
+
+def _build_search_terms(filter_name, field=None, query=None):
+    """Build IMAP SEARCH terms from high-level arguments."""
+    criteria_map = {"unseen": "UNSEEN", "seen": "SEEN", "all": "ALL"}
+    terms = [criteria_map.get(filter_name, "ALL")]
+    if query:
+        search_field = {"subject": "SUBJECT", "from": "FROM", "text": "TEXT"}[field]
+        terms.extend([search_field, query])
+    return terms
+
+
+def _search_uids(conn, filter_name="all", field=None, query=None):
+    """Return message UIDs matching the requested IMAP criteria."""
+    search_terms = _build_search_terms(filter_name, field=field, query=query)
+    status, data = conn.uid("SEARCH", None, *search_terms)
+    if status != "OK":
+        _print_json({"error": "IMAP search failed"})
+        return None
+    return data[0].split() if data and data[0] else []
+
+
+def _parse_message_headers(raw_headers):
+    """Extract a compact message summary from raw RFC 822 headers."""
+    msg = email.message_from_bytes(raw_headers)
+
+    subject = _decode_header_value(msg.get("Subject", ""))
+
+    from_raw = msg.get("From", "")
+    from_name, from_addr = email.utils.parseaddr(from_raw)
+    from_display = _decode_header_value(from_name) if from_name else from_addr
+
+    date_str = msg.get("Date", "")
+    try:
+        dt = email.utils.parsedate_to_datetime(date_str)
+        date_str = dt.isoformat()
+    except Exception:
+        pass  # keep raw string
+
+    return {
+        "subject": subject or "(no subject)",
+        "from": from_display or from_addr or "unknown",
+        "date": date_str,
+    }
+
+
+def _fetch_messages(conn, uids, max_results):
+    """Fetch message headers for the newest UIDs."""
+    if not uids:
+        return []
+
+    selected_uids = uids[-max_results:][::-1]
+    messages = []
+    for uid in selected_uids:
+        # Use BODY.PEEK so header fetches do not set the \Seen flag.
+        status, msg_data = conn.uid(
+            "FETCH", uid, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])"
+        )
+        if status != "OK" or not msg_data or not isinstance(msg_data[0], tuple):
+            continue
+
+        message = _parse_message_headers(msg_data[0][1])
+        message["uid"] = uid.decode() if isinstance(uid, bytes) else str(uid)
+        messages.append(message)
+
+    return messages
+
+
 # -- Subcommands ---------------------------------------------------------------
 
 
 def cmd_auth(args):
     """Verify IMAP credentials by attempting login."""
-    email_addr, password, host = _get_credentials()
-
-    try:
-        conn = imaplib.IMAP4_SSL(host, IMAP_PORT, timeout=15)
-    except Exception as exc:
-        _print_json({"error": f"Cannot connect to {host}:{IMAP_PORT}: {exc}"})
+    conn, email_addr = _connect_and_login(timeout=15)
+    if not conn:
         return 1
 
     try:
-        conn.login(email_addr, password)
         _print_json({"status": "ok", "email": email_addr})
         return 0
-    except imaplib.IMAP4.error as exc:
-        _print_json({"error": f"Authentication failed: {exc}"})
-        return 1
-    except Exception as exc:
-        _print_json({"error": f"Connection error: {exc}"})
-        return 1
     finally:
         try:
             conn.logout()
@@ -128,71 +223,111 @@ def cmd_auth(args):
 
 def cmd_fetch(args):
     """Fetch email headers from IMAP."""
-    email_addr, password, host = _get_credentials()
-
-    mailbox = args.mailbox
-    max_results = args.max
-    criteria_map = {"unseen": "UNSEEN", "seen": "SEEN", "all": "ALL"}
-    search_criteria = criteria_map.get(args.filter, "ALL")
-
-    try:
-        conn = imaplib.IMAP4_SSL(host, IMAP_PORT, timeout=25)
-    except Exception as exc:
-        _print_json({"error": f"Cannot connect to {host}:{IMAP_PORT}: {exc}"})
+    conn, _ = _connect_and_login(timeout=25)
+    if not conn:
         return 1
 
     try:
-        conn.login(email_addr, password)
-        status, _ = conn.select(mailbox, readonly=True)
-        if status != "OK":
-            _print_json({"error": f"Cannot select mailbox '{mailbox}'"})
+        if not _select_mailbox(conn, args.mailbox, readonly=True):
             return 1
 
-        status, data = conn.search(None, search_criteria)
-        if status != "OK":
-            _print_json({"error": "IMAP search failed"})
+        uids = _search_uids(conn, filter_name=args.filter)
+        if uids is None:
             return 1
 
-        msg_ids = data[0].split()
-        if not msg_ids:
+        messages = _fetch_messages(conn, uids, args.max)
+        if not messages:
             _print_json({"messages": [], "count": 0})
             return 0
 
-        # Take the last N (most recent) and reverse for newest-first order
-        msg_ids = msg_ids[-max_results:][::-1]
-
-        messages = []
-        for mid in msg_ids:
-            status, msg_data = conn.fetch(
-                mid, "(BODY[HEADER.FIELDS (SUBJECT FROM DATE)])"
-            )
-            if status != "OK" or not msg_data or not isinstance(msg_data[0], tuple):
-                continue
-
-            raw_headers = msg_data[0][1]
-            msg = email.message_from_bytes(raw_headers)
-
-            subject = _decode_header_value(msg.get("Subject", ""))
-
-            from_raw = msg.get("From", "")
-            from_name, from_addr = email.utils.parseaddr(from_raw)
-            from_display = _decode_header_value(from_name) if from_name else from_addr
-
-            date_str = msg.get("Date", "")
-            try:
-                dt = email.utils.parsedate_to_datetime(date_str)
-                date_str = dt.isoformat()
-            except Exception:
-                pass  # keep raw string
-
-            messages.append({
-                "subject": subject or "(no subject)",
-                "from": from_display or from_addr or "unknown",
-                "date": date_str,
-            })
-
         _print_json({"messages": messages, "count": len(messages)})
         return 0
+
+    except imaplib.IMAP4.error as exc:
+        _print_json({"error": f"IMAP error: {exc}"})
+        return 1
+    except Exception as exc:
+        _print_json({"error": str(exc)})
+        return 1
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+
+
+def cmd_search(args):
+    """Search for email headers using IMAP SEARCH criteria."""
+    conn, _ = _connect_and_login(timeout=25)
+    if not conn:
+        return 1
+
+    try:
+        if not _select_mailbox(conn, args.mailbox, readonly=True):
+            return 1
+
+        uids = _search_uids(conn, filter_name=args.filter, field=args.field, query=args.query)
+        if uids is None:
+            return 1
+
+        messages = _fetch_messages(conn, uids, args.max)
+        _print_json({
+            "messages": messages,
+            "count": len(messages),
+            "query": args.query,
+            "field": args.field,
+        })
+        return 0
+
+    except imaplib.IMAP4.error as exc:
+        _print_json({"error": f"IMAP error: {exc}"})
+        return 1
+    except Exception as exc:
+        _print_json({"error": str(exc)})
+        return 1
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+
+
+def cmd_delete(args):
+    """Delete specific messages by UID from the selected mailbox."""
+    conn, _ = _connect_and_login(timeout=25)
+    if not conn:
+        return 1
+
+    deleted = []
+    errors = []
+
+    try:
+        if not _select_mailbox(conn, args.mailbox, readonly=False):
+            return 1
+
+        for uid in args.uid:
+            uid_str = str(uid).strip()
+            if not uid_str:
+                continue
+
+            status, _ = conn.uid("STORE", uid_str, "+FLAGS.SILENT", r"(\Deleted)")
+            if status == "OK":
+                deleted.append(uid_str)
+            else:
+                errors.append({"uid": uid_str, "error": "Failed to mark for deletion"})
+
+        if deleted:
+            expunge_status, _ = conn.expunge()
+            if expunge_status != "OK":
+                _print_json({"error": "Failed to expunge deleted messages", "deleted_uids": deleted})
+                return 1
+
+        _print_json({
+            "deleted_uids": deleted,
+            "deleted_count": len(deleted),
+            "errors": errors,
+        })
+        return 0 if not errors else 1
 
     except imaplib.IMAP4.error as exc:
         _print_json({"error": f"IMAP error: {exc}"})
@@ -232,6 +367,28 @@ def main():
     p_fetch.add_argument("--max", type=int, default=20,
                          help="Max emails to fetch (default: 20)")
 
+    # search
+    p_search = sub.add_parser("search", help="Search emails")
+    p_search.add_argument("--query", required=True,
+                          help="Search query text")
+    p_search.add_argument("--field", default="text",
+                          choices=["subject", "from", "text"],
+                          help="Field to search (default: text)")
+    p_search.add_argument("--mailbox", default="INBOX",
+                          help="IMAP mailbox (default: INBOX)")
+    p_search.add_argument("--filter", default="all",
+                          choices=["unseen", "seen", "all"],
+                          help="Email filter (default: all)")
+    p_search.add_argument("--max", type=int, default=20,
+                          help="Max emails to fetch (default: 20)")
+
+    # delete
+    p_delete = sub.add_parser("delete", help="Delete emails by UID")
+    p_delete.add_argument("--mailbox", default="INBOX",
+                          help="IMAP mailbox (default: INBOX)")
+    p_delete.add_argument("--uid", required=True, nargs="+",
+                          help="One or more IMAP UIDs to delete")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -241,6 +398,8 @@ def main():
     cmd_map = {
         "auth": cmd_auth,
         "fetch": cmd_fetch,
+        "search": cmd_search,
+        "delete": cmd_delete,
     }
 
     return cmd_map[args.command](args)
