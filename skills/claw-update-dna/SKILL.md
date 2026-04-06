@@ -69,7 +69,12 @@ If no new commits, skip to **Step 6** (restore stash and exit — already up to 
 
 ### Step 4: Integrate Remote Changes
 
-Choose the integration strategy based on the situation:
+Choose the integration strategy based on the situation.
+
+First, check how many local commits diverge from the remote:
+```bash
+git rev-list --count origin/v1/base..HEAD
+```
 
 #### Strategy A: Rebase (preferred — clean linear history)
 
@@ -78,17 +83,18 @@ git rebase origin/v1/base
 ```
 
 Use rebase when:
-- Local branch has commits ahead of remote
+- Local branch has **10 or fewer** commits ahead of remote
 - You want a clean, linear commit history
 - No shared/pushed commits that others depend on
 
-#### Strategy B: Merge (safe fallback)
+#### Strategy B: Merge (preferred when heavily diverged)
 
 ```bash
 git pull origin v1/base
 ```
 
 Use merge when:
+- Local branch has **more than 10 commits** ahead of remote (rebase on large divergence is risky and produces excessive conflict rounds)
 - Rebase fails with complex conflicts
 - Local commits have already been pushed and shared
 - You prefer an explicit merge commit for traceability
@@ -288,10 +294,13 @@ This is **mandatory** per constitution — failing to sync after pyproject.toml 
 ## Quick Reference
 
 ```bash
-# Full update in one shot (happy path, no local changes)
+# Full update in one shot (happy path, no local changes, ≤10 local commits)
 git fetch origin && git rebase origin/v1/base
 
-# Full update with stash (has local changes)
+# Full update when >10 local commits diverge (use merge instead of rebase)
+git fetch origin && git pull origin v1/base
+
+# Full update with stash (has local changes, ≤10 local commits)
 git stash --include-untracked -m "Auto-stash before pull"
 git fetch origin
 git rebase origin/v1/base
@@ -308,7 +317,8 @@ git reset --hard origin/v1/base
 | Situation | Resolution |
 |---|---|
 | No remote changes | `git fetch` shows nothing new — exit early, restore stash |
-| Clean rebase | All commits replay without conflict — happy path |
+| Clean rebase (≤10 local commits) | All commits replay without conflict — happy path |
+| >10 local commits diverged | Skip rebase, use merge directly to avoid conflict cascades |
 | Rebase conflict on 1-2 files | Resolve manually, `git add`, `git rebase --continue` |
 | Rebase conflict cascade (many commits) | `git rebase --abort`, fall back to `git merge` |
 | Merge conflict | Resolve using priority table above, `git add`, `git commit` |
