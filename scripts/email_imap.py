@@ -24,47 +24,37 @@ import email.header
 import email.utils
 import imaplib
 import json
-import os
-import subprocess
 import sys
+
+# Ensure /agent is on sys.path so 'from scripts.keepass import ...' works
+# regardless of the working directory when invoked
+if "/agent" not in sys.path:
+    sys.path.insert(0, "/agent")
 
 KEEPASS_ENTRY = "Email IMAP"
 IMAP_PORT = 993
-SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
-KEEPASS_SCRIPT = os.path.join(SCRIPTS_DIR, "keepass.py")
 
 
 # -- Helpers -------------------------------------------------------------------
 
 
 def _get_credentials():
-    """Retrieve IMAP credentials from KeePass.
+    """Retrieve IMAP credentials from KeePass (direct import).
 
     Returns (email, password, host) on success.
     Raises SystemExit(2) if the entry is not found.
     Raises SystemExit(1) on other errors.
     """
     try:
-        result = subprocess.run(
-            ["uv", "run", "python", KEEPASS_SCRIPT, "--json", "get", KEEPASS_ENTRY],
-            capture_output=True, text=True, timeout=10,
-        )
+        from scripts.keepass import get_credential_entry
+        data = get_credential_entry(KEEPASS_ENTRY)
     except Exception as exc:
-        print(json.dumps({"error": f"Failed to call keepass.py: {exc}"}))
+        print(json.dumps({"error": f"Failed to load KeePass credentials: {exc}"}))
         sys.exit(1)
 
-    if result.returncode == 2:
+    if data is None:
         print(json.dumps({"error": f"KeePass entry '{KEEPASS_ENTRY}' not found."}))
         sys.exit(2)
-    if result.returncode != 0:
-        print(json.dumps({"error": f"keepass.py error: {result.stderr.strip()}"}))
-        sys.exit(1)
-
-    try:
-        data = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        print(json.dumps({"error": "Invalid JSON from keepass.py"}))
-        sys.exit(1)
 
     email_addr = data.get("username", "")
     password = data.get("password", "")

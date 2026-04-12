@@ -23,11 +23,16 @@ Exit codes:
 
 import argparse
 import json
+import os
 import re
-import subprocess
 import sys
 import tempfile
 import urllib.parse
+
+# Ensure /agent is on sys.path so 'from scripts.keepass import ...' works
+# regardless of the working directory when invoked
+if "/agent" not in sys.path:
+    sys.path.insert(0, "/agent")
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -94,8 +99,10 @@ def _save_state(state: dict):
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=STATE_FILE.parent, suffix=".tmp")
     try:
-        with open(fd, "w") as f:
+        with os.fdopen(fd, "w") as f:
             json.dump(state, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
         Path(tmp).replace(STATE_FILE)
     except Exception:
         Path(tmp).unlink(missing_ok=True)
@@ -140,29 +147,20 @@ def _check_api_error(body: str, user: str) -> str | None:
 
 
 def keepass_get(title: str) -> str | None:
-    """Retrieve a credential from KeePass by title."""
+    """Retrieve a credential from KeePass by title (direct import)."""
     try:
-        r = subprocess.run(
-            ["uv", "run", "python", str(SCRIPTS_DIR / "keepass.py"), "--json", "get", title],
-            capture_output=True, text=True, cwd=str(BASE), timeout=15,
-        )
-        if r.returncode == 0:
-            data = json.loads(r.stdout)
-            return data.get("password") or data.get("Password")
+        from scripts.keepass import get_credential
+        return get_credential(title)
     except Exception as e:
         print(f"KeePass get({title!r}) failed: {e}", file=sys.stderr)
     return None
 
 
 def keepass_store(title: str, value: str, group: str = "System") -> bool:
-    """Store a credential in KeePass."""
+    """Store a credential in KeePass (direct import, no subprocess)."""
     try:
-        r = subprocess.run(
-            ["uv", "run", "python", str(SCRIPTS_DIR / "keepass.py"), "store",
-             "--title", title, "--username", "callmebot", "--password", value, "--group", group],
-            capture_output=True, text=True, cwd=str(BASE), timeout=15,
-        )
-        return r.returncode == 0
+        from scripts.keepass import store_credential
+        return store_credential(title, username="callmebot", password=value, group=group)
     except Exception as e:
         print(f"KeePass store({title!r}) failed: {e}", file=sys.stderr)
     return False

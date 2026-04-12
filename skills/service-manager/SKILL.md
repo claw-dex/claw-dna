@@ -9,7 +9,7 @@ description: Manage agent background processes. Use to register a new background
 
 Manages background agent processes. Use this for any long-running background process (web servers, notebooks, APIs, workers) — it handles PID tracking, health checks, log management, and state.json integration.
 
-If service require a port, chose a port in range 8083–8090. Ports 8080 (Caddy) and 8081 (Streamlit) are reserved and not managed here.
+If service require a port, chose a port in range 8082–8090. Ports 8080 (Caddy) and 8081 (Streamlit) are reserved and not managed here.
 
 ## When to Use
 
@@ -24,7 +24,7 @@ If service require a port, chose a port in range 8083–8090. Ports 8080 (Caddy)
 |------|------------|
 | 8080 | Caddy gateway (reserved) |
 | 8081 | Streamlit portal (reserved) |
-| 8082 | Reserved (future core use, e.g: system webhook) |
+| 8082 | Available (e.g., system webhook receiver) |
 | 8083–8090 | Available for agent services |
 
 ## Subcommands
@@ -83,13 +83,13 @@ uv run python scripts/service-manager.py cleanup
 ## Log Files
 
 Service stdout/stderr are captured in `/agent/memory/logs/`:
-- `<name>-stdout.log`
-- `<name>-stderr.log`
+- `service-<name>.stdout.log`
+- `service-<name>.stderr.log`
 
 Check logs with:
 ```bash
-tail -50 /agent/memory/logs/<name>-stdout.log
-tail -50 /agent/memory/logs/<name>-stderr.log
+tail -50 /agent/memory/logs/service-<name>.stdout.log
+tail -50 /agent/memory/logs/service-<name>.stderr.log
 ```
 
 ## Exposing Services via Caddy
@@ -114,9 +114,23 @@ curl -X POST http://localhost:2019/config/apps/http/servers/gateway/routes \
 Changes take effect immediately — no restart needed. The user can then
 access the service via the Caddy Gateway.
 
+## HTTP Health Check (health_url)
+
+Services that expose an HTTP health endpoint can register a `health_url` in `services.json`.
+When set, `cycle-start.py` performs an HTTP check on every heartbeat in addition to PID liveness.
+A service whose PID is alive but whose health URL returns non-2xx is treated as a **zombie** and
+automatically restarted.
+
+To add a health URL to an existing service, edit `memory/services.json` directly:
+```json
+"health_url": "http://localhost:<port>/health"
+```
+
+The webhook_receiver (`port 8082`) already has `health_url` configured.
+
 ## Port Allocation Rules
 
-- Only use ports 8083–8090 (constitution requirement)
+- Only use ports 8082–8090 (constitution requirement)
 - Check `service-manager.py list` before starting to avoid port conflicts
 - Always log new port bindings in your journal entry
 - Maximum 3 concurrent services (constitution resource limit)

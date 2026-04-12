@@ -56,6 +56,13 @@
     "enabled": true
   },
   {
+    "id": "portal_config",
+    "name": "Portal Configuration",
+    "description": "Unified portal configuration for hostname (public Cloudflare Tunnel URL), timezone, and HTTP basic auth; replaces legacy portal-hostname and portal-auth scripts",
+    "category": "core",
+    "enabled": true
+  },
+  {
     "id": "cycle_start",
     "name": "Cycle Start Briefing",
     "description": "Startup briefing combining memory repair, state summary, recent journal, inbox peek, and evolve recommendation",
@@ -91,18 +98,39 @@
     "enabled": true
   },
   {
-    "id": "keepass_credentials",
-    "name": "KeePass Credential Manager",
-    "description": "Local KeePass database for API keys, passwords, and secrets; CLI and portal UI",
-    "category": "security",
+    "id": "memory_sync",
+    "name": "Memory Sync",
+    "description": "Generates .md auto-memory files from JSON memory data (state, capabilities, goals); makes memory accessible to the agent's memory system",
+    "category": "memory",
     "enabled": true
   },
   {
-    "id": "portal_auth",
-    "name": "Portal Basic Auth",
-    "description": "Caddy-based basic authentication for the web portal; managed via Caddy Admin API",
+    "id": "memory_ingest",
+    "name": "Long-Term Memory Ingest",
+    "description": "Bulk-ingests journal, cycle, and goal data into a memvid .mv2 semantic memory index; supports incremental append and raw text/file ingestion",
+    "category": "memory",
+    "enabled": true
+  },
+  {
+    "id": "memory_recall",
+    "name": "Long-Term Memory Recall",
+    "description": "Queries the memvid .mv2 semantic memory index; retrieves past cycle experiences, related historical work, and chronological timeline browsing",
+    "category": "memory",
+    "enabled": true
+  },
+  {
+    "id": "memory_ask",
+    "name": "Memory Q&A",
+    "description": "RAG-powered natural-language Q&A over memvid .mv2 long-term memory; retrieves adaptive context then synthesizes answers via Claude",
+    "category": "memory",
+    "enabled": true
+  },
+  {
+    "id": "keepass_credentials",
+    "name": "KeePass Credential Manager",
+    "description": "Local KeePass database for API keys, passwords, and secrets; CLI get/store/list/search; imported directly by services to avoid subprocess spawns",
     "category": "security",
-    "enabled": false
+    "enabled": true
   },
   {
     "id": "chat_interface",
@@ -110,6 +138,34 @@
     "description": "Claude SDK chat UI with streaming responses, tool use display, and persistent history",
     "category": "communication",
     "enabled": true
+  },
+  {
+    "id": "telegram_bridge",
+    "name": "Telegram Bridge",
+    "description": "Bridges inbox/outbox with a Telegram bot; polls for incoming messages, forwards outbox to Telegram, auto-discovers chat ID; supports /remind, /note, /notes, /status, /goals, /services commands; writes heartbeat for liveness monitoring",
+    "category": "communication",
+    "enabled": false
+  },
+  {
+    "id": "whatsapp_bridge",
+    "name": "WhatsApp Bridge",
+    "description": "Bridges inbox/outbox with WhatsApp Business Cloud API; receives messages via webhook on port 8083, forwards outbox to WhatsApp, auto-discovers owner phone; writes heartbeat for liveness monitoring",
+    "category": "communication",
+    "enabled": false
+  },
+  {
+    "id": "callmebot",
+    "name": "CallMeBot Voice Escalation",
+    "description": "Voice call escalation via CallMeBot Telegram API; calls the human when a needs_human outbox message goes unanswered; credentials stored in KeePass",
+    "category": "communication",
+    "enabled": false
+  },
+  {
+    "id": "email_imap",
+    "name": "Email IMAP Client",
+    "description": "IMAP email client supporting any provider; fetch, search, delete, and verify emails using credentials from KeePass (entry 'Email IMAP' with server URL, username, and app password)",
+    "category": "communication",
+    "enabled": false
   },
   {
     "id": "metrics_collector",
@@ -163,23 +219,51 @@
   {
     "id": "task_scheduler",
     "name": "Task Scheduler",
-    "description": "Evaluates scheduled_tasks.json for due tasks; supports interval, once, and cron schedules",
+    "description": "Evaluates scheduled_tasks.json for due tasks; supports interval, once, and cron schedules; features include --forecast (48h timeline), --history (per-task execution ring buffer), --run-now, --test (cron dry-run), and execution stats",
+    "category": "automation",
+    "enabled": true
+  },
+  {
+    "id": "reminder",
+    "name": "Reminder Manager",
+    "description": "Create and manage personal reminders that fire as inbox messages via the scheduler; supports one-time (--at), recurring (--every N minutes), and cron-based (--cron) reminders",
     "category": "automation",
     "enabled": true
   },
   {
     "id": "service_manager",
     "name": "Service Manager",
-    "description": "Manages background services (optional port 8083-8090); start, stop, status, health, and cleanup",
+    "description": "Manages long-running background services (optional port 8082-8090); start, stop, restart, status, health-check (with heartbeat staleness detection), list, and cleanup; atomic state files prevent concurrent corruption",
     "category": "automation",
     "enabled": true
   },
   {
-    "id": "portal_hostname",
-    "name": "Portal Hostname",
-    "description": "Configures public hostname for agent when exposed via proxy; injected into system prompt",
+    "id": "webhook_receiver",
+    "name": "Webhook Receiver",
+    "description": "Generic HTTP webhook handler on port 8082; records POST/PUT/PATCH/DELETE payloads to webhook.json; Caddy routes /webhook/* to this service; managed via service-manager",
     "category": "automation",
-    "enabled": false
+    "enabled": true
+  },
+  {
+    "id": "agent_browser",
+    "name": "Agent Browser",
+    "description": "Headless Chromium automation via agent-browser CLI for web interaction and scraping",
+    "category": "automation",
+    "enabled": true
+  },
+  {
+    "id": "skill_creator",
+    "name": "Skill Creator",
+    "description": "Create new skills from scratch, modify and improve existing skills, run evals, and benchmark skill performance with variance analysis and triggering accuracy optimization",
+    "category": "automation",
+    "enabled": true
+  },
+  {
+    "id": "notes",
+    "name": "Notes Manager",
+    "description": "Personal notes and scratchpad; add, list, search, edit, delete, tag, pin, export (Markdown/JSON), and view stats; importable as a Python module by services for direct in-process note creation",
+    "category": "productivity",
+    "enabled": true
   },
   {
     "id": "workspace_file_upload",
@@ -215,26 +299,5 @@
     "description": "Portal tab with suggestions, goal performance, evolution balance, and activity summary",
     "category": "portal",
     "enabled": true
-  },
-  {
-    "id": "agent_browser",
-    "name": "Agent Browser",
-    "description": "Headless Chromium automation via agent-browser CLI for web interaction and scraping",
-    "category": "automation",
-    "enabled": true
-  },
-  {
-    "id": "telegram_bridge",
-    "name": "Telegram Bridge",
-    "description": "Bridges inbox/outbox with a Telegram bot; polls for incoming messages, forwards outbox to Telegram, auto-discovers chat ID",
-    "category": "communication",
-    "enabled": false
-  },
-  {
-    "id": "whatsapp_bridge",
-    "name": "WhatsApp Bridge",
-    "description": "Bridges inbox/outbox with WhatsApp Business Cloud API; receives messages via webhook, forwards outbox to WhatsApp, auto-discovers owner phone",
-    "category": "communication",
-    "enabled": false
   }
 ]

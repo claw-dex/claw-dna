@@ -1,4 +1,17 @@
 {
+  "webhook_receiver": {
+    "pid": null,
+    "port": 8082,
+    "command": [
+      "uv",
+      "run",
+      "python",
+      "/agent/services/webhook_receiver.py"
+    ],
+    "started": null,
+    "stdout_log": "/agent/memory/logs/service-webhook_receiver.stdout.log",
+    "stderr_log": "/agent/memory/logs/service-webhook_receiver.stderr.log"
+  },
   "telegram_bridge": {
     "pid": null,
     "port": null,
@@ -33,7 +46,7 @@
       "-c",
       "echo y | claude remote-control --name claw-dna-debug-agent --permission-mode bypassPermissions --spawn same-dir --capacity 3"
     ],
-    "started": "2026-03-20T16:10:52+00:00",
+    "started": null,
     "stdout_log": "/agent/memory/logs/service-claude_remote.stdout.log",
     "stderr_log": "/agent/memory/logs/service-claude_remote.stderr.log"
   }

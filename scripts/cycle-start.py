@@ -347,6 +347,8 @@ def auto_archive_old_errors(server_errors: list, max_age_hours: float = 48.0) ->
             try:
                 with os.fdopen(tmp_fd, "w") as f:
                     json.dump(kept, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
                 os.replace(tmp_path, str(errors_path))
             except Exception:
                 try:

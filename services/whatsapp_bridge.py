@@ -31,7 +31,10 @@ Management:
 
 import json
 import hashlib
+import os
 import re
+import signal
+import tempfile
 import time
 import subprocess
 import sys
@@ -45,6 +48,13 @@ from urllib.parse import urlparse, parse_qs
 
 import requests
 
+# Ensure /agent is on sys.path so 'from scripts.keepass import ...' works
+# regardless of the working directory when launched via service-manager
+if "/agent" not in sys.path:
+    sys.path.insert(0, "/agent")
+
+from shared import atomic_write_json, write_to_inbox, append_to_history
+
 # --- Paths ---
 BASE = Path("/agent")
 STATE_FILE          = BASE / "memory" / "whatsapp_state.json"
@@ -55,8 +65,11 @@ OUTBOX_HISTORY_FILE = BASE / "memory" / "whatsapp_outbox_history.json"
 CHAT_HISTORY_FILE   = BASE / "memory" / "whatsapp_chat_history.json"
 LOG_DIR             = BASE / "memory" / "logs"
 LOG_FILE            = LOG_DIR / "whatsapp_bridge.log"
+HEARTBEAT_DIR       = BASE / "memory" / "heartbeats"
+HEARTBEAT_FILE      = HEARTBEAT_DIR / "whatsapp_bridge.heartbeat"
 
 LOG_DIR.mkdir(parents=True, exist_ok=True)
+HEARTBEAT_DIR.mkdir(parents=True, exist_ok=True)
 
 # --- Logging ---
 logging.basicConfig(
@@ -68,6 +81,15 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger("whatsapp_bridge")
+
+
+def _write_heartbeat():
+    """Write current epoch timestamp to heartbeat file for liveness detection."""
+    try:
+        HEARTBEAT_FILE.write_text(str(time.time()))
+    except OSError:
+        pass  # non-critical
+
 
 # --- Constants ---
 KEEPASS_WHATSAPP_ACCESS_TOKEN    = "WHATSAPP_ACCESS_TOKEN"
@@ -85,6 +107,9 @@ MEDIA_DIR  = BASE / "workspace" / "whatsapp"
 
 # Thread lock for shared state
 _lock = threading.RLock()
+
+
+# _atomic_write_json → imported from shared module as atomic_write_json
 
 
 # ---------------------------------------------------------------------------
@@ -141,13 +166,8 @@ def build_ack_message() -> str:
 
 def keepass_get(title: str) -> str | None:
     try:
-        r = subprocess.run(
-            ["uv", "run", "python", "/agent/scripts/keepass.py", "--json", "get", title],
-            capture_output=True, text=True, cwd="/agent", timeout=15,
-        )
-        if r.returncode == 0:
-            data = json.loads(r.stdout)
-            return data.get("password") or data.get("Password")
+        from scripts.keepass import get_credential
+        return get_credential(title)
     except Exception as e:
         log.warning(f"KeePass get({title!r}) failed: {e}")
     return None
@@ -155,12 +175,8 @@ def keepass_get(title: str) -> str | None:
 
 def keepass_store(title: str, username: str, value: str, group: str = "API Keys") -> bool:
     try:
-        r = subprocess.run(
-            ["uv", "run", "python", "/agent/scripts/keepass.py", "store",
-             "--title", title, "--username", username, "--password", value, "--group", group],
-            capture_output=True, text=True, cwd="/agent", timeout=15,
-        )
-        return r.returncode == 0
+        from scripts.keepass import store_credential
+        return store_credential(title=title, username=username, password=value, group=group)
     except Exception as e:
         log.warning(f"KeePass store({title!r}) failed: {e}")
     return False
@@ -192,18 +208,43 @@ def contains_username(text: str, username: str) -> bool:
 # State management
 # ---------------------------------------------------------------------------
 
+def _validate_state(data: dict) -> dict:
+    """Ensure state has the expected structure, repairing wrong types."""
+    default = {"last_message_ts": "", "sent_hashes": []}
+    if not isinstance(data, dict):
+        log.warning("WhatsApp state has unexpected type %s, resetting", type(data).__name__)
+        return dict(default)
+    # Validate last_message_ts — must be str
+    ts = data.get("last_message_ts")
+    if not isinstance(ts, str):
+        log.warning("WhatsApp state last_message_ts has wrong type %s, resetting to ''", type(ts).__name__)
+        data["last_message_ts"] = ""
+    # Validate sent_hashes — must be list of strings
+    hashes = data.get("sent_hashes")
+    if not isinstance(hashes, list):
+        log.warning("WhatsApp state sent_hashes has wrong type %s, resetting to []", type(hashes).__name__)
+        data["sent_hashes"] = []
+    else:
+        cleaned = [h for h in hashes if isinstance(h, str)]
+        if len(cleaned) != len(hashes):
+            log.warning("Removed %d non-string entries from sent_hashes", len(hashes) - len(cleaned))
+            data["sent_hashes"] = cleaned
+    return data
+
+
 def load_state() -> dict:
     default = {"last_message_ts": "", "sent_hashes": []}
     if STATE_FILE.exists():
         try:
-            return json.loads(STATE_FILE.read_text())
-        except Exception:
-            pass
-    return default
+            data = json.loads(STATE_FILE.read_text())
+            return _validate_state(data)
+        except Exception as e:
+            log.warning("Corrupt WhatsApp state file, using defaults: %s", e)
+    return dict(default)
 
 
 def save_state(state: dict):
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+    atomic_write_json(STATE_FILE, state, indent=2)
 
 
 def msg_hash(msg: dict) -> str:
@@ -242,7 +283,7 @@ def load_chat_history() -> dict:
 def save_chat_history(history: dict):
     """Sync in-memory chat history to disk."""
     try:
-        CHAT_HISTORY_FILE.write_text(json.dumps(history, indent=2, ensure_ascii=False))
+        atomic_write_json(CHAT_HISTORY_FILE, history, indent=2, ensure_ascii=False)
     except Exception as e:
         log.warning(f"Failed to save chat history: {e}")
 
@@ -334,7 +375,11 @@ def wa_send_message(token: str, phone_number_id: str, to: str, text: str) -> dic
     }
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=30)
-        data = resp.json()
+        try:
+            data = resp.json()
+        except (ValueError, requests.exceptions.JSONDecodeError):
+            log.warning(f"WhatsApp send non-JSON response (HTTP {resp.status_code}): {resp.text[:200]}")
+            return None
         if resp.ok:
             return data
         log.warning(f"WhatsApp send failed ({resp.status_code}): {data.get('error', {}).get('message', data)}")
@@ -373,30 +418,33 @@ def extract_wa_media(msg: dict) -> list[tuple[str, str, str]]:
     """
     media = []
 
-    if msg.get("image"):
-        mid = msg["image"].get("id")
-        mime = msg["image"].get("mime_type", "image/jpeg")
+    img = msg.get("image")
+    if isinstance(img, dict):
+        mid = img.get("id")
+        mime = img.get("mime_type", "image/jpeg")
         ext = mime.split("/")[-1].split(";")[0]
         if mid:
             media.append((mid, "image", f"photo.{ext}"))
 
-    if msg.get("document"):
-        doc = msg["document"]
+    doc = msg.get("document")
+    if isinstance(doc, dict):
         mid = doc.get("id")
         if mid:
             fname = doc.get("filename") or f"document_{mid[:8]}"
             media.append((mid, "document", fname))
 
-    if msg.get("audio"):
-        mid = msg["audio"].get("id")
-        mime = msg["audio"].get("mime_type", "audio/ogg")
+    aud = msg.get("audio")
+    if isinstance(aud, dict):
+        mid = aud.get("id")
+        mime = aud.get("mime_type", "audio/ogg")
         ext = mime.split("/")[-1].split(";")[0]
         if mid:
             media.append((mid, "audio", f"audio.{ext}"))
 
-    if msg.get("video"):
-        mid = msg["video"].get("id")
-        mime = msg["video"].get("mime_type", "video/mp4")
+    vid = msg.get("video")
+    if isinstance(vid, dict):
+        mid = vid.get("id")
+        mime = vid.get("mime_type", "video/mp4")
         ext = mime.split("/")[-1].split(";")[0]
         if mid:
             media.append((mid, "video", f"video.{ext}"))
@@ -416,7 +464,12 @@ def download_wa_media(token: str, media_id: str, chat_id: str, filename_hint: st
     try:
         resp = requests.get(f"{GRAPH_API_BASE}/{media_id}", headers=headers, timeout=30)
         resp.raise_for_status()
-        media_url = resp.json().get("url")
+        try:
+            media_data = resp.json()
+        except (ValueError, requests.exceptions.JSONDecodeError):
+            log.warning(f"Non-JSON media response for media_id={media_id[:16]} (HTTP {resp.status_code}): {resp.text[:200]}")
+            return None
+        media_url = media_data.get("url")
         if not media_url:
             log.warning(f"No URL in media response for media_id={media_id[:16]}")
             return None
@@ -432,14 +485,32 @@ def download_wa_media(token: str, media_id: str, chat_id: str, filename_hint: st
     unique_name = f"{uuid.uuid4().hex[:12]}_{safe_name}"
     dest_path = dest_dir / unique_name
 
+    max_size = 50 * 1024 * 1024  # 50 MB safety limit
     try:
-        resp = requests.get(media_url, headers=headers, timeout=60, stream=True)
-        resp.raise_for_status()
-        size = 0
-        with open(dest_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                f.write(chunk)
-                size += len(chunk)
+        with requests.get(media_url, headers=headers, timeout=(30, 120), stream=True) as resp:
+            resp.raise_for_status()
+            # Check Content-Length header if available for early rejection
+            content_length = resp.headers.get("Content-Length")
+            if content_length and int(content_length) > max_size:
+                log.warning(f"Media {media_id[:16]} too large ({content_length} bytes), skipping")
+                return None
+            size = 0
+            exceeded = False
+            with open(dest_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    size += len(chunk)
+                    if size > max_size:
+                        log.warning(f"Media {media_id[:16]} exceeded {max_size} byte limit at {size} bytes, aborting")
+                        exceeded = True
+                        break
+                    f.write(chunk)
+                else:
+                    # Only reach here if loop completed without break (successful download)
+                    f.flush()
+                    os.fsync(f.fileno())
+        if exceeded:
+            dest_path.unlink(missing_ok=True)
+            return None
     except Exception as e:
         log.error(f"Failed to download media {media_id[:16]}: {e}")
         dest_path.unlink(missing_ok=True)
@@ -585,8 +656,9 @@ def _process_authorized_message(
     # WhatsApp puts captions in image/video/document caption field
     caption = ""
     for media_key in ("image", "document", "video"):
-        if msg.get(media_key) and msg[media_key].get("caption"):
-            caption = msg[media_key]["caption"].strip()
+        media_val = msg.get(media_key)
+        if isinstance(media_val, dict) and media_val.get("caption"):
+            caption = str(media_val["caption"]).strip()
             break
 
     effective_text = text or caption
@@ -736,41 +808,21 @@ def process_webhook_and_persist(
         state, owner_username, chat_ids, chat_history,
     )
     if items:
-        write_to_inbox(items)
-        append_to_inbox_history(items)
-        save_chat_history(chat_history)
+        if write_to_inbox(items):
+            append_to_inbox_history(items)
+            save_chat_history(chat_history)
+        else:
+            log.error(f"Inbox write failed for {len(items)} item(s) — skipping history/chat save to allow retry")
     return owner_username, chat_ids
 
 
-def write_to_inbox(items: list):
-    if not items:
-        return
-    try:
-        existing = []
-        if INBOX_FILE.exists():
-            raw = INBOX_FILE.read_text().strip()
-            existing = json.loads(raw) if raw else []
-        existing.extend(items)
-        INBOX_FILE.write_text(json.dumps(existing, indent=2))
-        log.info(f"Added {len(items)} message(s) to inbox.json")
-    except Exception as e:
-        log.error(f"Failed to write inbox: {e}")
+# write_to_inbox → imported from shared module (FIXED: was missing file locking!)
+# append_to_inbox_history → uses shared.append_to_history
 
 
 def append_to_inbox_history(items: list):
     """Persist received WhatsApp messages to a history file (never cleared)."""
-    if not items:
-        return
-    try:
-        history = []
-        if INBOX_HISTORY_FILE.exists():
-            raw = INBOX_HISTORY_FILE.read_text().strip()
-            history = json.loads(raw) if raw else []
-        history.extend(items)
-        history = history[-500:]
-        INBOX_HISTORY_FILE.write_text(json.dumps(history, indent=2))
-    except Exception as e:
-        log.warning(f"Failed to write inbox history: {e}")
+    append_to_history(items, INBOX_HISTORY_FILE)
 
 
 # ---------------------------------------------------------------------------
@@ -779,16 +831,10 @@ def append_to_inbox_history(items: list):
 
 def send_outbox_messages(token: str, phone_number_id: str, chat_ids: list[str], state: dict, chat_history: dict):
     """Forward unsent outbox messages to all authorized WhatsApp numbers."""
-    if not OUTBOX_FILE.exists():
-        return
-    try:
-        raw = OUTBOX_FILE.read_text().strip()
-        outbox = json.loads(raw) if raw else []
-    except Exception as e:
-        log.warning(f"Failed to read outbox: {e}")
-        return
+    from services.shared import read_outbox_locked
 
-    if not isinstance(outbox, list) or not outbox:
+    outbox = read_outbox_locked()
+    if not outbox:
         return
 
     sent_count = 0
@@ -843,7 +889,7 @@ def _append_outbox_history(msg: dict):
             return
         history.append(msg)
         history = history[-500:]
-        OUTBOX_HISTORY_FILE.write_text(json.dumps(history, indent=2))
+        atomic_write_json(OUTBOX_HISTORY_FILE, history, indent=2)
     except Exception as e:
         log.warning(f"Failed to append outbox history: {e}")
 
@@ -954,7 +1000,10 @@ class WhatsAppWebhookHandler(BaseHTTPRequestHandler):
                 srv.wa_state, srv.wa_owner_username, srv.wa_chat_ids,
                 srv.wa_chat_history,
             )
-            save_state(srv.wa_state)
+            try:
+                save_state(srv.wa_state)
+            except Exception as e:
+                log.error(f"Failed to save state after webhook processing: {e}", exc_info=True)
 
 
 def start_webhook_server(
@@ -977,8 +1026,9 @@ def start_webhook_server(
     server.wa_chat_ids = chat_ids
     server.wa_chat_history = chat_history
 
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=False)
     thread.start()
+    server._serve_thread = thread  # expose for graceful shutdown in main()
     log.info(f"Webhook server started on port {WEBHOOK_PORT} (path: {WEBHOOK_PATH})")
     return server
 
@@ -1067,9 +1117,20 @@ def main():
 
     last_outbox_check = 0.0
 
-    log.info("Entering main loop (Ctrl+C to stop)...")
+    # Graceful shutdown via SIGTERM/SIGINT (matches telegram_bridge & github_watcher)
+    shutdown_requested = False
+
+    def _handle_shutdown(signum, frame):
+        nonlocal shutdown_requested
+        log.info(f"Received signal {signum}, requesting graceful shutdown...")
+        shutdown_requested = True
+
+    signal.signal(signal.SIGTERM, _handle_shutdown)
+    signal.signal(signal.SIGINT, _handle_shutdown)
+
+    log.info("Entering main loop (Ctrl+C or SIGTERM to stop)...")
     try:
-        while True:
+        while not shutdown_requested:
             try:
                 # Forward outbox messages periodically
                 now = time.time()
@@ -1080,22 +1141,33 @@ def main():
                         owner_username = server.wa_owner_username
                         if chat_ids:
                             send_outbox_messages(token, phone_number_id, chat_ids, state, chat_history)
-                            save_state(state)
+                            try:
+                                save_state(state)
+                            except Exception as e:
+                                log.error(f"Failed to save state after outbox send: {e}", exc_info=True)
                     last_outbox_check = now
 
+                _write_heartbeat()
                 # Sleep briefly to avoid busy-waiting
                 time.sleep(1)
 
             except Exception as e:
+                if shutdown_requested:
+                    break
                 log.error(f"Unexpected error in main loop: {e}", exc_info=True)
                 time.sleep(10)
 
     except KeyboardInterrupt:
-        log.info("Shutdown requested.")
+        log.info("Shutdown requested via KeyboardInterrupt.")
     finally:
         log.info("Cleaning up...")
         deregister_caddy_route()
-        server.shutdown()
+        try:
+            server.shutdown()
+            if hasattr(server, "_serve_thread"):
+                server._serve_thread.join(timeout=5)
+        except Exception as e:
+            log.warning(f"Error during server shutdown: {e}")
         log.info("WhatsApp Bridge stopped. Goodbye.")
 
 

@@ -28,6 +28,93 @@ from pathlib import Path
 KEEPASS_DIR = Path("/home/agent/.keepass")
 DB_PATH = KEEPASS_DIR / "credentials.kdbx"
 
+# Module-level cache for credentials (avoids re-opening DB within same process)
+_credential_cache: dict = {}
+
+
+# ── Public API (importable) ──────────────────────────────────────────────────
+
+
+def get_credential(title: str) -> str | None:
+    """Get a credential's password by title. Returns None if not found.
+
+    This is the preferred way to retrieve credentials from other scripts —
+    import directly instead of spawning a subprocess:
+        from scripts.keepass import get_credential
+        pat = get_credential("GITHUB_PAT")
+    """
+    if title in _credential_cache:
+        return _credential_cache[title]
+    kp, err = _open_db()
+    if err:
+        return None
+    entry = kp.find_entries(title=title, first=True)
+    if not entry:
+        return None
+    password = entry.password or ""
+    _credential_cache[title] = password
+    return password
+
+
+def get_credential_entry(title: str) -> dict | None:
+    """Get full credential entry as dict (includes password). Returns None if not found."""
+    kp, err = _open_db()
+    if err:
+        return None
+    entry = kp.find_entries(title=title, first=True)
+    if not entry:
+        return None
+    return _entry_to_dict(entry, include_password=True)
+
+
+def store_credential(
+    title: str,
+    username: str,
+    password: str,
+    url: str = "",
+    notes: str = "",
+    group: str = "",
+) -> bool:
+    """Store or update a credential. Returns True on success.
+
+    This is the preferred way to store credentials from other scripts —
+    import directly instead of spawning a subprocess:
+        from scripts.keepass import store_credential
+        store_credential("MY_KEY", "user", "secret", group="System")
+    """
+    kp, err = _open_db()
+    if err:
+        return False
+    try:
+        dest_group = kp.root_group
+        if group:
+            dest_group = _find_or_create_group(kp, group)
+        # Global search first — prevents duplicate entries when an entry already
+        # exists in a different group than the one requested.
+        existing = kp.find_entries(title=title, first=True)
+        if existing:
+            existing.username = username
+            existing.password = password
+            if url:
+                existing.url = url
+            if notes:
+                existing.notes = notes
+            if group and existing.group != dest_group:
+                kp.move_entry(existing, dest_group)
+        else:
+            kp.add_entry(dest_group, title=title, username=username,
+                         password=password, url=url or "", notes=notes or "")
+        kp.save()
+        clear_credential_cache()
+        return True
+    except Exception:
+        return False
+
+
+def clear_credential_cache():
+    """Clear the in-process credential cache (e.g., after store/delete)."""
+    _credential_cache.clear()
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -198,6 +285,7 @@ def cmd_store(args):
         if args.group and existing.group != dest_group:
             kp.move_entry(existing, dest_group)
         kp.save()
+        clear_credential_cache()
         msg = f"Updated entry '{args.title}'"
         _print_result({"status": "updated", "title": args.title}, args.json, msg)
     else:
@@ -210,6 +298,7 @@ def cmd_store(args):
             notes=args.notes or "",
         )
         kp.save()
+        clear_credential_cache()
         msg = f"Stored entry '{args.title}'"
         _print_result({"status": "created", "title": args.title}, args.json, msg)
     return 0
@@ -233,6 +322,7 @@ def cmd_delete(args):
 
     kp.delete_entry(entry)
     kp.save()
+    clear_credential_cache()
     msg = f"Deleted entry '{args.title}'"
     _print_result({"status": "deleted", "title": args.title}, args.json, msg)
     return 0
