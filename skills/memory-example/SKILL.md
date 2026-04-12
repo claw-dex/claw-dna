@@ -498,7 +498,7 @@ Entry per service (keyed by name):
 }
 ```
 
-Ports 8083-8090 available (8080-8081 reserved for Caddy/Streamlit).
+Ports 8083-8090 available (8080-8081 reserved for Caddy/Streamlit, 8082 reserved for webhook_receiver).
 
 ### scheduled_tasks.json
 
@@ -625,9 +625,10 @@ Entry:
 }
 ```
 
-- `type`: `goal` | `message`
-- `source`: `user` | `scheduler` | other
+- `type`: `goal` | `message` | `event`
+- `source`: `user` | `scheduler` | `telegram` | `whatsapp` | `webhook` | other
 - Scheduler-injected entries may include `task_id`.
+- `event` entries (source `webhook`) carry the sanitized HTTP payload in `content`: method, path, filtered headers, and body (truncated at 4 KB). Full payload is in `webhook_receiver.log`.
 
 ### outbox.json
 

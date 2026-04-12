@@ -16,12 +16,28 @@
 
         root * /
         uri strip_prefix /_
-        file_server browse
+        file_server browse {
+            index .disabled
+        }
     }
 
-    # Welcome page & static assets
-    handle {
+    # Generic webhook receiver
+    handle /webhook/* {
+        uri strip_prefix /webhook
+        reverse_proxy localhost:8082
+    }
+
+    # Home page
+    handle / {
+        root * /agent
+        rewrite * /index.html
+        file_server
+    }
+
+    # Static files
+    handle /web/* {
         root * /agent/web
+        uri strip_prefix /web
         file_server
     }
 }

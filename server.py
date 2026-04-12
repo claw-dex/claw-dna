@@ -12,7 +12,7 @@ import hydralit_components as hc
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-from app.shared import _startup_check, AGENT_CREDENTIALS_PATH
+from app.shared import _startup_check
 from app.data import load_state, load_errors, load_cycle_velocity, load_services
 from app import chat, commands, memory_tab, workspace, system, overview, credential, emails, glance, services_tab
 
@@ -116,25 +116,9 @@ def _safe_render(module, tab_name: str):
 
 # ── First-run setup screen ────────────────────────────────────
 def _render_first_run():
-    import os
     from app.data import write_first_goal, trigger_bootstrap_heartbeat, load_goals, save_portal_config
 
     st.subheader("Welcome — First Run Setup")
-
-    # ── Gate: AI coding agent must be authenticated first ──────
-    if not os.path.exists(AGENT_CREDENTIALS_PATH):
-        st.warning("AI coding agent is not authenticated yet.")
-        st.write(
-            "Before the agent can start, you need to authenticate the AI coding agent. "
-            "Run the following command in your terminal and complete the login flow:"
-        )
-        st.code("docker exec -it myagent claude", language="bash")
-        st.info(
-            "Once authentication is complete, this page will automatically "
-            "refresh and show the goal input."
-        )
-        st.caption("Auto-refresh every 60 seconds.")
-        return
 
     # Detect already-written goal (survives page refresh during bootstrap)
     goals = load_goals() or []
@@ -152,6 +136,8 @@ def _render_first_run():
             "The agent is reading your goal and initialising. "
             "This page will update automatically when it is ready."
         )
+        st.write("To start the automatic heartbeat, run from your terminal:")
+        st.code("./orchestrator.sh", language="bash")
         st.caption("Auto-refresh every 60 seconds.")
     else:
         st.write(

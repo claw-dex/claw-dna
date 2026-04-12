@@ -75,6 +75,22 @@ start_caddy() {
     CADDY_PID=$!
 }
 
+start_caddy_setup() {
+    echo -e "${DIM}[$(date -Is)] Starting Caddy gateway (setup mode) on port 8080...${NC}"
+    caddy run --config /agent/Caddyfile.setup --adapter caddyfile &
+    CADDY_PID=$!
+}
+
+reload_caddy_production() {
+    echo -e "${DIM}[$(date -Is)] Switching Caddy to production config...${NC}"
+    caddy reload --config /agent/Caddyfile --adapter caddyfile 2>&1 || {
+        warn "Caddy reload failed — restarting with production config"
+        kill $CADDY_PID 2>/dev/null
+        wait $CADDY_PID 2>/dev/null || true
+        start_caddy
+    }
+}
+
 start_streamlit() {
     kill_stale_streamlit
     echo -e "${DIM}[$(date -Is)] Starting Streamlit on port 8081...${NC}"
@@ -238,8 +254,8 @@ else
     echo -e "  ${DIM}(lightweight — Streamlit starts after authentication)${NC}"
     echo ""
 
-    # Start Caddy (low CPU) to keep the container alive and port 8080 responsive
-    start_caddy
+    # Start Caddy in setup mode — serves setup.html at / while waiting for auth
+    start_caddy_setup
 
     # Poll until auth appears (interruptible sleep to handle SIGTERM under set -e)
     info "Waiting for authentication (polling every 10s)..."
@@ -249,6 +265,9 @@ else
     done
 
     success "Authentication detected!"
+
+    # Switch Caddy from setup page to production config (redirect / → /web/)
+    reload_caddy_production
 
     # Caddy stays running — it will be reused by start_services later
 fi

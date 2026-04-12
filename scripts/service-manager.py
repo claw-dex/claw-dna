@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """Service manager for agent background processes.
 
-Ports 8080-8081 are reserved for the core services (Caddy, Streamlit).
 Services that listen on a port should use 8082-8090.
 Port is optional — polling/background services don't need one.
 
 Usage:
     python3 service-manager.py list                          # Show all managed services
-    python3 service-manager.py start <name> [<port>] -- <cmd...>  # Start a service
+    python3 service-manager.py start <name> [<port>] [--auto-start] -- <cmd...>  # Start a service
     python3 service-manager.py stop <name>                   # Stop a service (keeps entry)
     python3 service-manager.py remove <name>                 # Stop and remove a service
     python3 service-manager.py restart <name>                # Restart a service
     python3 service-manager.py status <name>                 # Check one service
     python3 service-manager.py health                        # Health check all services
     python3 service-manager.py cleanup                       # Remove dead entries
+    python3 service-manager.py auto-start                    # Start all services with auto_start:true that are not running
 """
 import fcntl, json, os, signal, subprocess, sys, tempfile, time
 from contextlib import contextmanager
@@ -241,7 +241,7 @@ def cmd_list():
         print(f"{name:<20} {port_str:<6} {pid_str:<8} {status:<10} {started}")
 
 
-def cmd_start(name, port, command):
+def cmd_start(name, port, command, auto_start=False):
     if not command:
         print("Error: no command specified after '--'")
         sys.exit(1)
@@ -298,7 +298,12 @@ def cmd_start(name, port, command):
             )
 
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+        # Preserve extra fields (auto_start, health_url, etc.) from existing entry
+        existing = services.get(name, {})
+        extra = {k: v for k, v in existing.items()
+                 if k not in ("pid", "port", "command", "started", "stdout_log", "stderr_log")}
         services[name] = {
+            **extra,
             "pid": proc.pid,
             "port": port,
             "command": command,
@@ -306,6 +311,8 @@ def cmd_start(name, port, command):
             "stdout_log": str(stdout_log),
             "stderr_log": str(stderr_log),
         }
+        if auto_start:
+            services[name]["auto_start"] = True
         _save(services)
         _update_state_services(services)
 
@@ -436,7 +443,11 @@ def cmd_restart(name):
             )
 
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+        # Preserve extra fields (auto_start, health_url, etc.) from existing entry
+        extra = {k: v for k, v in info.items()
+                 if k not in ("pid", "port", "command", "started", "stdout_log", "stderr_log")}
         services[name] = {
+            **extra,
             "pid": proc.pid,
             "port": port,
             "command": command,
@@ -565,6 +576,91 @@ def cmd_cleanup():
         print("No dead entries to clean up.")
 
 
+def cmd_auto_start():
+    """Start all services with auto_start:true that are not currently running.
+
+    Designed to be called at the start of every heartbeat. Never exits non-zero
+    so a single service failure does not abort the heartbeat.
+    """
+    services = _load()
+    started, skipped, failed = [], [], []
+
+    for name, info in services.items():
+        if not info.get("auto_start"):
+            continue
+
+        pid = info.get("pid")
+        if isinstance(pid, int) and _pid_alive(pid):
+            skipped.append(name)
+            continue
+
+        command = info.get("command")
+        port = info.get("port")
+
+        if not command:
+            print(f"[auto-start] Skipping '{name}': no command stored")
+            failed.append(name)
+            continue
+
+        if port is not None and _port_in_use(port):
+            print(f"[auto-start] Skipping '{name}': port {port} already in use")
+            failed.append(name)
+            continue
+
+        try:
+            log_dir = Path("/agent/memory/logs")
+            log_dir.mkdir(exist_ok=True)
+            stdout_log = Path(info.get("stdout_log") or log_dir / f"service-{name}.stdout.log")
+            stderr_log = Path(info.get("stderr_log") or log_dir / f"service-{name}.stderr.log")
+
+            with open(stdout_log, "a") as out, open(stderr_log, "a") as err:
+                proc = subprocess.Popen(
+                    command,
+                    stdout=out,
+                    stderr=err,
+                    cwd="/agent",
+                    start_new_session=True,
+                )
+
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+            with _flock():
+                services = _load()
+                # Preserve all extra fields (auto_start, health_url, etc.)
+                extra = {k: v for k, v in services.get(name, info).items()
+                         if k not in ("pid", "port", "command", "started", "stdout_log", "stderr_log")}
+                services[name] = {
+                    **extra,
+                    "pid": proc.pid,
+                    "port": port,
+                    "command": command,
+                    "started": now,
+                    "stdout_log": str(stdout_log),
+                    "stderr_log": str(stderr_log),
+                }
+                _save(services)
+            _update_state_services(services)
+
+            time.sleep(0.5)
+            if _pid_alive(proc.pid):
+                port_msg = f" on port {port}" if port is not None else ""
+                print(f"[auto-start] Started '{name}'{port_msg} (PID {proc.pid})")
+                started.append(name)
+            else:
+                print(f"[auto-start] '{name}' started but exited immediately — check {stderr_log}")
+                failed.append(name)
+
+        except Exception as e:
+            print(f"[auto-start] Failed to start '{name}': {e}")
+            failed.append(name)
+
+    if skipped and not started and not failed:
+        print(f"[auto-start] All auto-start services already running: {', '.join(skipped)}")
+    if started:
+        print(f"[auto-start] Started: {', '.join(started)}")
+    if failed:
+        print(f"[auto-start] Failed: {', '.join(failed)}")
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print(__doc__)
@@ -574,14 +670,17 @@ if __name__ == "__main__":
     if cmd == "list":
         cmd_list()
     elif cmd == "start":
-        # start <name> -- <cmd...>        (no port)
-        # start <name> <port> -- <cmd...> (with port)
-        if len(sys.argv) >= 4 and sys.argv[3] == "--":
-            cmd_start(sys.argv[2], None, sys.argv[4:])
-        elif len(sys.argv) >= 5 and sys.argv[4] == "--":
-            cmd_start(sys.argv[2], sys.argv[3], sys.argv[5:])
+        # start <name> [<port>] [--auto-start] -- <cmd...>
+        start_args = sys.argv[2:]
+        auto_start_flag = "--auto-start" in start_args
+        if auto_start_flag:
+            start_args = [a for a in start_args if a != "--auto-start"]
+        if len(start_args) >= 2 and start_args[1] == "--":
+            cmd_start(start_args[0], None, start_args[2:], auto_start=auto_start_flag)
+        elif len(start_args) >= 3 and start_args[2] == "--":
+            cmd_start(start_args[0], start_args[1], start_args[3:], auto_start=auto_start_flag)
         else:
-            print("Usage: service-manager.py start <name> [<port>] -- <command...>")
+            print("Usage: service-manager.py start <name> [<port>] [--auto-start] -- <command...>")
             sys.exit(1)
     elif cmd in ("stop", "remove", "restart", "status"):
         if len(sys.argv) < 3:
@@ -592,6 +691,8 @@ if __name__ == "__main__":
         cmd_health()
     elif cmd == "cleanup":
         cmd_cleanup()
+    elif cmd == "auto-start":
+        cmd_auto_start()
     else:
         print(f"Unknown command: {cmd}")
         print(__doc__)

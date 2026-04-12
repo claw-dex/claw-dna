@@ -2,6 +2,8 @@
   "webhook_receiver": {
     "pid": null,
     "port": 8082,
+    "auto_start": true,
+    "health_url": "http://localhost:8082/health",
     "command": [
       "uv",
       "run",

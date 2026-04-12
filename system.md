@@ -44,7 +44,7 @@ Operational data (for portal/scripts):
 - Python deps: /agent/pyproject.toml — add packages here, then run `uv sync`
   - **MUST run `uv sync` immediately after ANY change to `pyproject.toml`** (adding, removing, or updating dependencies). Failing to do so will leave the environment out of sync and may cause import errors or runtime failures.
 - Workspace:     /agent/workspace/
-- Available ports: 8080 (Caddy gateway), 8081 (Streamlit), 8082–8090 (free for your services)
+- Available ports: 8080 (Caddy gateway), 8081 (Streamlit), 8082 (webhook_receiver), 8083–8090 (free for your services)
 - Running as: user "agent" (non-root, passwordless sudo available)
 
 ## Browser Access (MANDATORY)

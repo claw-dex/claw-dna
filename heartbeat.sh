@@ -110,6 +110,9 @@ if [ -f /agent/memory/scheduled_tasks.json ]; then
     uv run python /agent/scripts/scheduler.py --check 2>/dev/null || true
 fi
 
+# ── Auto-start services (ensure services with auto_start:true are running) ──
+uv run python /agent/scripts/service-manager.py auto-start 2>/dev/null || true
+
 # ── Prompt Selection ─────────────────────────────────────────
 
 select_prompt() {

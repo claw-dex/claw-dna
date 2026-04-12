@@ -3,11 +3,12 @@
 Webhook Receiver Service
 ========================
 Generic HTTP webhook handler that captures incoming webhook payloads and
-records complete request information to /agent/messages/webhook.json.
+writes them to /agent/messages/inbox.json for agent processing.
 
 - Listens on port 8082
 - Caddy routes /webhook/* to this service (prefix is stripped before proxying)
-- POST/PUT/DELETE/PATCH: records full request info to webhook.json
+- POST/PUT/DELETE/PATCH: writes event to inbox.json (type="event", source="webhook")
+  and logs full payload to webhook_receiver.log for audit
 - GET/HEAD/OPTIONS: returns 200 without recording (probes/preflights)
 
 Setup:
@@ -31,25 +32,18 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-import requests
-
-from shared import locked_json_rw, surface_error
+from shared import surface_error, write_to_inbox
 
 # --- Paths ---
 BASE = Path("/agent")
-WEBHOOK_FILE   = BASE / "messages" / "webhook.json"
 LOG_DIR        = BASE / "memory" / "logs"
 LOG_FILE       = LOG_DIR / "webhook_receiver.log"
 HEARTBEAT_DIR  = BASE / "memory" / "heartbeats"
 HEARTBEAT_FILE = HEARTBEAT_DIR / "webhook_receiver.heartbeat"
 
 # --- Config ---
-WEBHOOK_PORT        = 8082
-MAX_WEBHOOK_ENTRIES = 200
-MAX_BODY_SIZE       = 1_048_576  # 1 MB
-
-CADDY_ADMIN    = "http://localhost:2019"
-CADDY_ROUTE_ID = "webhook-receiver"
+WEBHOOK_PORT  = 8082
+MAX_BODY_SIZE = 1_048_576  # 1 MB
 
 # --- Logging ---
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -71,45 +65,6 @@ def _write_heartbeat():
         HEARTBEAT_FILE.write_text(str(time.time()))
     except OSError:
         pass
-
-
-# ---------------------------------------------------------------------------
-# Caddy route management
-# ---------------------------------------------------------------------------
-
-def register_caddy_route():
-    route = {
-        "@id": CADDY_ROUTE_ID,
-        "match": [{"path": ["/webhook", "/webhook/*"]}],
-        "handle": [
-            {"handler": "rewrite", "strip_path_prefix": "/webhook"},
-            {"handler": "reverse_proxy", "upstreams": [{"dial": f"localhost:{WEBHOOK_PORT}"}]},
-        ],
-    }
-    try:
-        requests.delete(f"{CADDY_ADMIN}/id/{CADDY_ROUTE_ID}", timeout=5)
-        resp = requests.post(
-            f"{CADDY_ADMIN}/config/apps/http/servers/gateway/routes",
-            json=route,
-            timeout=10,
-        )
-        if resp.ok:
-            log.info(f"Registered Caddy route: /webhook/* -> localhost:{WEBHOOK_PORT}")
-        else:
-            log.warning(f"Caddy route registration failed ({resp.status_code}): {resp.text[:200]}")
-    except Exception as e:
-        log.warning(f"Could not register Caddy route: {e}")
-
-
-def deregister_caddy_route():
-    try:
-        resp = requests.delete(f"{CADDY_ADMIN}/id/{CADDY_ROUTE_ID}", timeout=10)
-        if resp.ok:
-            log.info("Deregistered Caddy route")
-        else:
-            log.warning(f"Caddy deregister failed ({resp.status_code}): {resp.text[:200]}")
-    except Exception as e:
-        log.warning(f"Could not deregister Caddy route: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +91,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         self._send_json(200, {"status": "ok"})
 
     def _handle_write_request(self):
-        """Handle POST/PUT/DELETE/PATCH: record full request to webhook.json."""
+        """Handle POST/PUT/DELETE/PATCH: write event to inbox.json."""
         try:
             parsed = urlparse(self.path)
 
@@ -158,8 +113,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 except (json.JSONDecodeError, ValueError):
                     pass
 
+            now = datetime.now(timezone.utc).isoformat()
+
+            # Build full event record for logging
             record = {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": now,
                 "method": self.command,
                 "path": parsed.path,
                 "query": parse_qs(parsed.query),
@@ -170,19 +128,60 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 "client_address": self.client_address[0],
             }
 
-            def _append_and_cap(existing):
-                if not isinstance(existing, list):
-                    existing = []
-                existing.append(record)
-                return existing[-MAX_WEBHOOK_ENTRIES:]
+            # Log full payload to webhook_receiver.log as the audit trail
+            log.info(f"Webhook event: {json.dumps(record)}")
 
-            success = locked_json_rw(_append_and_cap, json_file=WEBHOOK_FILE, default=[])
+            # Sanitize payload into human-readable content string for inbox
+            query_str = f"?{parsed.query}" if parsed.query else ""
+
+            # Strip headers that are injected by the infrastructure (Caddy proxy)
+            # or that carry sensitive credentials — these are irrelevant/unsafe in inbox
+            _SKIP_HEADERS = {
+                # Caddy-injected
+                "via", "x-forwarded-for", "x-forwarded-proto", "x-forwarded-host",
+                "x-real-ip",
+                # Infrastructure noise
+                "host",
+                # Sensitive credentials
+                "authorization", "cookie", "x-api-key",
+                "x-webhook-secret", "x-hub-signature", "x-hub-signature-256",
+                "x-auth-token",
+            }
+            header_pairs = ", ".join(
+                f"{k}: {v}" for k, v in self.headers.items()
+                if k.lower() not in _SKIP_HEADERS
+            )
+
+            body_str = (
+                json.dumps(body_parsed) if body_parsed is not None else body_text
+            )
+            _INBOX_BODY_MAX = 4096  # 4 KB — full payload already in webhook_receiver.log
+            if len(body_str) > _INBOX_BODY_MAX:
+                body_str = body_str[:_INBOX_BODY_MAX] + f"\n[truncated {len(body_str) - _INBOX_BODY_MAX} bytes — full payload in webhook_receiver.log]"
+
+            content_parts = [f"{self.command} {parsed.path}{query_str}"]
+            if header_pairs:
+                content_parts.append(f"Headers: {header_pairs}")
+            if body_str:
+                content_parts.append(f"Body: {body_str}")
+            content_parts.append(f"From: {self.client_address[0]}")
+            content = "\n".join(content_parts)
+
+            inbox_item = {
+                "type": "event",
+                "content": content,
+                "timestamp": now,
+                "received_at": now,
+                "source": "webhook",
+                "priority": 3,
+            }
+
+            success = write_to_inbox([inbox_item], dedup=False)
 
             if success:
-                log.info(f"Recorded {self.command} {parsed.path} from {self.client_address[0]}")
                 self._send_json(200, {"status": "received"})
             else:
-                log.error(f"Failed to write webhook record for {self.command} {parsed.path}")
+                log.error(f"Failed to write inbox item for {self.command} {parsed.path}")
                 self._send_json(500, {"status": "error", "detail": "failed to persist"})
 
         except Exception as e:
@@ -212,17 +211,11 @@ def main():
     log.info("Webhook Receiver starting up")
     log.info("=" * 60)
 
-    # Ensure output directory exists
-    WEBHOOK_FILE.parent.mkdir(parents=True, exist_ok=True)
-
     # Start HTTP server in a thread
     server = HTTPServer(("0.0.0.0", WEBHOOK_PORT), WebhookHandler)
     serve_thread = threading.Thread(target=server.serve_forever, daemon=True)
     serve_thread.start()
     log.info(f"HTTP server started on port {WEBHOOK_PORT}")
-
-    # Register Caddy route
-    register_caddy_route()
 
     # Signal handling
     shutdown_requested = False
@@ -244,7 +237,6 @@ def main():
         log.info("Shutdown via KeyboardInterrupt")
     finally:
         log.info("Cleaning up...")
-        deregister_caddy_route()
         server.shutdown()
         serve_thread.join(timeout=5)
         log.info("Webhook Receiver stopped.")

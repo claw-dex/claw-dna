@@ -34,6 +34,9 @@
       }
     }
   },
+  "model": "sonnet",
+  "effortLevel": "medium",
+  "advisorModel": "opus",
   "alwaysThinkingEnabled": true,
   "autoUpdate": true
 }

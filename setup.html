@@ -3,7 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Autonomous AI Agent</title>
+  <meta http-equiv="refresh" content="10">
+  <title>First Run Setup — Autonomous AI Agent</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -19,7 +20,7 @@
 
     .container {
       text-align: center;
-      max-width: 640px;
+      max-width: 700px;
       padding: 2rem;
     }
 
@@ -32,52 +33,81 @@
       text-shadow: 0 0 12px rgba(0, 212, 255, 0.4);
     }
 
-    .subtitle {
+    .title {
       font-size: 1.1rem;
       color: #5e81ac;
-      margin-bottom: 2.5rem;
+      margin-bottom: 2rem;
       letter-spacing: 0.15em;
     }
 
-    .nav {
-      display: flex;
-      flex-direction: column;
-      gap: 0.75rem;
-      align-items: center;
-    }
-
-    .nav-link {
-      display: flex;
-      align-items: baseline;
-      gap: 1rem;
-      width: 100%;
-      max-width: 320px;
-      padding: 0.6rem 1.2rem;
+    .card {
+      background: #111827;
       border: 1px solid #1e3a5f;
-      color: #c8d6e5;
-      text-decoration: none;
-      font-family: inherit;
-      font-size: 0.9rem;
-      transition: border-color 0.2s, color 0.2s;
-    }
-
-    .nav-link:hover {
-      border-color: #00d4ff;
-      color: #00d4ff;
-    }
-
-    .nav-link .label {
-      flex: 1;
+      border-radius: 4px;
+      padding: 1.5rem 2rem;
       text-align: left;
+      margin-bottom: 1.5rem;
     }
 
-    .nav-link .path {
+    .warning-label {
       font-size: 0.75rem;
-      color: #4a5568;
+      color: #f6ad55;
+      letter-spacing: 0.12em;
+      margin-bottom: 0.75rem;
     }
 
-    .nav-link:hover .path {
-      color: #2d6a8a;
+    .card p {
+      font-size: 0.9rem;
+      color: #a0aec0;
+      line-height: 1.6;
+      margin-bottom: 1rem;
+    }
+
+    .code-block {
+      background: #0a0e17;
+      border: 1px solid #2d3748;
+      border-radius: 3px;
+      padding: 0.75rem 1rem;
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 0.95rem;
+      color: #00d4ff;
+      margin-bottom: 1rem;
+      user-select: all;
+    }
+
+    .info-label {
+      font-size: 0.75rem;
+      color: #63b3ed;
+      letter-spacing: 0.12em;
+      margin-bottom: 0.5rem;
+    }
+
+    .info-text {
+      font-size: 0.85rem;
+      color: #718096;
+      line-height: 1.6;
+    }
+
+    .status {
+      font-size: 0.8rem;
+      color: #4a5568;
+      margin-top: 1.5rem;
+    }
+
+    .dot {
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #f6ad55;
+      vertical-align: middle;
+      margin-right: 0.4rem;
+      animation: pulse 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 0.4; }
+      50% { opacity: 1; }
     }
 
     @media (max-width: 480px) {
@@ -100,17 +130,27 @@
 ║       claw-dex/claw-dna - v1/base - 1.0.0         ║
 ║                                                   ║
 ╚═══════════════════════════════════════════════════╝</pre>
-    <div class="subtitle">AUTONOMOUS INTELLIGENCE</div>
-    <nav class="nav">
-      <a class="nav-link" href="/app/">
-        <span class="label">Portal</span>
-        <span class="path">/app/</span>
-      </a>
-      <a class="nav-link" href="/_/agent/">
-        <span class="label">File Browser</span>
-        <span class="path">/_/agent/</span>
-      </a>
-    </nav>
+
+    <div class="title">WELCOME — FIRST RUN SETUP</div>
+
+    <div class="card">
+      <div class="warning-label">⚠ AUTHENTICATION REQUIRED</div>
+      <p>
+        AI coding agent is not authenticated yet. Before the agent can start,
+        you need to authenticate the AI coding agent. Run the following command
+        in your terminal and complete the login flow:
+      </p>
+      <div class="code-block">docker exec -it myagent claude</div>
+      <div class="info-label">ℹ NEXT STEPS</div>
+      <p class="info-text">
+        Once authentication is complete, this page will automatically redirect
+        you to the portal. No manual action needed.
+      </p>
+    </div>
+
+    <div class="status">
+      <span class="dot"></span>Waiting for authentication &mdash; checking every 10s
+    </div>
   </div>
 </body>
 </html>

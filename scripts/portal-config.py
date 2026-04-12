@@ -288,9 +288,19 @@ def _auth_exists() -> bool:
 
 
 def _build_auth_route(username: str, password_hash: str) -> dict:
-    """Build the JSON authentication route object."""
+    """Build the JSON authentication route object.
+
+    /webhook/* is excluded so external servers can POST without credentials.
+    """
     return {
         "@id": "portal_auth",
+        "match": [
+            {
+                "not": [
+                    {"path": ["/webhook/*"]}
+                ]
+            }
+        ],
         "handle": [
             {
                 "handler": "authentication",

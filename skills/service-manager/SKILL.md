@@ -9,7 +9,7 @@ description: Manage agent background processes. Use to register a new background
 
 Manages background agent processes. Use this for any long-running background process (web servers, notebooks, APIs, workers) — it handles PID tracking, health checks, log management, and state.json integration.
 
-If service require a port, chose a port in range 8082–8090. Ports 8080 (Caddy) and 8081 (Streamlit) are reserved and not managed here.
+If service require a port, chose a port in range 8083–8090. Ports 8080 (Caddy), 8081 (Streamlit), and 8082 (webhook_receiver) are reserved and not managed here.
 
 ## When to Use
 
@@ -24,7 +24,7 @@ If service require a port, chose a port in range 8082–8090. Ports 8080 (Caddy)
 |------|------------|
 | 8080 | Caddy gateway (reserved) |
 | 8081 | Streamlit portal (reserved) |
-| 8082 | Available (e.g., system webhook receiver) |
+| 8082 | **Reserved** — `webhook_receiver` (built-in, auto-starts) |
 | 8083–8090 | Available for agent services |
 
 ## Subcommands
@@ -32,7 +32,7 @@ If service require a port, chose a port in range 8082–8090. Ports 8080 (Caddy)
 | Subcommand | Description |
 |------------|-------------|
 | `list` | List all registered services with their port, PID liveness, and status |
-| `start NAME PORT -- CMD...` | Register and start a service |
+| `start NAME [PORT] [--auto-start] -- CMD...` | Register and start a service; `--auto-start` marks it for automatic restart on each heartbeat |
 | `stop NAME` | Stop a running service and keep its entry for restart |
 | `remove NAME` | Stop (if running) and remove a service entry entirely |
 | `restart NAME` | Restart a registered service (stops if running, then starts with stored command) |
@@ -48,6 +48,9 @@ uv run python scripts/service-manager.py list
 
 # Start a webhook listener on port 8083
 uv run python scripts/service-manager.py start webhook 8083 -- python3 webhook_server.py
+
+# Start a service and mark it to auto-restart on every heartbeat
+uv run python scripts/service-manager.py start webhook 8083 --auto-start -- python3 webhook_server.py
 
 # Start a Jupyter notebook on port 8088
 uv run python scripts/service-manager.py start jupyter 8088 -- \
@@ -130,7 +133,7 @@ The webhook_receiver (`port 8082`) already has `health_url` configured.
 
 ## Port Allocation Rules
 
-- Only use ports 8082–8090 (constitution requirement)
+- Only use ports 8083–8090 for new services (8082 is reserved for webhook_receiver)
 - Check `service-manager.py list` before starting to avoid port conflicts
 - Always log new port bindings in your journal entry
 - Maximum 3 concurrent services (constitution resource limit)
