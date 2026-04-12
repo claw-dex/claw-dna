@@ -89,7 +89,7 @@ def register_caddy_route():
     try:
         requests.delete(f"{CADDY_ADMIN}/id/{CADDY_ROUTE_ID}", timeout=5)
         resp = requests.post(
-            f"{CADDY_ADMIN}/config/apps/http/servers/srv0/routes",
+            f"{CADDY_ADMIN}/config/apps/http/servers/gateway/routes",
             json=route,
             timeout=10,
         )

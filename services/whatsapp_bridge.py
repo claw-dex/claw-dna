@@ -543,7 +543,7 @@ def register_caddy_route():
         requests.delete(f"{CADDY_ADMIN}/id/{CADDY_ROUTE_ID}", timeout=5)
         # Insert route at position 0 so it takes priority over catch-all groups
         resp = requests.put(
-            f"{CADDY_ADMIN}/config/apps/http/servers/srv0/routes/0",
+            f"{CADDY_ADMIN}/config/apps/http/servers/gateway/routes/0",
             json=route,
             timeout=10,
         )

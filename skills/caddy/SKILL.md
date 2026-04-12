@@ -23,8 +23,8 @@ NAME="$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g')-$(
 | Task | Command |
 |------|---------|
 | Check status | `curl -sf http://localhost:2019/config/` |
-| List routes | `curl -sf http://localhost:2019/config/apps/http/servers/local_proxies/routes` |
-| Add route | `POST /config/apps/http/servers/local_proxies/routes` |
+| List routes | `curl -sf http://localhost:2019/config/apps/http/servers/gateway/routes` |
+| Add route | `POST /config/apps/http/servers/gateway/routes` |
 | Delete route | `DELETE /id/proxy_<name>` |
 
 ## Workflows
@@ -40,7 +40,7 @@ If fails: "Caddy not running. Install: `brew install caddy`, Start: `caddy start
 ### List All Proxies
 
 ```bash
-curl -sf http://localhost:2019/config/apps/http/servers/local_proxies/routes 2>/dev/null
+curl -sf http://localhost:2019/config/apps/http/servers/gateway/routes 2>/dev/null
 ```
 
 Display as table: Name | URL | Backend
@@ -58,15 +58,15 @@ done
 
 3. **Initialize server if needed**:
 ```bash
-curl -sf http://localhost:2019/config/apps/http/servers/local_proxies > /dev/null 2>&1 || \
+curl -sf http://localhost:2019/config/apps/http/servers/gateway > /dev/null 2>&1 || \
 curl -sf -X POST http://localhost:2019/load \
   -H "Content-Type: application/json" \
-  -d '{"apps":{"http":{"servers":{"local_proxies":{"listen":[":80"],"routes":[]}}}}}'
+  -d '{"apps":{"http":{"servers":{"gateway":{"listen":[":80"],"routes":[]}}}}}'
 ```
 
 4. **Add route** (replace NAME and PORT):
 ```bash
-curl -sf -X POST "http://localhost:2019/config/apps/http/servers/local_proxies/routes" \
+curl -sf -X POST "http://localhost:2019/config/apps/http/servers/gateway/routes" \
   -H "Content-Type: application/json" \
   -d '{"@id":"proxy_NAME","match":[{"host":["NAME.localhost"]}],"handle":[{"handler":"reverse_proxy","upstreams":[{"dial":"localhost:PORT"}]}],"terminal":true}'
 ```

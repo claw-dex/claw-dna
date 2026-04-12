@@ -214,7 +214,7 @@ def test_web_portal_served():
 # ── Suite 2: App module imports ─────────────────────────────────────────────
 
 APP_MODULES = [
-    "commands", "journal", "memory", "overview", "system",
+    "commands", "glance", "memory_tab", "overview", "system",
 ]
 
 def test_app_module_imports():
