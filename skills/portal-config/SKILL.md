@@ -5,7 +5,7 @@ description: Unified portal configuration management. Manages public hostname (f
 
 # portal-config
 
-**Path:** `scripts/portal-config.py`
+**Path:** `scripts/portal_config.py`
 
 Unified configuration manager for the agent portal. Combines hostname, timezone, and auth management into a single script with subcommand-based CLI.
 
@@ -29,13 +29,13 @@ When the agent is exposed via a public proxy, configure the public URL so the ag
 
 ```bash
 # Set public hostname
-uv run python scripts/portal-config.py hostname --set https://agent.example.com
+uv run python scripts/portal_config.py hostname --set https://agent.example.com
 
 # View current hostname
-uv run python scripts/portal-config.py hostname --show
+uv run python scripts/portal_config.py hostname --show
 
 # Clear hostname
-uv run python scripts/portal-config.py hostname --clear
+uv run python scripts/portal_config.py hostname --clear
 ```
 
 ### timezone
@@ -56,13 +56,13 @@ The timezone is stored in `/agent/memory/portal_config.json` and used by heartbe
 
 ```bash
 # Set timezone
-uv run python scripts/portal-config.py timezone --set America/New_York
+uv run python scripts/portal_config.py timezone --set America/New_York
 
 # View current timezone
-uv run python scripts/portal-config.py timezone --show
+uv run python scripts/portal_config.py timezone --show
 
 # Clear timezone
-uv run python scripts/portal-config.py timezone --clear
+uv run python scripts/portal_config.py timezone --clear
 ```
 
 **Valid timezone names:**
@@ -93,19 +93,19 @@ When enabled, the portal requires username/password authentication via HTTP Basi
 
 ```bash
 # Enable authentication
-uv run python scripts/portal-config.py auth --enable admin:secure_password_123
+uv run python scripts/portal_config.py auth --enable admin:secure_password_123
 
 # Check current credentials
-uv run python scripts/portal-config.py auth --show
+uv run python scripts/portal_config.py auth --show
 
 # Disable authentication
-uv run python scripts/portal-config.py auth --disable
+uv run python scripts/portal_config.py auth --disable
 
 # Re-apply after Caddy restart (automated by bootstrap.sh)
-uv run python scripts/portal-config.py auth --reapply
+uv run python scripts/portal_config.py auth --reapply
 
 # Emergency rollback
-uv run python scripts/portal-config.py auth --rollback
+uv run python scripts/portal_config.py auth --rollback
 ```
 
 **How auth works:**
@@ -136,14 +136,14 @@ The script uses atomic updates via `save_portal_config()` from `app/data/write.p
 
 ## Integration
 
-- **bootstrap.sh**: Automatically runs `portal-config.py auth --reapply` on startup (line 100)
+- **bootstrap.sh**: Automatically runs `portal_config.py auth --reapply` on startup (line 100)
 - **heartbeat.sh**: Reads `timezone` from `portal_config.json` for log timestamps (line 66-69)
 - **chat.py**: Reads `public_url` from `portal_config.json` for system prompt injection
 - **Portal UI**: System tab → Run Script section exposes all commands
 
 ## Migration from Legacy Scripts
 
-This script supersedes `portal-hostname.py` and `portal-auth.py`, which now have been removed. The new `portal-config.py` provides a unified interface for all portal configuration needs.
+This script supersedes `portal-hostname.py` and `portal-auth.py`, which now have been removed. The new `portal_config.py` provides a unified interface for all portal configuration needs.
 
 **Old commands still work:**
 ```bash
@@ -155,6 +155,6 @@ uv run python scripts/portal-auth.py --enable user:pass
 **New canonical syntax:**
 ```bash
 # New style (recommended)
-uv run python scripts/portal-config.py hostname --set https://example.com
-uv run python scripts/portal-config.py auth --enable user:pass
+uv run python scripts/portal_config.py hostname --set https://example.com
+uv run python scripts/portal_config.py auth --enable user:pass
 ```

@@ -7,9 +7,7 @@ from datetime import datetime, timezone
 
 from app.data._cache import _mfile_cache, _cache, _register_cache
 from app.data._helpers import _read_json_safe
-from app.shared import AGENT_DIR, MEMORY_DIR, MESSAGES_DIR, GOALS_PATH, ERROR_LOG_PATH
-
-SCHEDULED_TASKS_PATH = os.path.join(MEMORY_DIR, "scheduled_tasks.json")
+from app.shared import AGENT_DIR, MEMORY_DIR, MESSAGES_DIR, GOALS_PATH, ERROR_LOG_PATH, SCHEDULED_TASKS_PATH
 
 
 @_mfile_cache(lambda: SCHEDULED_TASKS_PATH, list)

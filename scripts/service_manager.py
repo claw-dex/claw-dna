@@ -5,15 +5,15 @@ Services that listen on a port should use 8082-8090.
 Port is optional — polling/background services don't need one.
 
 Usage:
-    python3 service-manager.py list                          # Show all managed services
-    python3 service-manager.py start <name> [<port>] [--auto-start] -- <cmd...>  # Start a service
-    python3 service-manager.py stop <name>                   # Stop a service (keeps entry)
-    python3 service-manager.py remove <name>                 # Stop and remove a service
-    python3 service-manager.py restart <name>                # Restart a service
-    python3 service-manager.py status <name>                 # Check one service
-    python3 service-manager.py health                        # Health check all services
-    python3 service-manager.py cleanup                       # Remove dead entries
-    python3 service-manager.py auto-start                    # Start all services with auto_start:true that are not running
+    python3 service_manager.py list                          # Show all managed services
+    python3 service_manager.py start <name> [<port>] [--auto-start] -- <cmd...>  # Start a service
+    python3 service_manager.py stop <name>                   # Stop a service (keeps entry)
+    python3 service_manager.py remove <name>                 # Stop and remove a service
+    python3 service_manager.py restart <name>                # Restart a service
+    python3 service_manager.py status <name>                 # Check one service
+    python3 service_manager.py health                        # Health check all services
+    python3 service_manager.py cleanup                       # Remove dead entries
+    python3 service_manager.py auto-start                    # Start all services with auto_start:true that are not running
 """
 import fcntl, json, os, signal, subprocess, sys, tempfile, time
 from contextlib import contextmanager
@@ -148,7 +148,7 @@ def _find_orphan_pids(command, exclude_pids=None):
             cmdline = " ".join(cmdline_list)
             if pattern not in cmdline:
                 continue
-            if "service-manager.py" in cmdline:
+            if "service_manager.py" in cmdline:
                 continue
             orphans.append((pid, cmdline))
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
@@ -680,11 +680,11 @@ if __name__ == "__main__":
         elif len(start_args) >= 3 and start_args[2] == "--":
             cmd_start(start_args[0], start_args[1], start_args[3:], auto_start=auto_start_flag)
         else:
-            print("Usage: service-manager.py start <name> [<port>] [--auto-start] -- <command...>")
+            print("Usage: service_manager.py start <name> [<port>] [--auto-start] -- <command...>")
             sys.exit(1)
     elif cmd in ("stop", "remove", "restart", "status"):
         if len(sys.argv) < 3:
-            print(f"Usage: service-manager.py {cmd} <name>")
+            print(f"Usage: service_manager.py {cmd} <name>")
             sys.exit(1)
         {"stop": cmd_stop, "remove": cmd_remove, "restart": cmd_restart, "status": cmd_status}[cmd](sys.argv[2])
     elif cmd == "health":

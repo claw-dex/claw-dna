@@ -13,20 +13,20 @@ from app.shared import SCRIPTS_DIR
 _SCRIPT_DESC_CACHE: dict = {}
 
 _SCRIPT_CATEGORIES = {
-    "cycle-start.py": "Cycle Management",
-    "cycle-close.py": "Cycle Management",
-    "cycle-report.py": "Cycle Management",
-    "memory-stats.py": "Memory",
-    "memory-repair.py": "Memory",
-    "memory-backup.py": "Memory",
-    "journal-archive.py": "Memory",
-    "health-check.sh": "Diagnostics",
+    "cycle_start.py": "Cycle Management",
+    "cycle_close.py": "Cycle Management",
+    "cycle_report.py": "Cycle Management",
+    "memory_stats.py": "Memory",
+    "memory_repair.py": "Memory",
+    "memory_backup.py": "Memory",
+    "journal_archive.py": "Memory",
+    "health_check.sh": "Diagnostics",
     "self_test.py": "Diagnostics",
     "maintain.py": "Diagnostics",
     "metrics_collector.py": "Diagnostics",
-    "server-restart.sh": "Diagnostics",
-    "log-cleanup.sh": "Diagnostics",
-    "service-manager.py": "Services",
+    "server_restart.sh": "Diagnostics",
+    "log_cleanup.sh": "Diagnostics",
+    "service_manager.py": "Services",
 }
 
 

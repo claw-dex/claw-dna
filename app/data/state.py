@@ -54,6 +54,7 @@ def load_services():
 
 
 _SERVICES_FULL_CACHE = _register_cache()
+_SERVICE_LOG_CACHE = _register_cache()
 
 
 def load_services_full():
@@ -83,4 +84,59 @@ def load_services_full():
         for name, info in services.items()
     }
     _SERVICES_FULL_CACHE["data"] = (result, cache_key)
+    return result
+
+
+def _read_log_capped(path, cap=20000):
+    """Read a log file up to cap characters, with a truncation marker if larger."""
+    if not path:
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read(cap)
+        if len(content) >= cap:
+            content += f"\n\n... (truncated — output capped at {cap:,} characters)"
+        return content
+    except (FileNotFoundError, OSError):
+        return ""
+
+
+def load_service_logs(name):
+    """Load stdout and stderr log content for a service, with mtime-based caching.
+
+    Returns {"stdout": str, "stderr": str, "stdout_path": str, "stderr_path": str}
+    or None if the service is not found.
+    """
+    services_path = f"{MEMORY_DIR}/services.json"
+    services = _read_json_safe(services_path, {}) or {}
+    svc = services.get(name)
+    if not svc:
+        return None
+
+    stdout_path = svc.get("stdout_log", "")
+    stderr_path = svc.get("stderr_log", "")
+
+    def _mtime(p):
+        try:
+            return os.path.getmtime(p) if p else 0.0
+        except OSError:
+            return 0.0
+
+    stdout_mtime = _mtime(stdout_path)
+    stderr_mtime = _mtime(stderr_path)
+    cache_key = (stdout_mtime, stderr_mtime)
+
+    cached = _SERVICE_LOG_CACHE.get(name)
+    if cached is not None:
+        result, ck = cached
+        if ck == cache_key:
+            return result
+
+    result = {
+        "stdout": _read_log_capped(stdout_path),
+        "stderr": _read_log_capped(stderr_path),
+        "stdout_path": stdout_path,
+        "stderr_path": stderr_path,
+    }
+    _SERVICE_LOG_CACHE[name] = (result, cache_key)
     return result

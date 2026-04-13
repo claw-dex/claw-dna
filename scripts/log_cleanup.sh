@@ -1,7 +1,8 @@
 #!/bin/bash
-# log-cleanup.sh — Archives old cycle logs to save space
+set -uo pipefail
+# log_cleanup.sh — Archives old cycle logs to save space
 # Constitution allows: "Log files older than 50 cycles may be compressed or summarised"
-# Usage: ./log-cleanup.sh [--keep N] [--dry-run]
+# Usage: ./log_cleanup.sh [--keep N] [--dry-run]
 # Default: keeps last 50 cycles, archives older ones into /agent/memory/logs/archive/
 
 KEEP=50

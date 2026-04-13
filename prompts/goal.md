@@ -9,7 +9,7 @@ This prompt is triggered when either:
 ## Cycle Start (run this first)
 
 ```bash
-uv run python scripts/cycle-start.py        # status, goals, inbox, recent journal, repair + evolve recommendation
+uv run python scripts/cycle_start.py        # status, goals, inbox, recent journal, repair + evolve recommendation
 ```
 
 Review the output before proceeding. If memory-repair reports any fixes, note them in your journal.
@@ -66,9 +66,9 @@ Read /agent/messages/inbox.json. For each command:
       | Interactive HTML tools / playgrounds | `playground` skill |
       | Commit / push code to git | `/commit` or `/commit-push-pr` command |
       | Audit or improve AGENTS.md | Review and update `/agent/AGENTS.md` |
-      | Start / manage a background service or long-running process | `scripts/service-manager.py start <name> <port> -- <cmd>` |
+      | Start / manage a background service or long-running process | `scripts/service_manager.py start <name> <port> -- <cmd>` |
       | System maintenance / housekeeping | `scripts/maintain.py --fix` |
-      | Agent growth summary / milestone report | `scripts/milestone-report.py` |
+      | Agent growth summary / milestone report | `scripts/milestone_report.py` |
       | Unanswered `needs_human` outbox message | Check `callmebot` skill for voice call escalation |
    g. Execute the first step (or as much as fits in one cycle)
    h. Update the web portal to show progress
@@ -87,7 +87,7 @@ Some goals require multiple phases that each use a different specialist prompt/s
 
 When a goal spans phases:
 - Write a clear handoff note in `state.json.last_cycle_summary` (future you reads this)
-- Set goal status to "in-progress" between phases
+- Set goal status to "in_progress" between phases
 - Begin each subsequent cycle by reading journal for last phase's output before continuing
 
 ### Command: type "message"
@@ -99,9 +99,9 @@ Messages are conversational — they do NOT create trackable goals.
    - **Question about agent state** → read state.json, journal.json, goal.json; answer in outbox
    - **Feedback or context for ongoing goal** → incorporate into current work; confirm receipt in outbox
    - **Data question** → run the relevant script and report results in outbox:
-     - Agent growth / milestone summary → `scripts/milestone-report.py`
+     - Agent growth / milestone summary → `scripts/milestone_report.py`
      - Maintenance / housekeeping → `scripts/maintain.py --fix`
-     - Background services status → `scripts/service-manager.py list`
+     - Background services status → `scripts/service_manager.py list`
    - **Quick status check** (e.g., "how's everything going?", "any alerts?", "what happened today?") → read state.json, journal.json, goal.json and compile a summary of agent activity and portal health
    - **System health / self-test request** (e.g., "run the tests", "is the system healthy?", "check for errors", "run self-test") → run `uv run python scripts/self_test.py --record` and report results in outbox; if failures, triage with `prompts/error-triage.md`
    - **Housekeeping / cleanup request** (e.g., "clean up logs", "run maintenance", "fix memory files") → run `scripts/maintain.py --fix` and report summary in outbox
@@ -150,7 +150,7 @@ goals. If the intent is the same, skip adding it and work on the existing goal i
 You MUST update goal status in `/agent/memory/goal.json` as you work (see `prompts/enum.md` → Goal Status):
 
 - **"pending"** → goal received but not yet started
-- **"in-progress"** → you are actively working on this goal (set when you begin)
+- **"in_progress"** → you are actively working on this goal (set when you begin)
 - **"completed"** → goal finished successfully (set when done)
 - **"failed"** → goal could not be completed (set on failure, include reason in journal)
 
@@ -160,10 +160,10 @@ update the `status` and `updated_at` fields, then write the file back.
 ## Continue In-Progress Goals
 
 When the inbox is empty (or after processing inbox items), check goal.json
-for goals with status "pending" or "in-progress":
+for goals with status "pending" or "in_progress":
 
 1. Read `/agent/memory/goal.json`
-2. Find the oldest goal with status "in-progress" (or "pending" if none in-progress)
+2. Find the oldest goal with status "in_progress" (or "pending" if none in-progress)
 3. Read `state.json` for `last_cycle_summary` — this tells you what was done last cycle
 4. Read journal.json for the most recent entry to understand current progress
 5. Continue working from where you left off
@@ -211,12 +211,12 @@ If a goal is too large for one cycle:
    - Current phase completed
    - Next phase to start
    - Any blockers or decisions needed
-4. Set goal status to "in-progress" (not "completed") and `goal_status` in state.json to "in-progress"
+4. Set goal status to "in_progress" (not "completed") and `goal_status` in state.json to "in_progress"
 5. The next cycle reads state.json and journal to continue — write as if the reader has no memory of this cycle
 
 ## Rules
 
-- **ONE cycle per heartbeat.** Never run `cycle-start.py` or `cycle-close.py` more than once
+- **ONE cycle per heartbeat.** Never run `cycle_start.py` or `cycle_close.py` more than once
   per session. Never create additional cycle entries in `cycles.json`. Each heartbeat is
   exactly one cycle — process inbox + work on one goal, then close. If you see new inbox
   items arrive while working, leave them for the next heartbeat. Creating overlapping cycle
@@ -226,4 +226,4 @@ If a goal is too large for one cycle:
 
 Review `/agent/messages/outbox.json`, if no messages was written within this cycle, write a summary of what you accomplished in the outbox so the user has visibility into your progress.
 Also update portal to show current goal progress if applicable.
-Then follow the `/agent/prompts/cycle-close.md` checklist (includes running `cycle-close.py`) to close the cycle.
+Then follow the `/agent/prompts/cycle-close.md` checklist (includes running `cycle_close.py`) to close the cycle.

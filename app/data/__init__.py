@@ -7,7 +7,7 @@ All existing ``from app.data import load_state`` imports continue to work unchan
 from app.data._cache import _cache_clear_all  # noqa: F401
 
 # State
-from app.data.state import load_state, load_services, load_services_full  # noqa: F401
+from app.data.state import load_state, load_services, load_services_full, load_service_logs  # noqa: F401
 
 # Goals
 from app.data.goal import load_goals, load_goal_stats  # noqa: F401

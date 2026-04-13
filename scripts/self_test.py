@@ -214,7 +214,7 @@ def test_web_portal_served():
 # ── Suite 2: App module imports ─────────────────────────────────────────────
 
 APP_MODULES = [
-    "commands", "glance", "memory_tab", "overview", "system",
+    "commands_tab", "glance", "memory_tab", "overview_tab", "system_tab",
 ]
 
 def test_app_module_imports():
@@ -309,10 +309,10 @@ def test_data_loaders():
 # ── Suite 4: Script syntax validation ───────────────────────────────────────
 
 CRITICAL_SCRIPTS = [
-    "cycle-start.py", "cycle-close.py", "memory-repair.py", "memory-backup.py",
-    "self_test.py", "journal-archive.py",
-    "memory-stats.py", "metrics_collector.py",
-    "milestone-report.py", "maintain.py",
+    "cycle_start.py", "cycle_close.py", "memory_repair.py", "memory_backup.py",
+    "self_test.py", "journal_archive.py",
+    "memory_stats.py", "metrics_collector.py",
+    "milestone_report.py", "maintain.py",
 ]
 
 def test_scripts_syntax():
@@ -333,11 +333,11 @@ def test_scripts_syntax():
 # ── Suite 5: cycle-start quick smoke test ────────────────────────────────────
 
 def test_cycle_start_runs():
-    """cycle-start.py --short exits 0 with non-empty output."""
+    """cycle_start.py --short exits 0 with non-empty output."""
     t0 = time.monotonic()
     try:
         r = subprocess.run(
-            ["uv", "run", "python", "scripts/cycle-start.py", "--short"],
+            ["uv", "run", "python", "scripts/cycle_start.py", "--short"],
             capture_output=True, text=True, timeout=20, cwd=str(AGENT_DIR),
         )
         elapsed = (time.monotonic() - t0) * 1000
@@ -388,7 +388,7 @@ def test_app_render():
     t0 = time.monotonic()
     try:
         r = subprocess.run(
-            ["uv", "run", "python", "scripts/app-check.py"],
+            ["uv", "run", "python", "scripts/app_check.py"],
             capture_output=True, text=True, timeout=45, cwd=str(AGENT_DIR),
         )
         elapsed = (time.monotonic() - t0) * 1000
@@ -417,7 +417,7 @@ SUITES = {
     "imports":     (test_app_module_imports,   "App module imports + render()"),
     "loaders":     (test_data_loaders,         "Data loader return types"),
     "syntax":      (test_scripts_syntax,       "Script syntax validity"),
-    "cycle_start": (test_cycle_start_runs,     "cycle-start.py --short smoke test"),
+    "cycle_start": (test_cycle_start_runs,     "cycle_start.py --short smoke test"),
     "tab_errors":  (test_no_active_tab_errors, "No active tab errors (6h)"),
     "apptest":     (test_app_render,           "AppTest headless render of server.py"),
 }

@@ -29,14 +29,14 @@ _CATEGORY_ICONS = {
 # dict with "flag" + "placeholder" → text input (value argument)
 _SCRIPT_ARGS: dict[str, list] = {
     # Cycle Management
-    "cycle-start.py": [
+    "cycle_start.py": [
         {"flag": "--short", "help": "One-liner summary only"},
         {"flag": "--json", "help": "Machine-readable JSON output"},
         {"flag": "--no-repair", "help": "Skip memory repair step"},
         {"flag": "--clear-old-errors", "help": "Purge tab errors older than 1h"},
         {"flag": "--clear-all-errors", "help": "Purge ALL tab errors"},
     ],
-    "cycle-close.py": [
+    "cycle_close.py": [
         {"flag": "--type", "help": "evolve | goal | self-heal", "placeholder": "evolve"},
         {"flag": "--summary", "help": "1-2 sentence summary (required)", "placeholder": "text"},
         {"flag": "--cycle", "help": "Cycle number (auto-detect if omitted)", "placeholder": "N"},
@@ -45,22 +45,22 @@ _SCRIPT_ARGS: dict[str, list] = {
         {"flag": "--no-normalize", "help": "Skip cycles.json normalization step"},
         {"flag": "--dry-run", "help": "Preview what would be written"},
     ],
-    "cycle-report.py": [
+    "cycle_report.py": [
         {"flag": "--last", "help": "Show last N cycles only", "placeholder": "10"},
         {"flag": "--format", "help": "Output format: md or json", "placeholder": "md"},
     ],
     # Memory
-    "memory-stats.py": [
+    "memory_stats.py": [
         {"flag": "--json", "help": "Machine-readable JSON output"},
         {"flag": "--short", "help": "One-liner summary only"},
     ],
-    "memory-repair.py": [
+    "memory_repair.py": [
         {"flag": "--dry-run", "help": "Scan only, no writes"},
         {"flag": "--backup", "help": "Create backups only (no repair)"},
         {"flag": "--quiet", "help": "Only print summary line"},
         {"flag": "--json", "help": "Machine-readable JSON output"},
     ],
-    "memory-backup.py": [
+    "memory_backup.py": [
         {"flag": "--list", "help": "List all backups"},
         {"flag": "--check", "help": "Show age of most recent backup"},
         {"flag": "--dry-run", "help": "Preview what restore would do"},
@@ -70,7 +70,7 @@ _SCRIPT_ARGS: dict[str, list] = {
         {"flag": "--prune", "help": "Keep only N most recent backups", "placeholder": "5"},
         {"flag": "--label", "help": "Label for the backup", "placeholder": "pre-deploy"},
     ],
-    "journal-archive.py": [
+    "journal_archive.py": [
         {"flag": "--dry-run", "help": "Preview without modifying files"},
         {"flag": "--list", "help": "Show entry counts and file sizes"},
         {"flag": "--json", "help": "Output as JSON"},
@@ -99,11 +99,11 @@ _SCRIPT_ARGS: dict[str, list] = {
         {"flag": "--regressions", "help": "Detect performance regressions"},
         {"flag": "--limit", "help": "Report on last N snapshots", "placeholder": "10"},
     ],
-    "app-check.py": [
+    "app_check.py": [
         {"flag": "--json", "help": "Output result as JSON"},
     ],
     # Services / Portal
-    "service-manager.py": [
+    "service_manager.py": [
         {"type": "select", "label": "Command", "options": [
             ("list", "Show all managed services"),
             ("health", "Health check all services"),
@@ -113,7 +113,7 @@ _SCRIPT_ARGS: dict[str, list] = {
             ("status", "Check one service (add: name)"),
         ]},
     ],
-    "portal-config.py": [
+    "portal_config.py": [
         {"type": "select", "label": "Subcommand", "options": [
             ("hostname", "Manage public hostname"),
             ("timezone", "Manage timezone"),
@@ -145,7 +145,7 @@ _SCRIPT_ARGS: dict[str, list] = {
         ]},
         {"flag": "--json", "help": "Output as JSON"},
     ],
-    "milestone-report.py": [
+    "milestone_report.py": [
         {"flag": "--list", "help": "List all milestone cycles"},
         {"flag": "--save", "help": "Write report to workspace/"},
         {"flag": "--json", "help": "Output raw JSON"},

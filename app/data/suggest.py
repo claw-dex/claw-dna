@@ -87,7 +87,7 @@ def load_suggest():
     if journal_count > 30:
         suggestions.append({
             "priority": "medium", "category": "efficiency",
-            "action": "Run: uv run python scripts/journal-archive.py",
+            "action": "Run: uv run python scripts/journal_archive.py",
             "reason": f"Journal has {journal_count} entries — archive old entries to speed up loading",
         })
     errors = load_errors()

@@ -7,10 +7,11 @@ import streamlit as st
 
 def render():
     from app.data import (
-        load_services_full, stop_service, start_service, remove_service,
+        load_services_full, load_service_logs, stop_service, start_service, remove_service,
         load_scheduled_tasks,
         create_scheduled_task, update_scheduled_task, delete_scheduled_task,
     )
+    from app.shared import _badge
 
     # ── Services ──────────────────────────────────────────────
     st.subheader("Services")
@@ -24,12 +25,13 @@ def render():
             pid = svc.get("pid", "?")
             has_command = bool(svc.get("command"))
             icon = "🟢" if alive else "🔴"
+            status_color = "#4CAF50" if alive else "#F44336"
             status_label = "running" if alive else "stopped"
             col_name, col_status, col_action = st.columns([3, 2, 1])
             with col_name:
                 st.markdown(f"{icon} **{name}** (PID {pid})")
             with col_status:
-                st.caption(status_label)
+                st.markdown(_badge(status_label, status_color), unsafe_allow_html=True)
             with col_action:
                 del_key = f"confirm_del_svc_{name}"
                 if alive:
@@ -89,11 +91,17 @@ def render():
                 err_cols = st.columns([2, 2, 4])
                 with err_cols[0]:
                     if st.button("Ask AI for Help", key=f"ask_ai_{name}", type="primary"):
+                        logs = load_service_logs(name)
+                        stderr_tail = ""
+                        if logs and logs.get("stderr"):
+                            stderr_tail = logs["stderr"][-2000:]
                         prompt = (
                             f"The service '{name}' failed to start with the following error:\n\n"
                             f"{error_msg}\n\n"
-                            "Please help me resolve this issue."
                         )
+                        if stderr_tail:
+                            prompt += f"Service stderr log (last 2 KB):\n\n{stderr_tail}\n\n"
+                        prompt += "Please help me resolve this issue."
                         st.session_state["chat_pending_prompt"] = prompt
                         st.session_state.pop(err_key, None)
                         st.rerun()
@@ -101,6 +109,84 @@ def render():
                     if st.button("Dismiss", key=f"dismiss_err_{name}"):
                         st.session_state.pop(err_key, None)
                         st.rerun()
+
+            # Service detail expander — auto-opens when stopped with stderr content
+            logs = load_service_logs(name)
+            has_stderr = bool(logs and logs.get("stderr"))
+            auto_expand = not alive and has_stderr
+            with st.expander(f"Details: {name}", expanded=auto_expand):
+                # Metadata row
+                port = svc.get("port")
+                command = svc.get("command")
+                started = svc.get("started", "")
+                auto_start = svc.get("auto_start", False)
+                started_str = started[:19].replace("T", " ") if started else "—"
+                m1, m2, m3, m4 = st.columns(4)
+                with m1:
+                    st.caption("**Port**")
+                    st.markdown(str(port) if port else "—")
+                with m2:
+                    st.caption("**Started**")
+                    st.markdown(started_str)
+                with m3:
+                    st.caption("**Auto-start**")
+                    as_color = "#4CAF50" if auto_start else "#888"
+                    st.markdown(_badge("yes" if auto_start else "no", as_color), unsafe_allow_html=True)
+                with m4:
+                    st.caption("**PID**")
+                    st.markdown(str(pid))
+                if command:
+                    st.caption("**Command**")
+                    st.code(" ".join(str(c) for c in command) if isinstance(command, list) else str(command), language="bash")
+
+                # Logs
+                st.caption("**Logs**")
+                if logs:
+                    stderr_content = logs.get("stderr", "")
+                    stdout_content = logs.get("stdout", "")
+                    stderr_path = logs.get("stderr_path", "")
+                    stdout_path = logs.get("stdout_path", "")
+
+                    if stderr_content:
+                        st.markdown("**stderr** — errors and crash output")
+                        st.code(stderr_content, language="log")
+                        if stderr_path:
+                            try:
+                                with open(stderr_path, "r", encoding="utf-8", errors="replace") as _f:
+                                    _full_stderr = _f.read()
+                            except OSError:
+                                _full_stderr = stderr_content
+                            st.download_button(
+                                "Download stderr log",
+                                data=_full_stderr,
+                                file_name=f"service-{name}.stderr.log",
+                                mime="text/plain",
+                                key=f"dl_stderr_{name}",
+                                width="content",
+                            )
+
+                    if stdout_content:
+                        st.markdown("**stdout**")
+                        st.code(stdout_content, language="log")
+                        if stdout_path:
+                            try:
+                                with open(stdout_path, "r", encoding="utf-8", errors="replace") as _f:
+                                    _full_stdout = _f.read()
+                            except OSError:
+                                _full_stdout = stdout_content
+                            st.download_button(
+                                "Download stdout log",
+                                data=_full_stdout,
+                                file_name=f"service-{name}.stdout.log",
+                                mime="text/plain",
+                                key=f"dl_stdout_{name}",
+                                width="content",
+                            )
+
+                    if not stderr_content and not stdout_content:
+                        st.caption("No log output available.")
+                else:
+                    st.caption("No log files found for this service.")
 
     st.divider()
 

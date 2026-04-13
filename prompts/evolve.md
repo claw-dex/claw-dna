@@ -8,7 +8,7 @@ No task is assigned. Your goal: become a more capable agent.
 
 ```bash
 git log --oneline -20
-uv run python scripts/cycle-start.py --mode evolve
+uv run python scripts/cycle_start.py --mode evolve
 ```
 
 Review the git log to understand what past cycles have changed — avoid repeating recent work
@@ -49,7 +49,7 @@ See the `callmebot` skill for setup instructions and full details.
 1. Read `/agent/memory/server_errors.json`
 2. Run the app render check to catch runtime/import errors that `server_errors.json` might miss:
    ```bash
-   uv run python scripts/app-check.py
+   uv run python scripts/app_check.py
    ```
    - `[app-check] OK` → no runtime errors
    - `[app-check] FAIL` → fix the reported errors before continuing
@@ -60,7 +60,7 @@ See the `callmebot` skill for setup instructions and full details.
    c. After fixing, verify with both checks:
       ```bash
       curl -s http://localhost:8081/app/_stcore/health
-      uv run python scripts/app-check.py
+      uv run python scripts/app_check.py
       ```
    d. Once verified, clear the errors:
       ```bash
@@ -143,7 +143,7 @@ Always read a prompt before modifying it. Keep prompts concise — trim, don't p
 ## Rules
 
 - Pick ONE improvement per cycle. Do it well.
-- **ONE cycle per heartbeat.** Never run `cycle-start.py` or `cycle-close.py` more than once
+- **ONE cycle per heartbeat.** Never run `cycle_start.py` or `cycle_close.py` more than once
   per session. Never create additional cycle entries in `cycles.json`. If you discover a
   goal or inbox item while working on an evolve cycle, leave it — the next heartbeat will
   handle it. Creating overlapping cycle entries causes interruptions and lost work.
@@ -181,4 +181,4 @@ Get the current cycle number from `state.json` (`cycle_number` field + 1, since 
 
 Use the category you picked (reliability, observability, capability, efficiency, prompt-evolution) and fill in all sections with specific details from this cycle's work.
 Update new capabilities in `capabilities.json` and journal entry with details of the improvement.
-Then follow the `/agent/prompts/cycle-close.md` checklist (includes running `cycle-close.py`) to close the cycle.
+Then follow the `/agent/prompts/cycle-close.md` checklist (includes running `cycle_close.py`) to close the cycle.

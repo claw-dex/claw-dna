@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-memory-backup.py — Timestamped snapshot backups for all critical memory files.
+memory_backup.py — Timestamped snapshot backups for all critical memory files.
 
 Creates atomic, versioned backups in /agent/memory/backups/<timestamp>/.
 Supports listing, restoring, and pruning old backups.
 
 Usage:
-    python3 memory-backup.py                  # create backup (default)
-    python3 memory-backup.py --list           # list all backups
-    python3 memory-backup.py --restore <ts>   # restore a specific backup
-    python3 memory-backup.py --restore latest # restore most recent backup
-    python3 memory-backup.py --prune N        # keep only N most recent backups
-    python3 memory-backup.py --check          # show age of most recent backup
-    python3 memory-backup.py --json           # output JSON (for scripting)
+    python3 memory_backup.py                  # create backup (default)
+    python3 memory_backup.py --list           # list all backups
+    python3 memory_backup.py --restore <ts>   # restore a specific backup
+    python3 memory_backup.py --restore latest # restore most recent backup
+    python3 memory_backup.py --prune N        # keep only N most recent backups
+    python3 memory_backup.py --check          # show age of most recent backup
+    python3 memory_backup.py --json           # output JSON (for scripting)
 
 Exit codes:
     0 = success
@@ -334,7 +334,7 @@ def cmd_check(json_mode: bool = False) -> int:
         if json_mode:
             print(json.dumps({"status": "no_backups", "count": 0}))
         else:
-            print("  No backups found. Run memory-backup.py to create one.")
+            print("  No backups found. Run memory_backup.py to create one.")
         return 2
 
     latest = backups[0]
@@ -360,7 +360,7 @@ def cmd_check(json_mode: bool = False) -> int:
         print(f"  Latest backup: {latest.name}  ({s['age']})")
         print(f"  Status:        {color}{status_str}{reset}  ({len(backups)} total backups)")
         if stale:
-            print(f"  Consider running: python3 /agent/scripts/memory-backup.py")
+            print(f"  Consider running: python3 /agent/scripts/memory_backup.py")
 
     return 0
 

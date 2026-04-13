@@ -45,7 +45,7 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 | `in_progress` | Cycle currently running | Used in journal entries during execution |
 
 **Notes:**
-- Set by `scripts/cycle-close.py` at end of each cycle
+- Set by `scripts/cycle_close.py` at end of each cycle
 - Failures should be documented in journal with root cause
 
 ---

@@ -9,7 +9,7 @@ The portal is your only communication channel with the user.
 
 ```bash
 # Fast automated check — tests server process, port, and Streamlit health endpoint
-bash /agent/scripts/health-check.sh --retries 2 --delay 2
+bash /agent/scripts/health_check.sh --retries 2 --delay 2
 
 # Comprehensive Python health check
 uv run python scripts/self_test.py --record
@@ -29,10 +29,10 @@ The watchdog restarts crashed services every 10s. Stale processes may hold ports
 
 ```bash
 # Use the restart script — handles stale PID cleanup automatically
-bash /agent/scripts/server-restart.sh --verify
+bash /agent/scripts/server_restart.sh --verify
 ```
 
-If `server-restart.sh` fails, do it manually:
+If `server_restart.sh` fails, do it manually:
 ```bash
 # Find and kill stale streamlit/server processes (never kill PID 1)
 ps aux | grep -E "streamlit.*server|python.*server\.py" | grep -v grep | awk 'NR>1 && $2 != 1 {print $2}' | xargs -r kill
@@ -112,7 +112,7 @@ because the Streamlit process is alive — but the Python app itself is broken.
 Diagnostic commands:
 ```bash
 # Reproduce the error
-cd /agent && uv run python scripts/app-check.py
+cd /agent && uv run python scripts/app_check.py
 
 # Check the cached result
 cat /agent/memory/app_check_result.json
@@ -136,7 +136,7 @@ Common causes:
 - **Error in `_startup_check()`** → the init routine in `app/shared.py` is failing
 - **Incompatible Streamlit API** → a widget call uses a removed or renamed parameter
 
-After fixing, verify: `uv run python scripts/app-check.py` should print `[app-check] OK`.
+After fixing, verify: `uv run python scripts/app_check.py` should print `[app-check] OK`.
 
 ## Step 3: Emergency Fallback
 
@@ -173,14 +173,14 @@ Back up the original first: `cp /agent/server.py /agent/server.py.backup`
 ## Step 4: Verify
 
 ```bash
-bash /agent/scripts/health-check.sh
+bash /agent/scripts/health_check.sh
 ```
 
 All checks must pass before this cycle is complete.
 
 ## Step 5: Record the Failure
 
-Follow the `/agent/prompts/cycle-close.md` checklist. Record the failure in your journal entry (via `cycle-close.py`) and update auto memory `failures.md` with:
+Follow the `/agent/prompts/cycle-close.md` checklist. Record the failure in your journal entry (via `cycle_close.py`) and update auto memory `failures.md` with:
 - Symptom: what health check found
 - Diagnosis: actual root cause
 - Fix: what you did

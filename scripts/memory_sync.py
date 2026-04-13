@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-memory-sync.py — Generate agent auto-memory .md files from JSON memory data.
+memory_sync.py — Generate agent auto-memory .md files from JSON memory data.
 
 Reads JSON memory files in /agent/memory/ and generates corresponding .md files
 with auto-memory frontmatter format, making them accessible to the agent's
 memory system
 
 Usage:
-    uv run python scripts/memory-sync.py                          # sync all
-    uv run python scripts/memory-sync.py --only capabilities,state  # sync specific
-    uv run python scripts/memory-sync.py --dry-run                # preview only
+    uv run python scripts/memory_sync.py                          # sync all
+    uv run python scripts/memory_sync.py --only capabilities,state  # sync specific
+    uv run python scripts/memory_sync.py --dry-run                # preview only
 
 Exit codes: 0 = success, 1 = errors encountered.
 """
@@ -19,14 +19,6 @@ import sys
 from pathlib import Path
 
 MEMORY = Path("/agent/memory")
-
-args = sys.argv[1:]
-DRY_RUN = "--dry-run" in args
-ONLY = None
-if "--only" in args:
-    idx = args.index("--only")
-    if idx + 1 < len(args):
-        ONLY = set(args[idx + 1].split(","))
 
 
 def load_json(path: Path):
@@ -39,11 +31,11 @@ def load_json(path: Path):
         return None
 
 
-def write_md(path: Path, content: str) -> bool:
+def write_md(path: Path, content: str, dry_run: bool = False) -> bool:
     """Atomic write, skip if content unchanged."""
     if path.exists() and path.read_text() == content:
         return False  # no change
-    if DRY_RUN:
+    if dry_run:
         print(f"[DRY RUN] Would write {path.name} ({len(content)} bytes)")
         return True
     tmp = path.with_suffix(".md.tmp")
@@ -254,7 +246,7 @@ def render_goals() -> str:
     for g in data:
         s = g.get("status", "unknown")
         by_status.setdefault(s, []).append(g)
-    order = ["in-progress", "pending", "completed", "failed"]
+    order = ["in_progress", "pending", "completed", "failed"]
     for s in order:
         goals = by_status.pop(s, [])
         if not goals:
@@ -297,21 +289,21 @@ SYNC_MAP = {
 }
 
 
-def sync_all():
+def sync_all(dry_run: bool = False, only=None):
     """Run all memory syncs. Returns (synced_count, error_count)."""
     synced = 0
     errors = 0
     for key, (filename, renderer) in SYNC_MAP.items():
-        if ONLY and key not in ONLY:
+        if only and key not in only:
             continue
         try:
             content = renderer()
             if not content:
                 continue
             path = MEMORY / filename
-            if write_md(path, content):
+            if write_md(path, content, dry_run=dry_run):
                 synced += 1
-                if not DRY_RUN:
+                if not dry_run:
                     print(f"  synced {filename}")
         except Exception as e:
             errors += 1
@@ -320,8 +312,16 @@ def sync_all():
 
 
 def main():
+    args = sys.argv[1:]
+    dry_run = "--dry-run" in args
+    only = None
+    if "--only" in args:
+        idx = args.index("--only")
+        if idx + 1 < len(args):
+            only = set(args[idx + 1].split(","))
+
     print("[MEMORY SYNC] Generating .md files from JSON data...")
-    synced, errors = sync_all()
+    synced, errors = sync_all(dry_run=dry_run, only=only)
     if synced == 0 and errors == 0:
         print("[MEMORY SYNC] All files up to date")
     elif errors:

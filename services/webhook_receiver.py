@@ -13,12 +13,12 @@ writes them to /agent/messages/inbox.json for agent processing.
 
 Setup:
   Start via service manager:
-    uv run python scripts/service-manager.py start webhook_receiver 8082 -- uv run python services/webhook_receiver.py
+    uv run python scripts/service_manager.py start webhook_receiver 8082 -- uv run python services/webhook_receiver.py
 
 Management:
-  uv run python scripts/service-manager.py status webhook_receiver   # check status
-  uv run python scripts/service-manager.py stop webhook_receiver     # stop service
-  uv run python scripts/service-manager.py list                     # list all services
+  uv run python scripts/service_manager.py status webhook_receiver   # check status
+  uv run python scripts/service_manager.py stop webhook_receiver     # stop service
+  uv run python scripts/service_manager.py list                     # list all services
 """
 
 import json

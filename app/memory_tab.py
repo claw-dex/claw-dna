@@ -244,7 +244,7 @@ def render():
             total = len(goals)
             completed = sum(1 for g in goals if g.get("status") == "completed")
             failed = sum(1 for g in goals if g.get("status") == "failed")
-            in_progress = sum(1 for g in goals if g.get("status") in ("in_progress", "in-progress"))
+            in_progress = sum(1 for g in goals if g.get("status") == "in_progress")
             pending = sum(1 for g in goals if g.get("status") == "pending")
 
             m1, m2, m3, m4, m5 = st.columns(5)

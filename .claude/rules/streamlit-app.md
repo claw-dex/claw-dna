@@ -13,13 +13,14 @@ paths:
   ```
   TAB_REGISTRY = [
       # Agent Console — operational tools
-      ("🎛️ Command Center",   commands,    "Command Center",  "Agent Console"),
-      ("📓 Memory",            memory_tab,  "Memory",          "Agent Console"),
-      ("⚙️ System",            system,      "System",          "Agent Console"),
-      ("🔭 Agent Overview",    overview,    "Agent Overview",  "Agent Console"),
+      ("🎛️ Command Center",   commands_tab,   "Command Center",  "Agent Console"),
+      ("📓 Memory",            memory_tab,     "Memory",          "Agent Console"),
+      ("⚙️ System",            system_tab,     "System",          "Agent Console"),
+      ("🔧 Services & Cron",   services_tab,   "Services & Cron", "Agent Console"),
+      ("🔭 Agent Overview",    overview_tab,   "Agent Overview",  "Agent Console"),
       # Core — file / credential / email management
-      ("📁 Workspace",         workspace,   "Workspace",       "Core"),
-      ("🔑 Credentials",       credential,  "Credentials",     "Core"),
-      ("📧 Email",             emails,      "Email",           "Core"),
+      ("📁 Workspace",         workspace_tab,  "Workspace",       "Core"),
+      ("🔑 Credentials",       credential_tab, "Credentials",     "Core"),
+      ("📧 Email",             emails_tab,     "Email",           "Core"),
   ]
   ```

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-memory-stats.py — Fast cycle-start status summary for the agent.
+memory_stats.py — Fast cycle-start status summary for the agent.
 
 Reads all key memory files and prints a concise, structured report
 so future cycles don't have to open multiple files manually.
 
 Usage:
-    python3 /agent/scripts/memory-stats.py
-    python3 /agent/scripts/memory-stats.py --json      # machine-readable output
-    python3 /agent/scripts/memory-stats.py --short     # one-liner summary only
+    python3 /agent/scripts/memory_stats.py
+    python3 /agent/scripts/memory_stats.py --json      # machine-readable output
+    python3 /agent/scripts/memory_stats.py --short     # one-liner summary only
 """
 
 import json
@@ -73,7 +73,7 @@ def summarize_goals(goals_data: list) -> dict:
     return {
         "total": len(goals_data),
         "pending": by_status.get("pending", 0),
-        "in_progress": by_status.get("in-progress", 0),
+        "in_progress": by_status.get("in_progress", 0),
         "completed": by_status.get("completed", 0),
         "failed": by_status.get("failed", 0),
         "latest": goals_data[-1] if goals_data else None,

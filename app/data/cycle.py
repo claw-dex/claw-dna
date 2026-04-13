@@ -146,7 +146,7 @@ def load_balance():
 
     load_balance() is called in overview.py on every render.
     It derives from load_cycles(), journal data, and the dynamic weights file
-    (written by cycle-start.py). Caches against cycles.json, journal.json,
+    (written by cycle_start.py). Caches against cycles.json, journal.json,
     and evolution_weights.json mtimes.
     """
     cycles_path = f"{MEMORY_DIR}/cycles.json"
@@ -186,7 +186,7 @@ def load_balance():
     total = sum(categories.values())
     all_cats = ["reliability", "observability", "capability", "efficiency", "prompt_evolution"]
 
-    # ── Load dynamic weights from evolution_weights.json (written by cycle-start.py) ──
+    # ── Load dynamic weights from evolution_weights.json (written by cycle_start.py) ──
     weights_data = _read_json_safe(weights_path, {})
     weights = weights_data.get("weights", {}) if isinstance(weights_data, dict) else {}
     goal_signals = weights_data.get("goal_signals", []) if isinstance(weights_data, dict) else []

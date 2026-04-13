@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-cycle-close.py — One-command cycle close automation.
+cycle_close.py — One-command cycle close automation.
 
 Automates the repetitive boilerplate from cycle-close.md:
   1. Marks the in-progress cycles.json entry as completed (computes duration)
@@ -13,18 +13,18 @@ Automates the repetitive boilerplate from cycle-close.md:
   8. Reports what was written
 
 Usage:
-    uv run python scripts/cycle-close.py \\
+    uv run python scripts/cycle_close.py \\
         --type evolve \\
         --category efficiency \\
-        --summary "Built cycle-close.py to automate end-of-cycle boilerplate" \\
-        --actions "Built scripts/cycle-close.py" "Updated AGENTS.md" "Tested portal health" \\
+        --summary "Built cycle_close.py to automate end-of-cycle boilerplate" \\
+        --actions "Built scripts/cycle_close.py" "Updated AGENTS.md" "Tested portal health" \\
         --status completed
 
     # --cycle is OPTIONAL: auto-detected from state.json (state.cycle_number + 1)
     # Override only if auto-detection gives the wrong number:
-    uv run python scripts/cycle-close.py --cycle 24 --type evolve ...
+    uv run python scripts/cycle_close.py --cycle 24 --type evolve ...
 
-    uv run python scripts/cycle-close.py --help
+    uv run python scripts/cycle_close.py --help
 
 Required flags:
     --type TYPE           Cycle type: evolve | goal | self-heal (see prompts/enum.md → Cycle Type)
@@ -54,7 +54,7 @@ Enhanced in cycle 117 (efficiency): test count cached by self_test.py mtime — 
 Enhanced in cycle 119 (efficiency): inlined normalize_cycles and outbox-history logic —
     eliminates 2 `uv run python` subprocesses per cycle (~150ms overhead removed).
 Enhanced in cycle 167 (efficiency): auto-backup memory files if last backup >1h old —
-    eliminates the recurring ⚠ STALE BACKUP warning in cycle-start.py.
+    eliminates the recurring ⚠ STALE BACKUP warning in cycle_start.py.
 """
 
 import json
@@ -299,16 +299,20 @@ def check_stale_counts():
                 # Cache hit — self_test.py unchanged, use stored count
                 actual_tests = cached.get("count")
             else:
-                # Cache miss — run self_test.py and cache result
-                result = subprocess.run(
-                    ["uv", "run", "python", str(self_test), "--quiet"],
-                    capture_output=True, text=True, cwd="/agent", timeout=30
-                )
-                m = re.search(r"Results:\s+(\d+)/\d+", result.stdout + result.stderr)
-                if m:
-                    actual_tests = int(m.group(1))
-                    # Save to cache
-                    _count_cache.write_text(json.dumps({"mtime": current_mtime, "count": actual_tests}))
+                # Cache miss — run self_test and cache result
+                try:
+                    if "/agent" not in sys.path:
+                        sys.path.insert(0, "/agent")
+                    import importlib.util
+                    spec = importlib.util.spec_from_file_location("self_test", str(self_test))
+                    self_test_mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(self_test_mod)
+                    self_test_mod.run_all()
+                    actual_tests = len(self_test_mod.results)
+                    if actual_tests:
+                        _count_cache.write_text(json.dumps({"mtime": current_mtime, "count": actual_tests}))
+                except Exception:
+                    pass
         except Exception:
             actual_tests = None
 
@@ -356,7 +360,7 @@ def check_stale_counts():
 
 # ── Auto-backup ──────────────────────────────────────────────────────────────
 
-# Files to backup (mirrors BACKUP_FILES + OPTIONAL_FILES in memory-backup.py)
+# Files to backup (mirrors BACKUP_FILES + OPTIONAL_FILES in memory_backup.py)
 _BACKUP_FILES = [
     "state.json", "cycles.json",
     "goal.json", "journal.json", "server_errors.json", "command_history.json",
@@ -368,11 +372,11 @@ _BACKUP_OPTIONAL = []
 def _auto_backup_if_stale(dry_run: bool = False) -> None:
     """Create a memory backup if the last one is >1h old.
 
-    Inlined to avoid subprocess overhead (~100ms for uv run python memory-backup.py).
-    Mirrors the core logic of memory-backup.py: create a timestamped snapshot dir,
+    Inlined to avoid subprocess overhead (~100ms for uv run python memory_backup.py).
+    Mirrors the core logic of memory_backup.py: create a timestamped snapshot dir,
     copy critical files, prune if >20 backups exist.
 
-    cycle-start.py shows ⚠ STALE when the last backup is >1h old. Running this
+    cycle_start.py shows ⚠ STALE when the last backup is >1h old. Running this
     at cycle-close time keeps that warning quiet and protects against data loss.
     """
     backup_root = MEMORY / "backups"
@@ -436,48 +440,41 @@ def _auto_backup_if_stale(dry_run: bool = False) -> None:
 # ── Auto Memory Sync ──────────────────────────────────────────────────────
 
 def _sync_auto_memory() -> None:
-    """Sync JSON memory → .md files via memory-sync.py.
+    """Sync JSON memory → .md files via memory_sync.py.
 
     Non-fatal: if sync fails, cycle-close prints a warning but exits 0.
     """
     try:
-        subprocess.run(
-            [sys.executable, "/agent/scripts/memory-sync.py"],
-            capture_output=True, timeout=10,
-        )
-        print(f"  ✓ auto memory — synced via memory-sync.py")
+        if "/agent" not in sys.path:
+            sys.path.insert(0, "/agent")
+        from scripts.memory_sync import sync_all
+        sync_all()
+        print(f"  ✓ auto memory — synced via memory_sync.py")
     except Exception as e:
         print(f"  ⚠ auto memory sync failed (non-fatal): {e}")
 
 
-# ── Long-term memory (memvid via memory-ingest.py) ───────────────────────────
+# ── Long-term memory (memvid via memory_ingest.py) ───────────────────────────
 
 def _store_to_memvid(journal_entry: dict) -> None:
-    """Store a journal entry into long-term semantic memory via memory-ingest.py.
+    """Store a journal entry into long-term semantic memory via memory_ingest.py.
 
-    Calls memory-ingest.py --append-json with the journal entry JSON. Uses the memvid
+    Calls memory_ingest.py --append-json with the journal entry JSON. Uses the memvid
     CLI with bge-base embeddings (no Python SDK or fastembed dependency needed).
 
     Non-fatal: if the ingest fails, prints a warning but exits normally.
     """
-    ingest_script = SCRIPTS / "memory-ingest.py"
-    if not ingest_script.exists():
-        print("  ⚠ memvid — memory-ingest.py not found, skipping long-term memory store")
-        return
-
     cycle = journal_entry.get("cycle", "?")
     entry_json = json.dumps(journal_entry)
 
     try:
-        result = subprocess.run(
-            [sys.executable, str(ingest_script), "--append-json", entry_json, "--quiet"],
-            capture_output=True, text=True, cwd="/agent", timeout=60,
-        )
-        if result.returncode == 0:
-            print(f"  ✓ memvid — stored cycle {cycle} to long_term_memory.mv2")
-        else:
-            stderr = result.stderr.strip()[:120]
-            print(f"  ⚠ memvid store failed (non-fatal): {stderr}")
+        if "/agent" not in sys.path:
+            sys.path.insert(0, "/agent")
+        from scripts.memory_ingest import append_json, DEFAULT_MV2
+        append_json(DEFAULT_MV2, entry_json, quiet=True)
+        print(f"  ✓ memvid — stored cycle {cycle} to long_term_memory.mv2")
+    except SystemExit as e:
+        print(f"  ⚠ memvid store failed (non-fatal): exit {e.code}")
     except Exception as e:
         print(f"  ⚠ memvid store failed (non-fatal): {e}")
 
@@ -556,7 +553,7 @@ def main():
             break
 
     if cycle_entry is None:
-        # Fallback: create stub if cycle-start.py didn't insert the start record.
+        # Fallback: create stub if cycle_start.py didn't insert the start record.
         # Uses state.last_cycle_run as approximate start time. Falls back to
         # `now` only if state.json is missing or corrupt (gives duration=0 in that case).
         stub_start = state.get("last_cycle_run") or state.get("last_heartbeat") or now
@@ -564,7 +561,7 @@ def main():
             "cycle": cycle_n,
             "start": stub_start,
             "type": opts["type"],
-            "status": "in-progress",
+            "status": "in_progress",
         }
         cycles.append(cycle_entry)
         print(f"  ⚠  No existing entry for cycle {cycle_n} — created stub (start={stub_start[:19]})")

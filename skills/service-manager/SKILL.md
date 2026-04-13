@@ -5,7 +5,7 @@ description: Manage agent background processes. Use to register a new background
 
 # service-manager
 
-**Path:** `scripts/service-manager.py`
+**Path:** `scripts/service_manager.py`
 
 Manages background agent processes. Use this for any long-running background process (web servers, notebooks, APIs, workers) — it handles PID tracking, health checks, log management, and state.json integration.
 
@@ -44,43 +44,43 @@ If service require a port, chose a port in range 8083–8090. Ports 8080 (Caddy)
 
 ```bash
 # List all managed services
-uv run python scripts/service-manager.py list
+uv run python scripts/service_manager.py list
 
 # Start a webhook listener on port 8083
-uv run python scripts/service-manager.py start webhook 8083 -- python3 webhook_server.py
+uv run python scripts/service_manager.py start webhook 8083 -- python3 webhook_server.py
 
 # Start a service and mark it to auto-restart on every heartbeat
-uv run python scripts/service-manager.py start webhook 8083 --auto-start -- python3 webhook_server.py
+uv run python scripts/service_manager.py start webhook 8083 --auto-start -- python3 webhook_server.py
 
 # Start a Jupyter notebook on port 8088
-uv run python scripts/service-manager.py start jupyter 8088 -- \
+uv run python scripts/service_manager.py start jupyter 8088 -- \
   jupyter notebook --no-browser --port=8088 --ip=0.0.0.0 --NotebookApp.token=''
 
 # Start a FastAPI app on port 8085
-uv run python scripts/service-manager.py start myapi 8085 -- \
+uv run python scripts/service_manager.py start myapi 8085 -- \
   uvicorn app:app --host 0.0.0.0 --port 8085
 
 # Start a simple static file server on port 8084
-uv run python scripts/service-manager.py start fileserver 8084 -- \
+uv run python scripts/service_manager.py start fileserver 8084 -- \
   python3 -m http.server 8084 --directory /agent/workspace
 
 # Check its status
-uv run python scripts/service-manager.py status webhook
+uv run python scripts/service_manager.py status webhook
 
 # Health-check all services
-uv run python scripts/service-manager.py health
+uv run python scripts/service_manager.py health
 
 # Stop the service (keeps entry for restart)
-uv run python scripts/service-manager.py stop webhook
+uv run python scripts/service_manager.py stop webhook
 
 # Remove a service entirely
-uv run python scripts/service-manager.py remove webhook
+uv run python scripts/service_manager.py remove webhook
 
 # Restart the service (uses stored command and port)
-uv run python scripts/service-manager.py restart webhook
+uv run python scripts/service_manager.py restart webhook
 
 # Remove stale/dead entries
-uv run python scripts/service-manager.py cleanup
+uv run python scripts/service_manager.py cleanup
 ```
 
 ## Log Files
@@ -120,7 +120,7 @@ access the service via the Caddy Gateway.
 ## HTTP Health Check (health_url)
 
 Services that expose an HTTP health endpoint can register a `health_url` in `services.json`.
-When set, `cycle-start.py` performs an HTTP check on every heartbeat in addition to PID liveness.
+When set, `cycle_start.py` performs an HTTP check on every heartbeat in addition to PID liveness.
 A service whose PID is alive but whose health URL returns non-2xx is treated as a **zombie** and
 automatically restarted.
 
@@ -134,6 +134,6 @@ The webhook_receiver (`port 8082`) already has `health_url` configured.
 ## Port Allocation Rules
 
 - Only use ports 8083–8090 for new services (8082 is reserved for webhook_receiver)
-- Check `service-manager.py list` before starting to avoid port conflicts
+- Check `service_manager.py list` before starting to avoid port conflicts
 - Always log new port bindings in your journal entry
 - Maximum 3 concurrent services (constitution resource limit)

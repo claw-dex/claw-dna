@@ -3,6 +3,7 @@
 #  One-time seed install — run during Docker image build only.
 #  Installs: agent-browser CLI, Google Cloud CLI, Google Workspace CLI
 # ══════════════════════════════════════════════════════════════
+set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 

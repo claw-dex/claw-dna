@@ -19,16 +19,17 @@ Agent-specific instructions loaded by the AI coding agent at session start.
 ├── app/                         ← Streamlit portal pages & modules
 │   ├── __init__.py
 │   ├── chat.py                  ← Chat UI page
-│   ├── commands.py              ← Command Center (goal/message form, run-script, goals, inbox/outbox)
-│   ├── credential.py            ← Credentials tab (KeePass UI)
+│   ├── commands_tab.py           ← Command Center tab (goal/message form, run-script, goals, inbox/outbox)
+│   ├── credential_tab.py        ← Credentials tab (KeePass UI)
 │   ├── data/                    ← Data loading & write utilities (mtime-cached)
-│   ├── emails.py                ← Email tab (Gmail via Google Workspace CLI)
+│   ├── emails_tab.py            ← Email tab (Gmail via Google Workspace CLI)
 │   ├── glance.py                ← Quick-glance dashboard (Goals/Inbox/Outbox summary above chat)
-│   ├── memory_tab.py            ← Memory viewer page
-│   ├── overview.py              ← Overview dashboard page
+│   ├── memory_tab.py            ← Memory tab (journal, logs, goals, memory files, search)
+│   ├── overview_tab.py          ← Overview tab (activity, goal stats, evolution balance)
+│   ├── services_tab.py          ← Services & Cron tab (service management, scheduled tasks)
 │   ├── shared.py                ← Shared helpers across pages
-│   ├── system.py                ← System info page
-│   └── workspace.py             ← Workspace file browser
+│   ├── system_tab.py            ← System tab (health, diagnostics, scripts)
+│   └── workspace_tab.py         ← Workspace tab (file upload, Caddy file browser)
 │
 ├── prompts/                     ← Prompt templates for agent behaviors
 │   ├── bootstrap.md             ← First-boot initialization prompt
@@ -42,25 +43,30 @@ Agent-specific instructions loaded by the AI coding agent at session start.
 │   └── server.md                ← Portal architecture prompt
 │
 ├── scripts/                     ← Utility & maintenance scripts
-│   ├── cycle-start.py
-│   ├── cycle-close.py
-│   ├── cycle-report.py
-│   ├── memory-backup.py
-│   ├── memory-repair.py
-│   ├── memory-stats.py
-│   ├── journal-archive.py
+│   ├── cycle_start.py
+│   ├── cycle_close.py
+│   ├── cycle_report.py
+│   ├── memory_backup.py
+│   ├── memory_ingest.py
+│   ├── memory_repair.py
+│   ├── memory_stats.py
+│   ├── memory_sync.py
+│   ├── memory_recall.py
+│   ├── memory_ask.py
+│   ├── journal_archive.py
 │   ├── maintain.py
-│   ├── milestone-report.py
+│   ├── milestone_report.py
 │   ├── metrics_collector.py
-│   ├── portal-config.py
+│   ├── portal_config.py
 │   ├── keepass.py
 │   ├── callmebot.py              ← CallMeBot voice call escalation
+│   ├── email_imap.py
 │   ├── scheduler.py
 │   ├── self_test.py
-│   ├── service-manager.py
-│   ├── server-restart.sh
-│   ├── log-cleanup.sh
-│   └── health-check.sh
+│   ├── service_manager.py
+│   ├── server_restart.sh
+│   ├── log_cleanup.sh
+│   └── health_check.sh
 │
 ├── memory/                      ← Persistent agent memory (survives commits)
 │   ├── state.json               ← Current cycle state & status
@@ -74,8 +80,11 @@ Agent-specific instructions loaded by the AI coding agent at session start.
 │   ├── inbox.json               ← Incoming commands (goal, message)
 │   └── outbox.json              ← Outgoing messages to user
 │
-├── services/                    ← Long-running background services (managed by service-manager.py)
-│   └── telegram_bridge.py       ← Telegram ↔ inbox/outbox bridge
+├── services/                    ← Long-running background services (managed by service_manager.py)
+│   ├── shared.py                ← Shared utilities for services (atomic writes, locking, messaging)
+│   ├── telegram_bridge.py       ← Telegram ↔ inbox/outbox bridge
+│   ├── webhook_receiver.py      ← Incoming webhook handler (port 8082, auto-start)
+│   └── whatsapp_bridge.py       ← WhatsApp ↔ inbox/outbox bridge
 │
 ├── web/                         ← Static files served by Caddy at / (PUBLIC — exposed to user browser)
 │   └── index.html               ← Welcome page (auto-redirects to /app/)

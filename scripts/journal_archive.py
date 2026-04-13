@@ -2,15 +2,15 @@
 """Archive old journal entries to keep journal.json lean.
 
 Moves entries older than --keep N cycles into journal-archive.json.
-Keeps the active journal.json small for fast loading by cycle-start.py and the portal.
+Keeps the active journal.json small for fast loading by cycle_start.py and the portal.
 
 Usage:
-  uv run python scripts/journal-archive.py              # archive, keep 20 most recent
-  uv run python scripts/journal-archive.py --keep 30   # keep 30 most recent
-  uv run python scripts/journal-archive.py --dry-run   # preview without modifying
-  uv run python scripts/journal-archive.py --list      # show counts + archive stats
-  uv run python scripts/journal-archive.py --search Q  # search active + archive
-  uv run python scripts/journal-archive.py --json      # output stats as JSON
+  uv run python scripts/journal_archive.py              # archive, keep 20 most recent
+  uv run python scripts/journal_archive.py --keep 30   # keep 30 most recent
+  uv run python scripts/journal_archive.py --dry-run   # preview without modifying
+  uv run python scripts/journal_archive.py --list      # show counts + archive stats
+  uv run python scripts/journal_archive.py --search Q  # search active + archive
+  uv run python scripts/journal_archive.py --json      # output stats as JSON
 
 Archive: /agent/memory/journal-archive.json (sorted by cycle ascending)
 """
@@ -116,7 +116,7 @@ def cmd_list():
     if active_count > DEFAULT_KEEP:
         excess = active_count - DEFAULT_KEEP
         print(f"\n  ⚠  Journal has {active_count} entries — {excess} can be archived")
-        print(f"     Run: uv run python scripts/journal-archive.py")
+        print(f"     Run: uv run python scripts/journal_archive.py")
     else:
         print(f"\n  ✓  Journal is healthy ({active_count}/{DEFAULT_KEEP} threshold)")
 

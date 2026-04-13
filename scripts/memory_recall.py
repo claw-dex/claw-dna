@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-memory-recall.py — Query long-term semantic memory (memvid CLI).
+memory_recall.py — Query long-term semantic memory (memvid CLI).
 
 Searches the agent's long-term memory store for entries matching a
 natural-language question using the `memvid` CLI (hybrid lexical + semantic).
 
 Usage:
-    uv run python scripts/memory-recall.py "What did I work on last week?"
-    uv run python scripts/memory-recall.py "portal reliability fixes" --k 10
-    uv run python scripts/memory-recall.py "efficiency improvements" --json
-    uv run python scripts/memory-recall.py --timeline
-    uv run python scripts/memory-recall.py --timeline --since 2026-03-01
+    uv run python scripts/memory_recall.py "What did I work on last week?"
+    uv run python scripts/memory_recall.py "portal reliability fixes" --k 10
+    uv run python scripts/memory_recall.py "efficiency improvements" --json
+    uv run python scripts/memory_recall.py --timeline
+    uv run python scripts/memory_recall.py --timeline --since 2026-03-01
 
 Required:
     QUESTION          Natural-language query (first positional argument)
@@ -138,7 +138,7 @@ def main():
 
     if not opts["timeline"] and not opts["question"]:
         print("ERROR: QUESTION is required (first positional argument)", file=sys.stderr)
-        print("Usage: uv run python scripts/memory-recall.py \"your question here\"", file=sys.stderr)
+        print("Usage: uv run python scripts/memory_recall.py \"your question here\"", file=sys.stderr)
         sys.exit(1)
 
     mv2 = Path(opts["mv2"]) if opts["mv2"] else MV2_PATH
@@ -258,6 +258,47 @@ def _run_timeline(opts, mv2):
             uri = entry.get("uri", "")
             print(f"  [ts={ts}] Frame {frame_id}: {preview}")
         print(f"\n[MEMORY TIMELINE] Done.")
+
+
+def recall(query: str, k: int = 5, until=None, json_mode: bool = False) -> list:
+    """Query long-term memory and return results as a list of dicts.
+
+    Returns a list of result dicts (rank, score, title, snippet, tags, frame_id).
+    Returns empty list on any error (file not found, memvid unavailable, etc.).
+    Does not print or call sys.exit().
+    """
+    if not MV2_PATH.exists():
+        return []
+    if not shutil.which(MEMVID_BIN):
+        return []
+    cmd = [
+        MEMVID_BIN, "find", str(MV2_PATH),
+        "--query", query,
+        "--top-k", str(k),
+        "--json",
+    ]
+    if until:
+        cmd.extend(["--until", _parse_date_to_unix(until)])
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            return []
+        data = json.loads(result.stdout)
+    except Exception:
+        return []
+    hits = data.get("hits", [])
+    hits.sort(key=lambda h: h.get("score", 0), reverse=True)
+    return [
+        {
+            "rank": i,
+            "score": h.get("score"),
+            "title": h.get("title", ""),
+            "snippet": _clean_snippet(h.get("text", "")),
+            "tags": h.get("metadata", {}).get("tags", []),
+            "frame_id": h.get("frame_id"),
+        }
+        for i, h in enumerate(hits, 1)
+    ]
 
 
 if __name__ == "__main__":

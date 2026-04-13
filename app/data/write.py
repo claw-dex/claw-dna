@@ -1,18 +1,20 @@
 """Write operations — inbox, scripts, goals, services, scheduled tasks."""
 
+import contextlib
+import io
 import json
 import os
 import subprocess
+import sys
 from datetime import datetime, timezone
 
 from app.data._cache import _cache_clear_all
 from app.data._helpers import _read_json_safe
 from app.shared import (
     AGENT_DIR, MEMORY_DIR, LOGS_DIR, MESSAGES_DIR, SCRIPTS_DIR,
-    GOALS_PATH, PORTAL_CONFIG_PATH, _write_json_atomic, _append_history, AtomicJSON,
+    GOALS_PATH, PORTAL_CONFIG_PATH, SCHEDULED_TASKS_PATH,
+    _write_json_atomic, _append_history, AtomicJSON,
 )
-
-SCHEDULED_TASKS_PATH = f"{MEMORY_DIR}/scheduled_tasks.json"
 
 
 def save_portal_config(key: str, value):
@@ -154,22 +156,32 @@ def clear_outbox():
     _cache_clear_all()
 
 
+def _call_svc(fn, *args):
+    """Call a service_manager function, capturing stdout for error messages."""
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            fn(*args)
+        return {"ok": True, "output": buf.getvalue().strip()}
+    except SystemExit as e:
+        return {"ok": False, "error": buf.getvalue().strip() or f"exit {e.code}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 def remove_service(name):
-    """Stop (if running) and remove a service via service-manager.py."""
+    """Stop (if running) and remove a service via service_manager."""
     if not _valid_service_name(name):
         return {"ok": False, "error": "Invalid service name"}
-    script_path = os.path.join(SCRIPTS_DIR, "service-manager.py")
     try:
-        result = subprocess.run(
-            ["uv", "run", "python", script_path, "remove", name],
-            capture_output=True, text=True, timeout=15, cwd=AGENT_DIR,
-        )
+        if "/agent" not in sys.path:
+            sys.path.insert(0, "/agent")
+        from scripts.service_manager import cmd_remove
+        result = _call_svc(cmd_remove, name)
         _cache_clear_all()
-        if result.returncode == 0:
+        if result["ok"]:
             return {"ok": True, "removed": name}
-        return {"ok": False, "error": result.stdout.strip() or result.stderr.strip()}
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "Remove timed out (15s)"}
+        return {"ok": False, "error": result["error"]}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -179,21 +191,16 @@ def _valid_service_name(name):
 
 
 def stop_service(name):
-    """Stop a running service via service-manager.py."""
+    """Stop a running service via service_manager."""
     if not _valid_service_name(name):
         return {"ok": False, "error": "Invalid service name"}
-    script_path = os.path.join(SCRIPTS_DIR, "service-manager.py")
     try:
-        result = subprocess.run(
-            ["uv", "run", "python", script_path, "stop", name],
-            capture_output=True, text=True, timeout=15, cwd=AGENT_DIR,
-        )
+        if "/agent" not in sys.path:
+            sys.path.insert(0, "/agent")
+        from scripts.service_manager import cmd_stop
+        result = _call_svc(cmd_stop, name)
         _cache_clear_all()
-        if result.returncode == 0:
-            return {"ok": True, "output": result.stdout.strip()}
-        return {"ok": False, "error": result.stdout.strip() or result.stderr.strip()}
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "Stop timed out (15s)"}
+        return result
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -210,28 +217,20 @@ def start_service(name):
     command = svc.get("command")
     if not command or not isinstance(command, list):
         return {"ok": False, "error": f"No valid command for '{name}'"}
-
-    script_path = os.path.join(SCRIPTS_DIR, "service-manager.py")
-    cmd = ["uv", "run", "python", script_path, "start", name]
     port = svc.get("port")
     if port is not None:
         try:
-            cmd.append(str(int(port)))
+            port = int(port)
         except (ValueError, TypeError):
             return {"ok": False, "error": f"Invalid port value for '{name}'"}
-    cmd.append("--")
-    cmd.extend(command)
 
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=15, cwd=AGENT_DIR,
-        )
+        if "/agent" not in sys.path:
+            sys.path.insert(0, "/agent")
+        from scripts.service_manager import cmd_start
+        result = _call_svc(cmd_start, name, port, command)
         _cache_clear_all()
-        if result.returncode == 0:
-            return {"ok": True, "output": result.stdout.strip()}
-        return {"ok": False, "error": result.stdout.strip() or result.stderr.strip()}
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "Start timed out (15s)"}
+        return result
     except Exception as e:
         return {"ok": False, "error": str(e)}
 

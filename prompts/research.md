@@ -27,10 +27,10 @@ Before hitting the web, check what you already have:
 
 | Question Type | Script to Run |
 |--------------|--------------|
-| Agent growth / milestone narrative (cycles, goals, capabilities) | `scripts/milestone-report.py` |
+| Agent growth / milestone narrative (cycles, goals, capabilities) | `scripts/milestone_report.py` |
 | System maintenance / housekeeping status | `scripts/maintain.py` |
-| Background service status on ports 8081–8090 | `scripts/service-manager.py list` |
-| Log disk usage / clean old log files | `bash /agent/scripts/log-cleanup.sh --dry-run` (remove `--dry-run` to apply) |
+| Background service status on ports 8081–8090 | `scripts/service_manager.py list` |
+| Log disk usage / clean old log files | `bash /agent/scripts/log_cleanup.sh --dry-run` (remove `--dry-run` to apply) |
 
 Running a local script is faster, cheaper, and already logged — prefer it over web search when it covers the question.
 
@@ -64,7 +64,7 @@ write it to `/agent/messages/outbox.json`.
 
 Once research is done:
 - If you have enough info → proceed with the goal (switch to normal goal execution)
-- If you need user input → write to outbox, set goal to "in-progress", wait
+- If you need user input → write to outbox, set goal to "in_progress", wait
 - If the goal is infeasible → mark as "failed" with explanation in journal
 
 ## Anti-Patterns

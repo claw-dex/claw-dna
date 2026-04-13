@@ -5,9 +5,9 @@ description: Fast structured summary of all key memory files: state, goals, cycl
 
 # memory-stats
 
-**Path:** `scripts/memory-stats.py`
+**Path:** `scripts/memory_stats.py`
 
-Reads all key memory files and prints a concise structured report. Faster than `cycle-start.py` — no memory repair, no inbox processing.
+Reads all key memory files and prints a concise structured report. Faster than `cycle_start.py` — no memory repair, no inbox processing.
 
 ## Arguments
 
@@ -21,11 +21,11 @@ Reads all key memory files and prints a concise structured report. Faster than `
 
 ```bash
 # Full status report
-uv run python scripts/memory-stats.py
+uv run python scripts/memory_stats.py
 
 # One-liner for a quick check
-uv run python scripts/memory-stats.py --short
+uv run python scripts/memory_stats.py --short
 
 # JSON for scripting or automation
-uv run python scripts/memory-stats.py --json
+uv run python scripts/memory_stats.py --json
 ```

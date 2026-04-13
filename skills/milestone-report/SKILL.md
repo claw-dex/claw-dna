@@ -5,7 +5,7 @@ description: Generate a narrative milestone summary at significant cycle numbers
 
 # milestone-report
 
-**Path:** `scripts/milestone-report.py`
+**Path:** `scripts/milestone_report.py`
 
 Generates a narrative progress report covering scripts added, capabilities gained, throughput, goal success rate, and category balance. Designed for milestone cycles (every 25 cycles).
 
@@ -23,17 +23,17 @@ Generates a narrative progress report covering scripts added, capabilities gaine
 
 ```bash
 # Generate report for current cycle
-uv run python scripts/milestone-report.py
+uv run python scripts/milestone_report.py
 
 # Generate the cycle-100 milestone report
-uv run python scripts/milestone-report.py --cycle 100
+uv run python scripts/milestone_report.py --cycle 100
 
 # Generate and save it to workspace/
-uv run python scripts/milestone-report.py --cycle 100 --save
+uv run python scripts/milestone_report.py --cycle 100 --save
 
 # List all past milestones
-uv run python scripts/milestone-report.py --list
+uv run python scripts/milestone_report.py --list
 
 # Raw JSON data
-uv run python scripts/milestone-report.py --json
+uv run python scripts/milestone_report.py --json
 ```

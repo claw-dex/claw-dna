@@ -47,7 +47,7 @@ Implement your chosen improvement:
 After making changes, verify the portal is still healthy:
 ```bash
 curl -s http://localhost:8081/app/_stcore/health
-uv run python scripts/app-check.py
+uv run python scripts/app_check.py
 ```
 
 ## Step 4: Initialize State
@@ -105,7 +105,7 @@ import json, os
 path = '/agent/memory/goal.json'
 with open(path) as f:
     goals = json.load(f)
-if goals and goals[0].get('status') in ('pending', 'in-progress'):
+if goals and goals[0].get('status') in ('pending', 'in_progress'):
     goals[0]['status'] = 'completed'
     tmp = path + '.tmp'
     with open(tmp, 'w') as f:
@@ -145,10 +145,10 @@ EOF
 )"
 ```
 
-Then follow the `/agent/prompts/cycle-close.md` checklist. Use `cycle-close.py` to record this cycle:
+Then follow the `/agent/prompts/cycle-close.md` checklist. Use `cycle_close.py` to record this cycle:
 
 ```bash
-uv run python scripts/cycle-close.py \
+uv run python scripts/cycle_close.py \
     --type evolve \
     --category capability \
     --summary "Bootstrap: <what you built and why it serves the goal>" \

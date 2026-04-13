@@ -7,9 +7,9 @@
 #  Prompt hierarchy:
 #    1. First cycle (no state)          → BOOTSTRAP prompt (build portal)
 #    2. Portal unhealthy                → SELF-HEAL prompt (fix portal)
-#    3. No evolve in last 5 cycles      → EVOLVE prompt (prevent starvation)
-#    4. User command in inbox           → GOAL prompt (do user's task)
-#    5. Active goal in progress         → GOAL prompt (continue working)
+#    3. User command in inbox           → GOAL prompt (do user's task)
+#    4. Active goal in progress         → GOAL prompt (continue working)
+#    5. No evolve in last 5 cycles      → EVOLVE prompt (prevent starvation)
 #    6. Last N evolves in a row         → SKIP cycle (prevent evolve loop)
 #    7. Otherwise                       → EVOLVE prompt (self-improve)
 #
@@ -111,7 +111,7 @@ if [ -f /agent/memory/scheduled_tasks.json ]; then
 fi
 
 # ── Auto-start services (ensure services with auto_start:true are running) ──
-uv run python /agent/scripts/service-manager.py auto-start 2>/dev/null || true
+uv run python /agent/scripts/service_manager.py auto-start 2>/dev/null || true
 
 # ── Prompt Selection ─────────────────────────────────────────
 
@@ -150,7 +150,7 @@ select_prompt() {
 
     # 3b. App render check — catches syntax/import/runtime errors that _stcore/health misses
     local app_check_exit
-    timeout 45 uv run python /agent/scripts/app-check.py --json >/dev/null 2>&1
+    timeout 45 uv run python /agent/scripts/app_check.py --json >/dev/null 2>&1
     app_check_exit=$?
     if [ "$app_check_exit" -eq 1 ]; then
         echo "heal:app_error"
@@ -158,7 +158,25 @@ select_prompt() {
     fi
     # exit 2 (timeout) or 3 (unavailable) → non-fatal, continue
 
-    # 4. Force evolve if none in the last 5 cycles (prevents starvation by goals/inbox)
+    # 4. User command waiting in inbox or active goal in progress
+    #    (checked before starvation guard so active work always takes priority)
+    local inbox_size
+    inbox_size=$(jq 'length' /agent/messages/inbox.json 2>/dev/null || echo 0)
+    if [ "$inbox_size" -gt 0 ]; then
+        echo "goal"
+        return
+    fi
+
+    local active_goals
+    active_goals=$(jq '[.[] | select(.status == "pending" or .status == "in-progress" or .status == "in_progress")] | length' \
+        /agent/memory/goal.json 2>/dev/null || echo 0)
+    if [ "$active_goals" -gt 0 ]; then
+        echo "goal"
+        return
+    fi
+
+    # 5. Force evolve if none in the last 5 cycles (prevents starvation when idle)
+    #    Only reached when inbox is empty and no active goals exist.
     local cycles_since_evolve
     cycles_since_evolve=$(jq '
         [.[] | select(.type == "evolve")] | last | .cycle // 0
@@ -168,23 +186,6 @@ select_prompt() {
     local gap=$(( current_cycle - cycles_since_evolve ))
     if [ "$gap" -ge 5 ]; then
         echo "evolve"
-        return
-    fi
-
-    # 5. User command waiting in inbox or active goal in progress
-    #    (only reached after bootstrap is done and server is healthy)
-    local inbox_size
-    inbox_size=$(jq 'length' /agent/messages/inbox.json 2>/dev/null || echo 0)
-    if [ "$inbox_size" -gt 0 ]; then
-        echo "goal"
-        return
-    fi
-
-    local active_goals
-    active_goals=$(jq '[.[] | select(.status == "pending" or .status == "in-progress")] | length' \
-        /agent/memory/goal.json 2>/dev/null || echo 0)
-    if [ "$active_goals" -gt 0 ]; then
-        echo "goal"
         return
     fi
 
@@ -249,8 +250,8 @@ build_task_prompt() {
 
     echo "This is cycle #${CYCLE_NUM}. Current date and time: ${USER_TIME} (${USER_TZ})."
     echo ""
-    echo "CRITICAL: ONE cycle per heartbeat. Run cycle-start.py exactly once at the start"
-    echo "and cycle-close.py exactly once at the end. Never create additional cycle entries"
+    echo "CRITICAL: ONE cycle per heartbeat. Run cycle_start.py exactly once at the start"
+    echo "and cycle_close.py exactly once at the end. Never create additional cycle entries"
     echo "in cycles.json. If you discover new goals or inbox items, leave them for the next"
     echo "heartbeat. Overlapping cycles cause interruptions and lost work."
     echo ""
@@ -283,7 +284,7 @@ build_task_prompt() {
                     cat /agent/memory/app_check_result.json 2>/dev/null || echo "{}"
                     echo '```'
                     echo ""
-                    echo "Reproduce: cd /agent && uv run python scripts/app-check.py"
+                    echo "Reproduce: cd /agent && uv run python scripts/app_check.py"
                     ;;
                 *)
                     echo "Streamlit health endpoint (/_stcore/health) did not return 'ok'."
@@ -329,7 +330,7 @@ echo "[$TIMESTAMP] Invoking AI coding agent..."
 # Session continuity: resume previous session for multi-cycle goals
 SESSION_ID=""
 if [ "$PROMPT_MODE" = "goal" ]; then
-    SESSION_ID=$(jq -r '[.[] | select(.status == "in-progress")] | first | .session_id // ""' \
+    SESSION_ID=$(jq -r '[.[] | select(.status == "in_progress")] | first | .session_id // ""' \
         /agent/memory/goal.json 2>/dev/null || echo "")
     if [ -n "$SESSION_ID" ] && [ "$SESSION_ID" != "null" ] && [ "$SESSION_ID" != "" ]; then
         echo "[$TIMESTAMP] Resuming session: ${SESSION_ID}"
@@ -343,7 +344,7 @@ jq --arg ts "$CYCLE_RUN_TS" '.last_cycle_run = $ts' /agent/memory/state.json > "
 
 # ── Sync JSON memory → .md files for agent auto-memory ──
 # Must run before the agent starts so auto-memory reflects current state.
-uv run python /agent/scripts/memory-sync.py 2>/dev/null || true
+uv run python /agent/scripts/memory_sync.py 2>/dev/null || true
 
 cd /agent
 # Run agent in background so we can capture its PID for crash detection.

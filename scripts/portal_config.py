@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 """
-portal-config.py — Unified portal configuration management.
+portal_config.py — Unified portal configuration management.
 
 Manages public hostname, timezone, and authentication for the agent portal.
 Combines functionality from legacy portal-hostname.py and portal-auth.py.
 
 Usage:
     # Hostname management
-    uv run python scripts/portal-config.py hostname --set https://example.com
-    uv run python scripts/portal-config.py hostname --show
-    uv run python scripts/portal-config.py hostname --clear
+    uv run python scripts/portal_config.py hostname --set https://example.com
+    uv run python scripts/portal_config.py hostname --show
+    uv run python scripts/portal_config.py hostname --clear
 
     # Timezone management
-    uv run python scripts/portal-config.py timezone --set America/New_York
-    uv run python scripts/portal-config.py timezone --show
-    uv run python scripts/portal-config.py timezone --clear
+    uv run python scripts/portal_config.py timezone --set America/New_York
+    uv run python scripts/portal_config.py timezone --show
+    uv run python scripts/portal_config.py timezone --clear
 
     # Auth management
-    uv run python scripts/portal-config.py auth --enable user:pass
-    uv run python scripts/portal-config.py auth --disable
-    uv run python scripts/portal-config.py auth --reapply
-    uv run python scripts/portal-config.py auth --show
-    uv run python scripts/portal-config.py auth --rollback
+    uv run python scripts/portal_config.py auth --enable user:pass
+    uv run python scripts/portal_config.py auth --disable
+    uv run python scripts/portal_config.py auth --reapply
+    uv run python scripts/portal_config.py auth --show
+    uv run python scripts/portal_config.py auth --rollback
 
 Exit codes: 0 = success, 1 = error
 """
@@ -167,7 +167,7 @@ def cmd_hostname(args):
     elif args.set:
         _set_hostname(args.set)
     else:
-        print("Usage: portal-config.py hostname --set <url> | --show | --clear")
+        print("Usage: portal_config.py hostname --set <url> | --show | --clear")
         sys.exit(1)
 
 
@@ -239,7 +239,7 @@ def cmd_timezone(args):
     elif args.set:
         _set_timezone(args.set)
     else:
-        print("Usage: portal-config.py timezone --set <timezone> | --show | --clear")
+        print("Usage: portal_config.py timezone --set <timezone> | --show | --clear")
         sys.exit(1)
 
 
@@ -572,7 +572,7 @@ def cmd_auth(args):
     elif args.rollback:
         _rollback_auth()
     else:
-        print("Usage: portal-config.py auth --enable user:pass | --disable | --reapply | --show | --rollback")
+        print("Usage: portal_config.py auth --enable user:pass | --disable | --reapply | --show | --rollback")
         sys.exit(1)
 
 

@@ -13,7 +13,7 @@
 set -euo pipefail
 
 # ── Colors ───────────────────────────────────────────────────
-BLUE='\033[0;36m'
+CYAN='\033[0;36m'
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
@@ -21,14 +21,14 @@ DIM='\033[2m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-step()    { echo -e "\n${BOLD}${BLUE}[$1/4]${NC} ${BOLD}$2${NC}"; echo -e "${DIM}$(printf '%.0s─' {1..50})${NC}"; }
+step()    { echo -e "\n${BOLD}${CYAN}[$1/4]${NC} ${BOLD}$2${NC}"; echo -e "${DIM}$(printf '%.0s─' {1..50})${NC}"; }
 success() { echo -e "  ${GREEN}✔${NC} $1"; }
 fail()    { echo -e "  ${RED}✘${NC} $1"; }
 info()    { echo -e "  ${DIM}→${NC} $1"; }
 warn()    { echo -e "  ${YELLOW}⚠${NC} $1"; }
 
 banner() {
-    echo -e "${BLUE}"
+    echo -e "${CYAN}"
     cat << 'EOF'
     ╔═══════════════════════════════════════════════════╗
     ║                                                   ║
@@ -111,7 +111,7 @@ _reapply_portal_auth() {
         echo -e "${YELLOW}[$(date -Is)] Caddy admin API not ready after 5s — skipping auth reapply${NC}"
         return
     fi
-    cd /agent && uv run python scripts/portal-config.py auth --reapply 2>&1 | \
+    cd /agent && uv run python scripts/portal_config.py auth --reapply 2>&1 | \
         while read -r line; do echo -e "${DIM}[$(date -Is)] $line${NC}"; done
 }
 
@@ -326,16 +326,16 @@ echo -e "${GREEN}${BOLD}══════════════════�
 echo ""
 echo -e "  ${BOLD}Next steps:${NC}"
 echo ""
-echo -e "  ${BLUE}1.${NC} Portal: ${BOLD}http://localhost:8080/app/${NC}"
+echo -e "  ${CYAN}1.${NC} Portal: ${BOLD}http://localhost:8080/app/${NC}"
 echo ""
-echo -e "  ${BLUE}2.${NC} Commit authenticated state ${DIM}(from another terminal):${NC}"
+echo -e "  ${CYAN}2.${NC} Commit authenticated state ${DIM}(from another terminal):${NC}"
 echo -e "     ${BOLD}docker commit myagent myagent:authenticated${NC}"
 echo ""
-echo -e "  ${BLUE}3.${NC} Open the portal and enter your first goal:"
+echo -e "  ${CYAN}3.${NC} Open the portal and enter your first goal:"
 echo -e "     ${BOLD}http://localhost:8080/app/${NC}"
 echo -e "     ${DIM}The Streamlit UI will trigger the first heartbeat automatically.${NC}"
 echo ""
-echo -e "  ${BLUE}4.${NC} Or start the orchestrator:"
+echo -e "  ${CYAN}4.${NC} Or start the orchestrator:"
 echo -e "     ${BOLD}./orchestrator.sh${NC}"
 echo ""
 echo -e "${DIM}Logs: docker logs -f myagent${NC}"

@@ -35,7 +35,7 @@ Operational data (for portal/scripts):
   - **Streamlit** (port 8081) — web portal at `/app/`, auto-reloads when .py files change
 - The watchdog in bootstrap.sh restarts any crashed service every 10s
 - Server source: /agent/server.py (edit any .py file and Streamlit hot-reloads)
-- Command console: /agent/app/commands.py (protected — do NOT modify; see constitution.md)
+- Command console: /agent/app/commands_tab.py (protected — do NOT modify; see constitution.md)
 - Gateway config: managed via Caddy admin API (DO NOT edit /agent/Caddyfile directly)
 - Caddy admin API: http://localhost:2019 (JSON API for dynamic route configuration). For example:
   - Load current config: `curl http://localhost:2019/config/`
@@ -119,7 +119,7 @@ use the `service-manager` skill instead — see the `service-manager` skill for 
 
 Some tasks **cannot be completed autonomously**. When you encounter one, you MUST:
 
-1. Keep the goal status as `"in-progress"` (do NOT mark it `"completed"` or `"failed"`)
+1. Keep the goal status as `"in_progress"` (do NOT mark it `"completed"` or `"failed"`)
 2. Write a clear message to `/agent/messages/outbox.json` with:
    - `"type": "needs_human"` — so the portal can highlight it distinctly
    - `"subject"`: short description of what's blocked
@@ -193,7 +193,7 @@ For any non-trivial work (even a single goal), use a `Plan` subagent to break th
 
 Before finishing, you MUST do ALL of the following:
 
-1. Update /agent/memory/state.json — set cycle_number, status, last_cycle_summary (last_heartbeat and last_cycle_run are set by heartbeat.sh; last_cycle_end is set by cycle-close.py)
+1. Update /agent/memory/state.json — set cycle_number, status, last_cycle_summary (last_heartbeat and last_cycle_run are set by heartbeat.sh; last_cycle_end is set by cycle_close.py)
 2. Append to /agent/memory/journal.json — see prompts/cycle-close.md Step 3 for the JSON schema
 3. If you modified server.py or app/ files, verify the portal is still up: `curl -s http://localhost:8081/app/_stcore/health`
 4. Write any questions you have for the user to /agent/messages/outbox.json

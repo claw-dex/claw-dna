@@ -10,7 +10,7 @@
 - Never remove the message queue mechanism (/agent/messages/)
 - Never make external network requests without logging them in the journal
 - Never modify the heartbeat.sh script itself
-- Never modify app/commands.py — it provides the user's command console
+- Never modify app/commands_tab.py — it provides the user's command console
 - Never store secrets, API keys, or credentials in web-accessible files
 
 ## Web Portal Rules
@@ -35,10 +35,10 @@
 - Workspace must stay under 1GB (/agent/workspace/)
 - Log files older than 50 cycles may be compressed or summarised
 - Maximum 3 concurrent subprocesses during a cycle
-- Long-running background services MUST use `scripts/service-manager.py`
+- Long-running background services MUST use `scripts/service_manager.py`
   (see the `service-manager` skill) — it handles PID tracking, health checks, and log management
 - Always save custom service scripts (created by the agent, not installed via system) to `/agent/services/`
-- Always review service status (`scripts/service-manager.py list`) before starting a cycle's main work
+- Always review service status (`scripts/service_manager.py list`) before starting a cycle's main work
 
 ## Self-Evolution Boundaries
 
@@ -47,7 +47,7 @@
 - MAY configure Caddy dynamically via admin API on port 2019
 - MAY NOT modify: /agent/Caddyfile (use Caddy admin API instead)
 - MAY install: system packages (via sudo), Python packages (add to pyproject.toml + `uv sync`), additional tools
-- MAY NOT modify: constitution.md, system.md, heartbeat.sh, bootstrap.sh, app/commands.py
+- MAY NOT modify: constitution.md, system.md, heartbeat.sh, bootstrap.sh, app/commands_tab.py
 - MAY modify .streamlit/config.toml EXCEPT: `port = 8081` and `address = "0.0.0.0"` must never change
 - MAY NOT modify: /agent/messages/ format (inbox.json / outbox.json schema)
 

@@ -9,7 +9,7 @@ at fixes; diagnose systematically.
 If server changes aren't taking effect or you get connection refused:
 
 ```bash
-bash /agent/scripts/server-restart.sh --verify
+bash /agent/scripts/server_restart.sh --verify
 ```
 
 This triggers a Streamlit hot-reload (touches server.py) and verifies health via /_stcore/health.
@@ -30,18 +30,18 @@ Use the utility scripts before manual debugging (all in `/agent/scripts/`):
 
 | Script | When to Use |
 |--------|-------------|
-| `bash /agent/scripts/health-check.sh --retries 3` | Portal or API not responding |
+| `bash /agent/scripts/health_check.sh --retries 3` | Portal or API not responding |
 | `uv run python scripts/maintain.py --fix` | Corrupt JSON, missing files, stale data |
-| `bash /agent/scripts/server-restart.sh --verify` | Server changes not taking effect, port conflicts |
+| `bash /agent/scripts/server_restart.sh --verify` | Server changes not taking effect, port conflicts |
 | `uv run python scripts/self_test.py --record` | Full test suite (14 suites), logs failures to journal.json |
 
 ### 3. Classify the Error
 
 | Category | Examples | Typical Fix |
 |----------|----------|-------------|
-| **Server** | Port in use, stale process, 500 error | `bash /agent/scripts/server-restart.sh --verify` |
+| **Server** | Port in use, stale process, 500 error | `bash /agent/scripts/server_restart.sh --verify` |
 | **File I/O** | Permission denied, corrupt JSON | `uv run python scripts/maintain.py --fix`, check paths |
-| **Network** | Connection refused, timeout | `bash /agent/scripts/health-check.sh`, check ports |
+| **Network** | Connection refused, timeout | `bash /agent/scripts/health_check.sh`, check ports |
 | **Logic** | Wrong output, unexpected state | Read code, trace data flow |
 | **Resource** | Out of memory, disk full | Clean up, check limits |
 | **Import** | `ModuleNotFoundError`, tab crash on load | See Streamlit tab errors below |
@@ -55,7 +55,7 @@ cat /agent/memory/server_errors.json
 # Test the import directly:
 uv run python -c "from app import <module_name>"
 # After fixing the module, errors auto-clear in 48h or manually:
-uv run python scripts/cycle-start.py --clear-old-errors
+uv run python scripts/cycle_start.py --clear-old-errors
 ```
 
 **`@st.cache_data` / TTLCache KeyError (banned pattern):**
@@ -66,7 +66,7 @@ uv run python scripts/cycle-start.py --clear-old-errors
 
 **Streamlit hot-reload not picking up changes:**
 ```bash
-bash /agent/scripts/server-restart.sh --verify
+bash /agent/scripts/server_restart.sh --verify
 ```
 
 **New package not found after adding to pyproject.toml:**

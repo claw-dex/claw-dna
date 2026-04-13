@@ -263,24 +263,24 @@ def check_disk_usage():
 def apply_fix(fix_name):
     """Apply a specific fix."""
     if fix_name == "journal_archive":
-        script = SCRIPTS_DIR / "journal-archive.py"
-        if script.exists():
-            result = subprocess.run(
-                ["uv", "run", "python", str(script), "--keep", str(JOURNAL_KEEP_ENTRIES)],
-                capture_output=True, text=True, timeout=30
-            )
-            return result.stdout.strip() or "archived"
-        return "journal-archive.py not found"
+        try:
+            if "/agent" not in sys.path:
+                sys.path.insert(0, "/agent")
+            from scripts.journal_archive import cmd_archive
+            cmd_archive(keep=JOURNAL_KEEP_ENTRIES)
+            return "archived"
+        except Exception as e:
+            return f"journal_archive failed: {e}"
 
     elif fix_name == "log_cleanup":
-        script = SCRIPTS_DIR / "log-cleanup.sh"
+        script = SCRIPTS_DIR / "log_cleanup.sh"
         if script.exists():
             result = subprocess.run(
                 ["bash", str(script), "--keep", str(LOG_KEEP_CYCLES)],
                 capture_output=True, text=True, timeout=30
             )
             return result.stdout.strip() or "cleaned"
-        return "log-cleanup.sh not found"
+        return "log_cleanup.sh not found"
 
     elif fix_name == "cycle_prompt_cleanup":
         if not LOGS_DIR.exists():

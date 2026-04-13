@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""cycle-report.py — Generate a summary report of agent activity.
+"""cycle_report.py — Generate a summary report of agent activity.
 
 Usage:
-    python3 cycle-report.py                 # Full summary
-    python3 cycle-report.py --last N        # Last N cycles only
-    python3 cycle-report.py --format md     # Markdown output (default)
-    python3 cycle-report.py --format json   # JSON output
+    python3 cycle_report.py                 # Full summary
+    python3 cycle_report.py --last N        # Last N cycles only
+    python3 cycle_report.py --format md     # Markdown output (default)
+    python3 cycle_report.py --format json   # JSON output
 """
 
 import json

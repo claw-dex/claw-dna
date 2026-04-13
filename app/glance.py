@@ -6,42 +6,17 @@ from datetime import datetime, timedelta, timezone
 import streamlit as st
 
 from app.data import load_goals, load_inbox, load_outbox, load_scheduled_tasks
-
-# ── Styling constants (local copy to avoid coupling to commands.py) ──
-# See prompts/enum.md for complete enum definitions
-_STATUS_COLORS = {
-    "completed": "#4CAF50", "failed": "#F44336",
-    "in_progress": "#2196F3", "in-progress": "#2196F3", "pending": "#FF9800",
-}
-_TYPE_COLORS = {
-    # Inbox types
-    "goal": "#2196F3",
-    "message": "#9C27B0",
-    "bash": "#FF9800",
-    # Outbox types
-    "response": "#4CAF50",
-    "needs_human": "#F44336",
-    "goal_complete": "#4CAF50",
-    "goal_failed": "#F44336",
-}
+from app.shared import _badge, _STATUS_COLORS, _TYPE_COLORS, parse_dt
 
 MAX_ITEMS = 10
 CONTAINER_HEIGHT = 320
-
-
-def _badge(text, color):
-    """Colored pill badge (HTML-escaped)."""
-    return (
-        f'<span style="background:{_html.escape(str(color))};color:#fff;padding:1px 8px;'
-        f'border-radius:10px;font-size:11px;font-weight:600">{_html.escape(str(text))}</span>'
-    )
 
 
 def _time_ago(ts_str):
     """Convert ISO timestamp to relative time string."""
     if not ts_str:
         return ""
-    dt = _parse_dt(ts_str)
+    dt = parse_dt(ts_str)
     if dt is None:
         return str(ts_str)[:10]
     delta = (datetime.now(timezone.utc) - dt).total_seconds()
@@ -67,7 +42,7 @@ def _build_items(goals, inbox, outbox, filter_cat):
 
     if filter_cat in ("All", "Goals"):
         # "All" shows only active goals to save space; "Goals" shows everything
-        _active_statuses = ("in_progress", "in-progress", "pending")
+        _active_statuses = ("in_progress", "pending")
         goal_list = goals if filter_cat == "Goals" else [
             g for g in goals if g.get("status") in _active_statuses
         ]
@@ -168,17 +143,6 @@ def _render_detail(item):
             st.caption(f"Sent: {ts}")
 
 
-def _parse_dt(s):
-    """Parse an ISO timestamp string to a timezone-aware datetime, or None."""
-    if not s:
-        return None
-    try:
-        dt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except (ValueError, TypeError):
-        return None
 
 
 def _next_trigger(task, now):
@@ -187,7 +151,7 @@ def _next_trigger(task, now):
         return None, "disabled"
 
     ttype = task.get("schedule_type", "")
-    last_run = _parse_dt(task.get("last_run"))
+    last_run = parse_dt(task.get("last_run"))
 
     if ttype == "interval":
         interval_min = task.get("interval_minutes", 0)
@@ -210,7 +174,7 @@ def _next_trigger(task, now):
     elif ttype == "once":
         if last_run is not None:
             return None, "already ran"
-        run_at = _parse_dt(task.get("run_at"))
+        run_at = parse_dt(task.get("run_at"))
         if not run_at:
             return None, "no run_at"
         delta = (run_at - now).total_seconds()
@@ -289,7 +253,7 @@ def render():
     inbox = load_inbox() or []
     outbox = load_outbox() or []
 
-    active_goals = [g for g in goals if g.get("status") in ("in_progress", "in-progress", "pending")]
+    active_goals = [g for g in goals if g.get("status") in ("in_progress", "pending")]
     needs_human = [o for o in outbox if o.get("type") == "needs_human"]
 
     # ── Header row: title + counts | filter ──

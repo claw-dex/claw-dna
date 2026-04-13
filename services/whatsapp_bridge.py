@@ -17,16 +17,16 @@ Setup:
        uv run python scripts/keepass.py store --title "WHATSAPP_PHONE_NUMBER_ID" --username whatsapp --password "<phone_number_id>"
        uv run python scripts/keepass.py store --title "WHATSAPP_VERIFY_TOKEN" --username whatsapp --password "<your_secret>"
   3. Start via service manager:
-       uv run python scripts/service-manager.py start whatsapp_bridge 8083 -- uv run python services/whatsapp_bridge.py
+       uv run python scripts/service_manager.py start whatsapp_bridge 8083 -- uv run python services/whatsapp_bridge.py
   4. Configure the webhook URL in Meta Developer Portal:
        https://<public-url>/system/whatsapp-bridge/webhook
      with your chosen verify token
   5. Send a WhatsApp message to the business number — it will auto-discover your phone
 
 Management:
-  uv run python scripts/service-manager.py status whatsapp_bridge   # check status
-  uv run python scripts/service-manager.py stop whatsapp_bridge     # stop service
-  uv run python scripts/service-manager.py list                     # list all services
+  uv run python scripts/service_manager.py status whatsapp_bridge   # check status
+  uv run python scripts/service_manager.py stop whatsapp_bridge     # stop service
+  uv run python scripts/service_manager.py list                     # list all services
 """
 
 import json
@@ -1077,7 +1077,7 @@ def main():
             "  uv run python scripts/keepass.py store --title 'WHATSAPP_VERIFY_TOKEN' --username whatsapp --password '<your_secret>'\n"
             "\n"
             "Step 4: Start the bridge\n"
-            "  uv run python scripts/service-manager.py start whatsapp_bridge 8083 -- uv run python services/whatsapp_bridge.py\n"
+            "  uv run python scripts/service_manager.py start whatsapp_bridge 8083 -- uv run python services/whatsapp_bridge.py\n"
             "\n"
             "Step 5: Configure the webhook in Meta Developer Portal\n"
             "  → Webhook URL: https://<public-url>/system/whatsapp-bridge/webhook\n"

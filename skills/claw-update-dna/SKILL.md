@@ -191,7 +191,7 @@ EOF
 |---|---|---|
 | `constitution.md`, `system.md` | **REMOTE** | Immutable upstream files — always take the latest |
 | `bootstrap.sh`, `heartbeat.sh` | **REMOTE** | Infrastructure managed upstream |
-| `app/commands.py` | **REMOTE** | Protected file — must not be locally modified |
+| `app/commands_tab.py` | **REMOTE** | Protected file — must not be locally modified |
 | `memory/` | **LOCAL** | Runtime state — local is the source of truth |
 | `messages/*.json` | **LOCAL** | Active message queues — never overwrite |
 | `server.py`, `app/*.py` | **MANUAL MERGE** | May have both local improvements and upstream updates for the portal |
@@ -255,7 +255,7 @@ git diff HEAD@{1}..HEAD --name-only
 curl -s http://localhost:8081/app/_stcore/health
 
 # 6. If portal is broken, trigger a restart
-bash scripts/server-restart.sh --verify
+bash scripts/server_restart.sh --verify
 ```
 
 ### Step 8: Install New OS-Level Dependencies (if needed)
@@ -327,7 +327,7 @@ git reset --hard origin/v1/base
 | Dirty tracked files won't stash | `git checkout -- <file>` to discard, or commit to temp branch |
 | Stash succeeds but files remain dirty | `git checkout -- <files>` — they're saved in the stash already |
 | `cannot rebase: unstaged changes` | Clean remaining dirty files with `git checkout --` before rebase |
-| Portal broken after pull | `bash scripts/server-restart.sh --verify` |
+| Portal broken after pull | `bash scripts/server_restart.sh --verify` |
 | `seed/install.sh` changed | Re-run `bash seed/install.sh` to install new OS-level dependencies |
 | `pyproject.toml` changed | Run `uv sync` immediately |
 | Diverged history (force-push on remote) | `git fetch origin && git reset --hard origin/v1/base` (destructive — confirm with user) |

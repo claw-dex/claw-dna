@@ -3,6 +3,8 @@
 import streamlit as st
 from datetime import datetime, timezone, timedelta
 
+from app.shared import heartbeat_freshness, parse_dt as _safe_fromisoformat
+
 _CATEGORY_COLORS = {
     "capability":       "#2196F3",
     "observability":    "#9C27B0",
@@ -19,26 +21,6 @@ _CATEGORY_ICONS = {
 }
 
 
-def _heartbeat_age_str(hb_str):
-    """Return human-readable age of a heartbeat timestamp, or '—'."""
-    if not hb_str or hb_str == "—":
-        return "—", "⚪"
-    try:
-        hb_dt = datetime.fromisoformat(str(hb_str))
-        secs = (datetime.now(timezone.utc) - hb_dt).total_seconds()
-        if secs < 0:
-            return "just now", "🟢"
-        if secs < 60:
-            return f"{int(secs)}s ago", "🟢"
-        if secs < 300:
-            return f"{int(secs // 60)}m ago", "🟢"
-        if secs < 1800:
-            return f"{int(secs // 60)}m ago", "🟡"
-        if secs < 86400:
-            return f"{int(secs // 3600)}h ago", "🔴"
-        return f"{int(secs // 86400)}d ago", "🔴"
-    except (ValueError, TypeError):
-        return str(hb_str)[:16].replace("T", " "), "⚪"
 
 
 def _render_today_glance(now_utc):
@@ -138,7 +120,7 @@ def _render_today_glance(now_utc):
 
         type_icon = {"bootstrap": "🌱", "evolve": "🧬", "goal": "🎯", "self-heal": "🔧"}.get(ctype, "•")
         cat_icon = _CATEGORY_ICONS.get(cat, "") if cat else ""
-        status_icon = {"completed": "✅", "failed": "❌", "in-progress": "🔄"}.get(status, "⏳")
+        status_icon = {"completed": "✅", "failed": "❌", "in_progress": "🔄"}.get(status, "⏳")
         cat_color = _CATEGORY_COLORS.get(cat, "#666")
 
         dur_str = ""
@@ -217,7 +199,7 @@ def render():
 
     active_goals = [g for g in goals if g.get("status") in ("in_progress", "pending")]
     hb_str = state.get("last_heartbeat", "—")
-    hb_age, hb_icon = _heartbeat_age_str(hb_str)
+    hb_age, hb_icon = heartbeat_freshness(hb_str)
 
     col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
@@ -574,12 +556,6 @@ def render():
                     st.caption("(No detailed summary recorded)")
 
 
-def _safe_fromisoformat(ts_str):
-    """Parse ISO timestamp, returning None on failure."""
-    try:
-        return datetime.fromisoformat(ts_str)
-    except (ValueError, TypeError):
-        return None
 
 
 def _status_icon(status):

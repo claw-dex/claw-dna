@@ -3,10 +3,12 @@
 import copy
 import fcntl
 import glob
+import html as _html
 import json
 import os
 import shutil
 import time
+from datetime import datetime, timezone
 
 # ── Path constants ────────────────────────────────────────────
 AGENT_DIR = "/agent"
@@ -20,8 +22,79 @@ ERROR_LOG_PATH = f"{MEMORY_DIR}/server_errors.json"
 CHAT_HISTORY_PATH = f"{MEMORY_DIR}/chat_history.json"
 PORTAL_CONFIG_PATH = f"{MEMORY_DIR}/portal_config.json"
 AGENT_CREDENTIALS_PATH = "/home/agent/.claude/.credentials.json"
+SCHEDULED_TASKS_PATH = os.path.join(MEMORY_DIR, "scheduled_tasks.json")
+
+# ── Status / type styling ─────────────────────────────────────
+# See prompts/enum.md for complete enum definitions
+_STATUS_COLORS = {
+    "completed": "#4CAF50", "failed": "#F44336",
+    "in_progress": "#2196F3", "pending": "#FF9800",
+}
+_TYPE_COLORS = {
+    # Inbox types
+    "goal": "#2196F3",
+    "message": "#9C27B0",
+    "bash": "#FF9800",
+    # Outbox types
+    "response": "#4CAF50",
+    "needs_human": "#F44336",
+    "goal_complete": "#4CAF50",
+    "goal_failed": "#F44336",
+}
+
+
+def _badge(text, color):
+    """Colored pill badge (HTML-escaped)."""
+    return (
+        f'<span style="background:{_html.escape(str(color))};color:#fff;padding:1px 8px;'
+        f'border-radius:10px;font-size:11px;font-weight:600">{_html.escape(str(text))}</span>'
+    )
 
 MAX_HISTORY = 50  # keep last 50 commands
+
+
+def parse_dt(s):
+    """Parse an ISO timestamp string to a timezone-aware datetime, or None."""
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (ValueError, TypeError):
+        return None
+
+
+def heartbeat_freshness(hb_str):
+    """Return (display_str, icon) for a heartbeat timestamp.
+
+    Icons: 🟢 < 5 min | 🟡 5-30 min | 🔴 > 30 min | ⚪ unknown
+    """
+    if not hb_str or hb_str == "—":
+        return "—", "⚪"
+    try:
+        hb_dt = datetime.fromisoformat(str(hb_str))
+        secs = (datetime.now(timezone.utc) - hb_dt).total_seconds()
+        if secs < 0:
+            age_str = "just now"
+        elif secs < 60:
+            age_str = f"{int(secs)}s ago"
+        elif secs < 3600:
+            age_str = f"{int(secs // 60)}m ago"
+        elif secs < 86400:
+            age_str = f"{int(secs // 3600)}h ago"
+        else:
+            age_str = f"{int(secs // 86400)}d ago"
+        if secs < 300:
+            icon = "🟢"
+        elif secs < 1800:
+            icon = "🟡"
+        else:
+            icon = "🔴"
+        return age_str, icon
+    except (ValueError, TypeError):
+        return str(hb_str)[:16].replace("T", " "), "⚪"
 
 # Critical directories and files with sensible defaults
 _CRITICAL_DIRS = [MEMORY_DIR, LOGS_DIR, MESSAGES_DIR, f"{AGENT_DIR}/web", f"{AGENT_DIR}/workspace"]
@@ -97,6 +170,8 @@ def _write_json_atomic(path, data, indent=None):
     try:
         with os.fdopen(tmp_fd, "w") as f:
             json.dump(data, f, indent=indent)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp_path, path)
     except Exception:
         try:

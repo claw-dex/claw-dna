@@ -1,5 +1,6 @@
-#!/bin/sh
+#!/bin/bash
 # Check
+set -e
 ARCH=$(dpkg --print-architecture)
 # if empty default to amd64
 if [ -z "$ARCH" ]; then

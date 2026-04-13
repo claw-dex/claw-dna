@@ -5,7 +5,7 @@ description: Headless portal render check using Streamlit's AppTest framework. C
 
 # app-check
 
-**Path:** `scripts/app-check.py`
+**Path:** `scripts/app_check.py`
 
 Performs a full headless render of `server.py` using Streamlit's `AppTest` framework. Detects errors the HTTP health endpoint cannot catch.
 
@@ -22,8 +22,8 @@ Performs a full headless render of `server.py` using Streamlit's `AppTest` frame
 
 ```bash
 # Check if the portal renders cleanly
-uv run python scripts/app-check.py
+uv run python scripts/app_check.py
 
 # JSON output for scripting
-uv run python scripts/app-check.py --json
+uv run python scripts/app_check.py --json
 ```

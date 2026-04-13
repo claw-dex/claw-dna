@@ -13,14 +13,14 @@ Setup:
   1. Create a bot via @BotFather on Telegram → get token
   2. Store token: uv run python scripts/keepass.py store --title "TELEGRAM_BOT_TOKEN" --username bot --password "<token>"
   3. Start via service manager:
-       uv run python scripts/service-manager.py start telegram_bridge -- uv run python services/telegram_bridge.py
+       uv run python scripts/service_manager.py start telegram_bridge -- uv run python services/telegram_bridge.py
   4. Message the bot on Telegram — it will auto-discover your chat ID
   5. All future outbox messages will be forwarded to you on Telegram
 
 Management:
-  uv run python scripts/service-manager.py status telegram_bridge   # check status
-  uv run python scripts/service-manager.py stop telegram_bridge     # stop service
-  uv run python scripts/service-manager.py list                     # list all services
+  uv run python scripts/service_manager.py status telegram_bridge   # check status
+  uv run python scripts/service_manager.py stop telegram_bridge     # stop service
+  uv run python scripts/service_manager.py list                     # list all services
 """
 
 import fcntl
@@ -607,7 +607,7 @@ def handle_status_command(token: str, from_chat: str, from_user: str, chat_histo
 
         # Count goals by status
         if isinstance(goals, list):
-            active = sum(1 for g in goals if g.get("status") in ("pending", "in-progress"))
+            active = sum(1 for g in goals if g.get("status") in ("pending", "in_progress"))
             completed = sum(1 for g in goals if g.get("status") == "completed")
             failed = sum(1 for g in goals if g.get("status") == "failed")
         else:
@@ -659,7 +659,7 @@ def handle_goals_command(token: str, from_chat: str, from_user: str, chat_histor
         status_emoji = {
             "completed": "✅",
             "failed": "❌",
-            "in-progress": "⚙️",
+            "in_progress": "⚙️",
             "pending": "⏳",
         }
 

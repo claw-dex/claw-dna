@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-memory-ask.py — RAG-powered question answering over memvid memory files.
+memory_ask.py — RAG-powered question answering over memvid memory files.
 
 Retrieves adaptive context from a .mv2 file via `memvid ask --context-only`,
 then synthesizes an answer using Claude via claude-agent-sdk.
 
 Usage:
-    uv run python scripts/memory-ask.py "What is the MacBook Pro M5 price?"
-    uv run python scripts/memory-ask.py "What portal work was done?" --mv2 /agent/memory/long_term_memory.mv2
-    uv run python scripts/memory-ask.py "corporate leasing options" --mv2 /agent/workspace/itez_sg.mv2 --k 10
-    uv run python scripts/memory-ask.py "iPhone models" --context-only
-    uv run python scripts/memory-ask.py "warranty info" --json
+    uv run python scripts/memory_ask.py "What is the MacBook Pro M5 price?"
+    uv run python scripts/memory_ask.py "What portal work was done?" --mv2 /agent/memory/long_term_memory.mv2
+    uv run python scripts/memory_ask.py "corporate leasing options" --mv2 /agent/workspace/itez_sg.mv2 --k 10
+    uv run python scripts/memory_ask.py "iPhone models" --context-only
+    uv run python scripts/memory_ask.py "warranty info" --json
 
 Required:
     QUESTION          Natural-language question (first positional argument)
@@ -200,7 +200,7 @@ def main():
 
     if not opts["question"]:
         print("ERROR: QUESTION is required (first positional argument)", file=sys.stderr)
-        print('Usage: uv run python scripts/memory-ask.py "your question here"', file=sys.stderr)
+        print('Usage: uv run python scripts/memory_ask.py "your question here"', file=sys.stderr)
         sys.exit(1)
 
     question = opts["question"]

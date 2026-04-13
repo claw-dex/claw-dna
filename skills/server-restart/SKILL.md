@@ -5,7 +5,7 @@ description: Trigger a Streamlit hot-reload by touching server.py, causing Strea
 
 # server-restart
 
-**Path:** `scripts/server-restart.sh`
+**Path:** `scripts/server_restart.sh`
 
 Triggers Streamlit's automatic file-watch reload by `touch`ing `server.py`. Faster than a full process restart — no downtime.
 
@@ -14,14 +14,14 @@ Triggers Streamlit's automatic file-watch reload by `touch`ing `server.py`. Fast
 | Flag | Description |
 |------|-------------|
 | _(none)_ | Touch server.py to trigger reload |
-| `--verify` | Run `health-check.sh` after the reload to confirm the portal is responding |
+| `--verify` | Run `health_check.sh` after the reload to confirm the portal is responding |
 
 ## Examples
 
 ```bash
 # Trigger a hot reload
-bash scripts/server-restart.sh
+bash scripts/server_restart.sh
 
 # Reload and verify portal is up
-bash scripts/server-restart.sh --verify
+bash scripts/server_restart.sh --verify
 ```

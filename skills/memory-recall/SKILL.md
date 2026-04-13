@@ -5,11 +5,11 @@ description: Query the agent's long-term semantic memory (memvid). Use when the 
 
 # memory-recall
 
-**Path:** `scripts/memory-recall.py`
+**Path:** `scripts/memory_recall.py`
 
 Queries long-term semantic memory stored in `.mv2` files using the `memvid` CLI for hybrid lexical + semantic search. Defaults to `/agent/memory/long_term_memory.mv2` but supports querying any `.mv2` file via `--mv2`.
 
-The default `.mv2` file is populated automatically by `cycle-close.py` at the end of every cycle. Each entry contains the cycle's goal, summary, actions, category, and learnings.
+The default `.mv2` file is populated automatically by `cycle_close.py` at the end of every cycle. Each entry contains the cycle's goal, summary, actions, category, and learnings.
 
 ## Arguments
 
@@ -29,28 +29,28 @@ The default `.mv2` file is populated automatically by `cycle-close.py` at the en
 
 ```bash
 # Semantic search — find past work related to a topic
-uv run python scripts/memory-recall.py "portal reliability fixes"
+uv run python scripts/memory_recall.py "portal reliability fixes"
 
 # Get more results
-uv run python scripts/memory-recall.py "efficiency improvements" --k 10
+uv run python scripts/memory_recall.py "efficiency improvements" --k 10
 
 # JSON output for programmatic use
-uv run python scripts/memory-recall.py "what scheduler changes were made?" --json
+uv run python scripts/memory_recall.py "what scheduler changes were made?" --json
 
 # Query a different .mv2 file
-uv run python scripts/memory-recall.py "auth changes" --mv2 /agent/memory/project_notes.mv2
+uv run python scripts/memory_recall.py "auth changes" --mv2 /agent/memory/project_notes.mv2
 
 # Only entries older than a specific date
-uv run python scripts/memory-recall.py "reliability" --until 2026-03-20
+uv run python scripts/memory_recall.py "reliability" --until 2026-03-20
 
 # Only entries within a date range
-uv run python scripts/memory-recall.py "efficiency" --since 2026-03-01 --until 2026-03-15
+uv run python scripts/memory_recall.py "efficiency" --since 2026-03-01 --until 2026-03-15
 
 # Browse recent timeline
-uv run python scripts/memory-recall.py --timeline
+uv run python scripts/memory_recall.py --timeline
 
 # Timeline since a specific date
-uv run python scripts/memory-recall.py --timeline --since 2026-03-01
+uv run python scripts/memory_recall.py --timeline --since 2026-03-01
 ```
 
 ## How it works
@@ -60,6 +60,6 @@ uv run python scripts/memory-recall.py --timeline --since 2026-03-01
 
 ## Integration with cycle scripts
 
-- **cycle-close.py** stores each journal entry into the `.mv2` file via `memory-ingest.py --append-json` at the end of each cycle.
-- **cycle-start.py** shells out to this script (`memory-recall.py --until <24h_ago> --k 50 --json`) to recall up to 50 memories older than 24h and includes them in the `[LONG-TERM MEMORY]` briefing section.
+- **cycle_close.py** stores each journal entry into the `.mv2` file via `memory_ingest.py --append-json` at the end of each cycle.
+- **cycle_start.py** shells out to this script (`memory_recall.py --until <24h_ago> --k 50 --json`) to recall up to 50 memories older than 24h and includes them in the `[LONG-TERM MEMORY]` briefing section.
 - This script provides on-demand access to the same memory store (or any other `.mv2` file via `--mv2`).

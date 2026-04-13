@@ -42,14 +42,14 @@ app/
   shared.py        — Path constants + _write_json_atomic + _startup_check + AtomicJSON
   chat.py          — Chat interface (always visible above tabs, persistent async Claude SDK)
   glance.py        — Quick Glance dashboard (always visible above tabs, Goals/Inbox/Outbox summary)
-  commands.py      — Command Center tab (PROTECTED — do NOT modify)
+  commands_tab.py  — Command Center tab (PROTECTED — do NOT modify)
   memory_tab.py    — Memory tab (journal, logs, goals, memory files, search)
-  system.py        — System tab (health, diagnostics, scripts)
+  system_tab.py    — System tab (health, diagnostics, scripts)
   services_tab.py  — Services & Cron tab (service management, scheduled tasks)
-  overview.py      — Agent Overview tab (activity, goal stats, evolution balance)
-  workspace.py     — Workspace tab (file upload, Caddy file browser)
-  credential.py    — Credentials tab (KeePass database management)
-  emails.py        — Email tab (Google Workspace OAuth setup)
+  overview_tab.py  — Agent Overview tab (activity, goal stats, evolution balance)
+  workspace_tab.py — Workspace tab (file upload, Caddy file browser)
+  credential_tab.py — Credentials tab (KeePass database management)
+  emails_tab.py    — Email tab (Google Workspace OAuth setup)
   data/            — Data loading package (mtime-based caching + write operations)
     __init__.py    — Re-exports all public functions for backward compatibility
     _cache.py      — Cache infrastructure (TTL cache, mtime decorators, auto-registration)
@@ -82,14 +82,14 @@ Two modules render above the tab strip in `server.py` (after the header, before 
 
 | Label | Module | Group |
 |-------|--------|-------|
-| Command Center | commands | Agent Console |
+| Command Center | commands_tab | Agent Console |
 | Memory | memory_tab | Agent Console |
-| System | system | Agent Console |
+| System | system_tab | Agent Console |
 | Services & Cron | services_tab | Agent Console |
-| Agent Overview | overview | Agent Console |
-| Workspace | workspace | Core |
-| Credentials | credential | Core |
-| Email | emails | Core |
+| Agent Overview | overview_tab | Agent Console |
+| Workspace | workspace_tab | Core |
+| Credentials | credential_tab | Core |
+| Email | emails_tab | Core |
 
 ### Header Metrics
 
@@ -220,8 +220,8 @@ All write functions call `_cache_clear_all()` after mutation.
 | `update_goal_status(goal_index, new_status)` | Update goal status by index (AtomicJSON) |
 | `delete_inbox_item(item_index)` | Delete single inbox item by index (AtomicJSON) |
 | `clear_outbox()` | Archive outbox to `outbox_history.json` (dedup by timestamp), then clear |
-| `remove_service(name)` | Stop (if running) and remove a service via `service-manager.py` |
-| `stop_service(name)` | Stop running service via `service-manager.py` (15s timeout) |
+| `remove_service(name)` | Stop (if running) and remove a service via `service_manager.py` |
+| `stop_service(name)` | Stop running service via `service_manager.py` (15s timeout) |
 | `start_service(name)` | Restart dead service using saved command from `services.json` |
 | `create_scheduled_task(task_data)` | Add new scheduled task to `scheduled_tasks.json` (AtomicJSON) |
 | `update_scheduled_task(task_id, updates)` | Update fields of existing scheduled task |

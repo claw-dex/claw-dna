@@ -12,24 +12,24 @@ import hydralit_components as hc
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-from app.shared import _startup_check
+from app.shared import _startup_check, heartbeat_freshness
 from app.data import load_state, load_errors, load_cycle_velocity, load_services
-from app import chat, commands, memory_tab, workspace, system, overview, credential, emails, glance, services_tab
+from app import chat, commands_tab, memory_tab, workspace_tab, system_tab, overview_tab, credential_tab, emails_tab, glance, services_tab
 
 # ── Tab registry — add/remove tabs by editing this list only ─────────────────
 # Each entry: (label, module, display_name_for_errors[, group])
 # group defaults to "General" if omitted (backward compatible)
 TAB_REGISTRY = [
     # Agent Console — operational tools
-    ("🎛️ Command Center",   commands,    "Command Center",  "Agent Console"),
-    ("📓 Memory",            memory_tab,  "Memory",          "Agent Console"),
-    ("⚙️ System",            system,      "System",          "Agent Console"),
-    ("🔧 Services & Cron",   services_tab, "Services & Cron", "Agent Console"),
-    ("🔭 Agent Overview",    overview,    "Agent Overview",  "Agent Console"),
+    ("🎛️ Command Center",   commands_tab,   "Command Center",  "Agent Console"),
+    ("📓 Memory",            memory_tab,     "Memory",          "Agent Console"),
+    ("⚙️ System",            system_tab,     "System",          "Agent Console"),
+    ("🔧 Services & Cron",   services_tab,   "Services & Cron", "Agent Console"),
+    ("🔭 Agent Overview",    overview_tab,   "Agent Overview",  "Agent Console"),
     # Core — file / credential / email management
-    ("📁 Workspace",         workspace,   "Workspace",       "Core"),
-    ("🔑 Credentials",       credential,  "Credentials",     "Core"),
-    ("📧 Email",             emails,      "Email",           "Core"),
+    ("📁 Workspace",         workspace_tab,  "Workspace",       "Core"),
+    ("🔑 Credentials",       credential_tab, "Credentials",     "Core"),
+    ("📧 Email",             emails_tab,     "Email",           "Core"),
 ]
 
 
@@ -216,42 +216,7 @@ status_colors = {
 status_icon = status_colors.get(agent_status, "⚪")
 
 
-def _heartbeat_freshness(hb_str):
-    """Return (display_str, freshness_icon) for a heartbeat timestamp string.
-
-    Freshness icons:
-      🟢 < 5 min  (agent is actively running)
-      🟡 5-30 min (agent recently ran, may be idle)
-      🔴 > 30 min (agent appears stalled)
-    """
-    if not hb_str or hb_str == "—":
-        return "—", "⚪"
-    try:
-        hb_dt = datetime.fromisoformat(str(hb_str))
-        delta = datetime.now(timezone.utc) - hb_dt
-        total_secs = delta.total_seconds()
-        if total_secs < 0:
-            age_str = "just now"
-        elif total_secs < 60:
-            age_str = f"{int(total_secs)}s ago"
-        elif total_secs < 3600:
-            age_str = f"{int(total_secs // 60)}m ago"
-        elif total_secs < 86400:
-            age_str = f"{int(total_secs // 3600)}h ago"
-        else:
-            age_str = f"{int(total_secs // 86400)}d ago"
-        if total_secs < 300:
-            icon = "🟢"
-        elif total_secs < 1800:
-            icon = "🟡"
-        else:
-            icon = "🔴"
-        return age_str, icon
-    except (ValueError, TypeError):
-        return str(hb_str)[:16].replace("T", " "), "⚪"
-
-
-hb_display, hb_icon = _heartbeat_freshness(last_heartbeat)
+hb_display, hb_icon = heartbeat_freshness(last_heartbeat)
 velocity = load_cycle_velocity()
 _services = load_services() or {}
 _alive_services = sum(1 for s in _services.values() if s.get("alive"))

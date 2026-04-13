@@ -38,7 +38,7 @@ file, start from the example below.
 - `last_cycle_category`: evolve category (when applicable) | `null`
 - `last_heartbeat`: set by heartbeat.sh on every invocation (even during sleep mode)
 - `last_cycle_run`: set by heartbeat.sh only when a cycle actually executes (after sleep check passes)
-- `last_cycle_end`: set by cycle-close.py when a cycle completes
+- `last_cycle_end`: set by cycle_close.py when a cycle completes
 - `services`: map of `{name: {port, pid, started}}`
 
 ### cycles.json
@@ -273,13 +273,13 @@ Comprehensive examples:
     "timestamp": "2026-03-19T06:56:45.344596+00:00",
     "status": "completed",
     "type": "evolve",
-    "goal": "Optimized scheduler cron matching from O(10080) minute-by-minute scan to O(days) day-by-day algorithm. Deduplicated maturity signal computation in cycle-start.py by extracting _build_caps_with_signals() helper.",
+    "goal": "Optimized scheduler cron matching from O(10080) minute-by-minute scan to O(days) day-by-day algorithm. Deduplicated maturity signal computation in cycle_start.py by extracting _build_caps_with_signals() helper.",
     "actions": [
       "Replaced _has_cron_match_since() linear scan with day-by-day candidate generation (3us per call for daily patterns vs previous O(10080) iterations)",
       "Extracted _build_caps_with_signals() from duplicate blocks in print_full() and print_json_output()",
       "Added comprehensive tests verifying all cron pattern types (daily, hourly, wildcard, day-of-week)"
     ],
-    "summary": "Optimized scheduler cron matching from O(10080) minute-by-minute scan to O(days) day-by-day algorithm. Deduplicated maturity signal computation in cycle-start.py by extracting _build_caps_with_signals() helper.",
+    "summary": "Optimized scheduler cron matching from O(10080) minute-by-minute scan to O(days) day-by-day algorithm. Deduplicated maturity signal computation in cycle_start.py by extracting _build_caps_with_signals() helper.",
     "category": "efficiency"
   },
   {
@@ -303,15 +303,15 @@ Comprehensive examples:
     "timestamp": "2026-03-19T07:07:22.584424+00:00",
     "status": "completed",
     "type": "evolve",
-    "goal": "Added Resource Trends dashboard to System tab with 4 Altair charts (memory%, load, disk, portal latency). Integrated metrics_collector into cycle-start.py for automatic data collection each cycle. Created app/data/metrics.py mtime-cached loader.",
+    "goal": "Added Resource Trends dashboard to System tab with 4 Altair charts (memory%, load, disk, portal latency). Integrated metrics_collector into cycle_start.py for automatic data collection each cycle. Created app/data/metrics.py mtime-cached loader.",
     "actions": [
       "Created app/data/metrics.py (mtime-cached metrics loader)",
       "Added load_metrics to app/data/__init__.py",
       "Added _render_resource_trends() to app/system.py with 4 Altair area/line charts",
-      "Integrated metrics collection into cycle-start.py step 3b",
+      "Integrated metrics collection into cycle_start.py step 3b",
       "Seeded initial metrics data (2 snapshots)"
     ],
-    "summary": "Added Resource Trends dashboard to System tab with 4 Altair charts (memory%, load, disk, portal latency). Integrated metrics_collector into cycle-start.py for automatic data collection each cycle. Created app/data/metrics.py mtime-cached loader.",
+    "summary": "Added Resource Trends dashboard to System tab with 4 Altair charts (memory%, load, disk, portal latency). Integrated metrics_collector into cycle_start.py for automatic data collection each cycle. Created app/data/metrics.py mtime-cached loader.",
     "category": "observability"
   },
   {
@@ -468,8 +468,8 @@ Entry:
 ```
 
 **Fields:**
-- `public_url`: Public hostname for external access (e.g., via Cloudflare Tunnel). Set via `scripts/portal-config.py hostname --set <url>`. Used by `chat.py` for system prompt injection.
-- `timezone`: IANA timezone for time-aware operations (e.g., scheduled tasks, log timestamps). Set via `scripts/portal-config.py timezone --set <tz>`. Used by `heartbeat.sh` for timestamp display.
+- `public_url`: Public hostname for external access (e.g., via Cloudflare Tunnel). Set via `scripts/portal_config.py hostname --set <url>`. Used by `chat.py` for system prompt injection.
+- `timezone`: IANA timezone for time-aware operations (e.g., scheduled tasks, log timestamps). Set via `scripts/portal_config.py timezone --set <tz>`. Used by `heartbeat.sh` for timestamp display.
 
 **Notes:**
 - File may not exist if no configuration has been set (scripts will create it on first use)

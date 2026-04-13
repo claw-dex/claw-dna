@@ -1,6 +1,7 @@
 #!/bin/bash
-# health-check.sh — Multi-service health check with retry logic
-# Usage: ./health-check.sh [--retries N] [--delay SECONDS]
+set -uo pipefail
+# health_check.sh — Multi-service health check with retry logic
+# Usage: ./health_check.sh [--retries N] [--delay SECONDS]
 # Returns exit 0 if all checks pass, exit 1 if any fail after retries
 
 RETRIES=3
@@ -83,7 +84,7 @@ done
 check_app_render() {
   echo ""
   echo "--- App Render Check ---"
-  if timeout 45 uv run python /agent/scripts/app-check.py 2>&1; then
+  if timeout 45 uv run python /agent/scripts/app_check.py 2>&1; then
     printf "  %-30s %s\n" "App render (AppTest)" "OK"
   else
     printf "  %-30s %s\n" "App render (AppTest)" "FAIL"

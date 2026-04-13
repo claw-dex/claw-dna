@@ -5,11 +5,11 @@ description: Ingest agent memory into long-term semantic store (memvid CLI). Use
 
 # memory-ingest
 
-**Path:** `scripts/memory-ingest.py`
+**Path:** `scripts/memory_ingest.py`
 
 Parses `journal.json`, `cycles.json`, and `goal.json`, chunks them into semantically meaningful pieces, and ingests into a `.mv2` index via the `memvid` CLI with `bge-base` embeddings for high-quality hybrid lexical + semantic search.
 
-The `.mv2` file is used by `memory-recall.py` for on-demand queries and by `cycle-start.py` for automatic long-term memory briefing.
+The `.mv2` file is used by `memory_recall.py` for on-demand queries and by `cycle_start.py` for automatic long-term memory briefing.
 
 ## Arguments
 
@@ -33,31 +33,31 @@ The `.mv2` file is used by `memory-recall.py` for on-demand queries and by `cycl
 
 ```bash
 # Full rebuild of the semantic memory index
-uv run python scripts/memory-ingest.py --build
+uv run python scripts/memory_ingest.py --build
 
 # Preview what would be ingested
-uv run python scripts/memory-ingest.py --build --dry-run
+uv run python scripts/memory_ingest.py --build --dry-run
 
 # Append a single journal entry (JSON) after cycle close
-uv run python scripts/memory-ingest.py --append-json '{"cycle": 42, "summary": "Fixed portal auth", "type": "goal", "status": "completed", "actions": ["Patched /agent/workspace/auth_fix.pdf"]}'
+uv run python scripts/memory_ingest.py --append-json '{"cycle": 42, "summary": "Fixed portal auth", "type": "goal", "status": "completed", "actions": ["Patched /agent/workspace/auth_fix.pdf"]}'
 
 # Append from a JSON file
-uv run python scripts/memory-ingest.py --append-json @/tmp/journal_entry.json
+uv run python scripts/memory_ingest.py --append-json @/tmp/journal_entry.json
 
 # Ingest raw text directly
-uv run python scripts/memory-ingest.py --append-text "The deploy pipeline requires approval from two reviewers before merging to main"
+uv run python scripts/memory_ingest.py --append-text "The deploy pipeline requires approval from two reviewers before merging to main"
 
 # Ingest text with a custom title and tags
-uv run python scripts/memory-ingest.py --append-text "Auth tokens expire after 24h in production" --title "Auth token TTL" --tags "auth" "production"
+uv run python scripts/memory_ingest.py --append-text "Auth tokens expire after 24h in production" --title "Auth token TTL" --tags "auth" "production"
 
 # Ingest a file directly
-uv run python scripts/memory-ingest.py --append-file /agent/workspace/architecture-overview.pdf
+uv run python scripts/memory_ingest.py --append-file /agent/workspace/architecture-overview.pdf
 
 # Ingest a file with tags
-uv run python scripts/memory-ingest.py --append-file /agent/workspace/meeting-notes.md --tags "meeting" "planning"
+uv run python scripts/memory_ingest.py --append-file /agent/workspace/meeting-notes.md --tags "meeting" "planning"
 
 # JSON output for scripting
-uv run python scripts/memory-ingest.py --build --json --quiet
+uv run python scripts/memory_ingest.py --build --json --quiet
 ```
 
 ## How it works
@@ -92,6 +92,6 @@ Uses `bge-base` via the `memvid` CLI for higher quality embeddings compared to `
 
 ## Integration with cycle scripts
 
-- **cycle-close.py** calls `memory-ingest.py --append-json` at the end of each cycle to store the journal entry into long-term memory.
-- **memory-recall.py** queries the same `.mv2` file produced by this script.
-- **cycle-start.py** reads the `.mv2` file for the `[LONG-TERM MEMORY]` briefing section.
+- **cycle_close.py** calls `memory_ingest.py --append-json` at the end of each cycle to store the journal entry into long-term memory.
+- **memory_recall.py** queries the same `.mv2` file produced by this script.
+- **cycle_start.py** reads the `.mv2` file for the `[LONG-TERM MEMORY]` briefing section.

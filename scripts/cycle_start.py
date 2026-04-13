@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-cycle-start.py — Single-command cycle startup briefing (replaces running memory-stats + memory-repair separately).
+cycle_start.py — Single-command cycle startup briefing (replaces running memory-stats + memory-repair separately).
 
 Combines in one Python process (one `uv run` invocation):
   1. Memory repair scan (detect + fix corrupted JSON)
@@ -10,12 +10,12 @@ Combines in one Python process (one `uv run` invocation):
   5. Evolve category recommendation
 
 Usage:
-    uv run python scripts/cycle-start.py                    # full briefing
-    uv run python scripts/cycle-start.py --short            # one-liner summary
-    uv run python scripts/cycle-start.py --json             # machine-readable JSON
-    uv run python scripts/cycle-start.py --no-repair        # skip memory repair step
-    uv run python scripts/cycle-start.py --mode evolve      # include evolve recommendation section
-    uv run python scripts/cycle-start.py --clear-old-errors # force-purge resolved tab errors
+    uv run python scripts/cycle_start.py                    # full briefing
+    uv run python scripts/cycle_start.py --short            # one-liner summary
+    uv run python scripts/cycle_start.py --json             # machine-readable JSON
+    uv run python scripts/cycle_start.py --no-repair        # skip memory repair step
+    uv run python scripts/cycle_start.py --mode evolve      # include evolve recommendation section
+    uv run python scripts/cycle_start.py --clear-old-errors # force-purge resolved tab errors
 
 Exit codes: 0 = healthy, 1 = memory issues found (check output).
 
@@ -27,10 +27,8 @@ Enhanced in cycle 129 (efficiency): inlined journal-archive logic — saves ~1.5
 
 import json
 import os
-import shutil
 import sys
 import datetime
-import subprocess
 from pathlib import Path
 from collections import Counter
 
@@ -38,6 +36,10 @@ MEMORY = Path("/agent/memory")
 MESSAGES = Path("/agent/messages")
 MV2_PATH = MEMORY / "long_term_memory.mv2"
 SCRIPTS = Path("/agent/scripts")
+
+# Import memory_repair from the same scripts/ directory
+sys.path.insert(0, str(SCRIPTS))
+from memory_repair import run_repair as _run_memory_repair  # noqa: E402
 
 # ── Flags ───────────────────────────────────────────────────────────────────────
 args = sys.argv[1:]
@@ -89,30 +91,6 @@ def portal_health() -> str:
         return f"ERROR: {e}"
 
 
-# ── Memory Repair (inlined from memory-repair.py for single-process efficiency) ──
-
-DEFAULTS = {
-    "state.json": {
-        "cycle_number": 1, "status": "idle", "current_goal": None,
-        "last_cycle_summary": "Reconstructed by cycle-start.py",
-        "created_at": now_iso(), "last_heartbeat": now_iso(),
-        "last_cycle_run": now_iso(), "last_cycle_end": None, "services": {}
-    },
-    "cycles.json": [],
-    "goal.json": [],
-    "journal.json": [],
-    "command_history.json": [],
-    "capabilities.json": [],
-}
-
-
-def _is_valid_json(path: Path):
-    try:
-        return True, json.loads(path.read_text())
-    except Exception as e:
-        return False, str(e)
-
-
 def _write_safe(path: Path, data) -> bool:
     tmp = path.with_suffix(".tmp")
     try:
@@ -127,7 +105,7 @@ def _write_safe(path: Path, data) -> bool:
 def _auto_archive_journal_inlined(journal: list, keep: int = 20) -> tuple:
     """Archive old journal entries in-process (no subprocess).
 
-    Replaces the subprocess call to journal-archive.py at cycle start.
+    Replaces the subprocess call to journal_archive.py at cycle start.
     Saves ~1.5s (uv run startup) every ~5 cycles when the threshold is exceeded.
 
     Returns (journal_reloaded, n_archived, archived_total) tuple.
@@ -152,111 +130,6 @@ def _auto_archive_journal_inlined(journal: list, keep: int = 20) -> tuple:
     return journal, 0, len(existing_list)  # rollback on failure
 
 
-def _backup(path: Path) -> bool:
-    bak = path.with_suffix(path.suffix + ".backup")
-    try:
-        # Skip backup if backup is already newer or same age as source (no changes since last backup)
-        if bak.exists() and bak.stat().st_mtime >= path.stat().st_mtime:
-            return True
-        shutil.copy2(path, bak)
-        return True
-    except Exception:
-        return False
-
-
-def _salvage_json_array(text: str):
-    stripped = text.strip()
-    if not stripped.startswith("["):
-        return None
-    last_close = stripped.rfind("}")
-    if last_close == -1:
-        return None
-    for candidate in [
-        stripped[:last_close + 1] + "]",
-        stripped[:last_close + 1].rstrip().rstrip(",") + "]",
-    ]:
-        try:
-            data = json.loads(candidate)
-            if isinstance(data, list):
-                return data
-        except Exception:
-            pass
-    return None
-
-
-def run_memory_repair() -> dict:
-    """Scan and repair memory files. Returns summary dict."""
-    ok, repaired, failed = 0, 0, 0
-    issues = []
-
-    for filename, default in DEFAULTS.items():
-        path = MEMORY / filename
-        if not path.exists():
-            if default is not None and _write_safe(path, default):
-                repaired += 1
-                issues.append(f"Created missing {filename}")
-            else:
-                failed += 1
-                issues.append(f"MISSING and unrecoverable: {filename}")
-            continue
-
-        # Special journal handling
-        if filename == "journal.json":
-            text = path.read_text()
-            if not text.strip():
-                _write_safe(path, [])
-                repaired += 1
-                issues.append("journal.json was empty, reset")
-                continue
-            valid, data = _is_valid_json(path)
-            if not valid:
-                salvaged = _salvage_json_array(text)
-                if salvaged is not None:
-                    corrupt = path.with_suffix(".json.corrupt")
-                    shutil.copy2(path, corrupt)
-                    _write_safe(path, salvaged)
-                    repaired += 1
-                    issues.append(f"journal.json salvaged {len(salvaged)} entries")
-                else:
-                    shutil.copy2(path, path.with_suffix(".json.backup"))
-                    _write_safe(path, [])
-                    repaired += 1
-                    issues.append("journal.json reset (corrupt backed up)")
-                continue
-            _backup(path)
-            ok += 1
-            continue
-
-        valid, data = _is_valid_json(path)
-        if valid:
-            _backup(path)
-            ok += 1
-        else:
-            # Try backup
-            bak = path.with_suffix(path.suffix + ".backup")
-            restored = False
-            if bak.exists():
-                bv, bdata = _is_valid_json(bak)
-                if bv and _write_safe(path, bdata):
-                    repaired += 1
-                    issues.append(f"Restored {filename} from backup")
-                    restored = True
-            if not restored:
-                if default is not None:
-                    shutil.copy2(path, path.with_suffix(path.suffix + ".corrupt"))
-                    if _write_safe(path, default):
-                        repaired += 1
-                        issues.append(f"Reconstructed {filename} from default")
-                    else:
-                        failed += 1
-                        issues.append(f"UNRECOVERABLE: {filename}")
-                else:
-                    failed += 1
-                    issues.append(f"UNRECOVERABLE (no default): {filename}")
-
-    return {"ok": ok, "repaired": repaired, "failed": failed, "issues": issues}
-
-
 # ── Orphaned Cycle Recovery ─────────────────────────────────────────────────────
 
 def check_orphaned_cycles(cycles: list, max_age_minutes: int = 30) -> tuple:
@@ -268,7 +141,7 @@ def check_orphaned_cycles(cycles: list, max_age_minutes: int = 30) -> tuple:
     now = datetime.datetime.now(datetime.timezone.utc)
     interrupted = 0
     for c in cycles:
-        if c.get("status") != "in-progress":
+        if c.get("status") != "in_progress":
             continue
         start_str = c.get("start", "")
         if not start_str:
@@ -404,7 +277,7 @@ def _compute_recency_boost(cat: str, cycles: list) -> int:
 
 def _compute_goal_alignment(cat: str, goals: list) -> int:
     """0-25: do unfinished goals need this category."""
-    unfinished = [g for g in goals if g.get("status") in ("pending", "in-progress")]
+    unfinished = [g for g in goals if g.get("status") in ("pending", "in_progress")]
     if not unfinished:
         return 0
     keywords = GOAL_CATEGORY_KEYWORDS.get(cat, [])
@@ -462,7 +335,7 @@ def _compute_maturity_penalty(cat: str, capabilities: dict) -> tuple[int, str]:
 
 def _goal_signals(goals: list) -> list:
     """Return list of {goal, aligned_categories} for unfinished goals."""
-    unfinished = [g for g in goals if g.get("status") in ("pending", "in-progress")]
+    unfinished = [g for g in goals if g.get("status") in ("pending", "in_progress")]
     signals = []
     for g in unfinished:
         text = (g.get("content") or g.get("goal") or "").lower()
@@ -638,34 +511,26 @@ def _build_recall_query(inbox, goals) -> str:
 
 
 def _fetch_old_memories(limit: int = 50, inbox=None, goals=None) -> list:
-    """Fetch memories older than 24h from long-term semantic memory via memory-recall.py.
+    """Fetch memories older than 24h from long-term semantic memory via memory_recall.py.
 
-    Shells out to memory-recall.py --json --until <24h_ago> for hybrid search.
+    Imports memory_recall.recall() directly for hybrid search.
     Query is derived from inbox messages or the latest non-completed goal.
     Returns a list of result dicts with keys: rank, score, title, snippet, tags.
-    Returns [] on any error or if memory-recall.py / .mv2 file is missing.
+    Returns [] on any error or if memory_recall.py / .mv2 file is missing.
     """
     if not MV2_PATH.exists():
         return []
     query = _build_recall_query(inbox, goals)
     if not query:
         return []
-    recall_script = SCRIPTS / "memory-recall.py"
-    if not recall_script.exists():
-        return []
     # Only recall entries older than 24 hours
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
     until_ts = str(int(cutoff.timestamp()))
     try:
-        result = subprocess.run(
-            [sys.executable, str(recall_script), query,
-             "--k", str(limit), "--until", until_ts, "--json"],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode != 0:
-            return []
-        data = json.loads(result.stdout)
-        return data.get("results", [])
+        if "/agent" not in sys.path:
+            sys.path.insert(0, "/agent")
+        from scripts.memory_recall import recall
+        return recall(query, k=limit, until=until_ts)
     except Exception:
         return []
 
@@ -725,7 +590,7 @@ def print_full(repair, state, goals, cycles_info, failures, journal, capabilitie
     # ── Goals ────────────────────────────────────────────────────
     by_status = Counter(g.get("status", "?") for g in goals)
     print(f"\n[GOALS]  total={len(goals)}  pending={by_status.get('pending',0)}  "
-          f"in-progress={by_status.get('in-progress',0)}  "
+          f"in_progress={by_status.get('in_progress',0)}  "
           f"completed={by_status.get('completed',0)}  failed={by_status.get('failed',0)}")
     if goals:
         lg = goals[-1]
@@ -813,11 +678,11 @@ def print_full(repair, state, goals, cycles_info, failures, journal, capabilitie
             if n_archived > 0 or len(journal_reloaded) < len(journal):
                 print(f"  ✓  auto-archived {len(journal) - len(journal_reloaded)} old entries → {len(journal_reloaded)} active / {archived_after} archived")
             else:
-                print(f"  ⚠  journal.json has {len(journal)} entries — auto-archive had no effect; run: uv run python scripts/journal-archive.py")
+                print(f"  ⚠  journal.json has {len(journal)} entries — auto-archive had no effect; run: uv run python scripts/journal_archive.py")
         except Exception as e:
             print(f"  ⚠  journal.json has {len(journal)} entries — auto-archive error: {e}")
     elif len(journal) > 30:
-        print(f"  ⚠  journal.json has {len(journal)} entries — run: uv run python scripts/journal-archive.py")
+        print(f"  ⚠  journal.json has {len(journal)} entries — run: uv run python scripts/journal_archive.py")
 
     # ── Backup Status ─────────────────────────────────────────────
     backup_root = MEMORY / "backups"
@@ -837,13 +702,13 @@ def print_full(repair, state, goals, cycles_info, failures, journal, capabilitie
                 icon = "⚠ STALE" if stale else "✓"
                 print(f"\n[BACKUP]  {icon}  latest={latest_name}  ({age_str})  total={len(backup_dirs)}")
                 if stale:
-                    print(f"  → Run: python3 /agent/scripts/memory-backup.py")
+                    print(f"  → Run: python3 /agent/scripts/memory_backup.py")
             except Exception:
                 print(f"\n[BACKUP]  {len(backup_dirs)} backups (latest: {latest_name})")
         else:
-            print(f"\n[BACKUP]  no backups — run memory-backup.py")
+            print(f"\n[BACKUP]  no backups — run memory_backup.py")
     else:
-        print(f"\n[BACKUP]  no backups dir — run memory-backup.py")
+        print(f"\n[BACKUP]  no backups dir — run memory_backup.py")
 
     # ── Long-Term Memory Recall ───────────────────────────────────
     if old_memories:
@@ -900,7 +765,7 @@ def print_short(repair, state, goals, cycles_info, failures, inbox, portal):
         issues.append(f"repair={repair['repaired']}fixed/{repair['failed']}fail")
     if portal != "ok":
         issues.append("PORTAL DOWN")
-    active_goals = sum(1 for g in goals if g.get("status") == "in-progress")
+    active_goals = sum(1 for g in goals if g.get("status") == "in_progress")
     if active_goals:
         issues.append(f"{active_goals} active goals")
     if failures:
@@ -982,7 +847,7 @@ def main():
     if NO_REPAIR:
         repair = {"ok": 0, "repaired": 0, "failed": 0, "issues": []}
     else:
-        repair = run_memory_repair()
+        repair = _run_memory_repair()
 
     # Step 2: Load data
     state, goals, cycles, failures, journal, capabilities, inbox, server_errors = load_all()
@@ -997,7 +862,7 @@ def main():
     # This prevents the agent from creating overlapping cycles within a single heartbeat.
     active_in_progress = [
         c for c in cycles
-        if c.get("status") == "in-progress" and c.get("start")
+        if c.get("status") == "in_progress" and c.get("start")
     ]
     if active_in_progress:
         latest_ip = active_in_progress[-1]
@@ -1011,7 +876,7 @@ def main():
             if not JSON_MODE:
                 print(f"[CYCLE START]  ⚠ Cycle {latest_ip.get('cycle')} already in-progress "
                       f"({age_min:.0f}m ago). Skipping duplicate registration.")
-                print(f"               ONE cycle per heartbeat — do not run cycle-start.py again.")
+                print(f"               ONE cycle per heartbeat — do not run cycle_start.py again.")
             # Still continue with briefing output, just don't create a new entry
             cycle_number = latest_ip.get("cycle", 1)
         else:
@@ -1028,14 +893,14 @@ def main():
                 cycle_record = {
                     "cycle": cycle_number,
                     "start": now_iso(),
-                    "status": "in-progress",
+                    "status": "in_progress",
                 }
                 cycles.append(cycle_record)
                 _write_safe(MEMORY / "cycles.json", cycles)
                 if not JSON_MODE:
                     print(f"[CYCLE START]  Registered cycle {cycle_number} as in-progress")
     else:
-        # Must match cycle-close.py auto-detect logic: state.cycle_number+1 → max(cycles)+1 → 1
+        # Must match cycle_close.py auto-detect logic: state.cycle_number+1 → max(cycles)+1 → 1
         state_cycle = state.get("cycle_number")
         if state_cycle is not None and isinstance(state_cycle, int):
             cycle_number = state_cycle + 1
@@ -1048,7 +913,7 @@ def main():
             cycle_record = {
                 "cycle": cycle_number,
                 "start": now_iso(),
-                "status": "in-progress",
+                "status": "in_progress",
             }
             cycles.append(cycle_record)
             _write_safe(MEMORY / "cycles.json", cycles)

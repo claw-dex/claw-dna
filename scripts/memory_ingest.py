@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-memory-ingest.py — Ingest agent memory into long-term semantic store (memvid CLI).
+memory_ingest.py — Ingest agent memory into long-term semantic store (memvid CLI).
 
 Parses journal.json, cycles.json, and goal.json, chunks them into semantically
 meaningful pieces, and ingests into a .mv2 index via the `memvid` CLI
 (hybrid lexical + semantic search with bge-base embeddings).
 
 Usage:
-    uv run python scripts/memory-ingest.py --build                          # Full rebuild
-    uv run python scripts/memory-ingest.py --build --dry-run                # Preview chunks
-    uv run python scripts/memory-ingest.py --append-json CYCLE_JSON         # Append one JSON entry
-    uv run python scripts/memory-ingest.py --append-text "Some note to remember"  # Ingest raw text
-    uv run python scripts/memory-ingest.py --append-file /path/to/doc.pdf   # Ingest a file
+    uv run python scripts/memory_ingest.py --build                          # Full rebuild
+    uv run python scripts/memory_ingest.py --build --dry-run                # Preview chunks
+    uv run python scripts/memory_ingest.py --append-json CYCLE_JSON         # Append one JSON entry
+    uv run python scripts/memory_ingest.py --append-text "Some note to remember"  # Ingest raw text
+    uv run python scripts/memory_ingest.py --append-file /path/to/doc.pdf   # Ingest a file
 
 Modes:
     --build           Parse all memory files and rebuild the .mv2 index from scratch
@@ -434,7 +434,7 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
     elif not quiet:
         print(f"[INGEST] Done — {ok} ingested, {fail} failed ({size_kb:.1f} KB)")
         print(f"[INGEST] Query with:")
-        print(f'  uv run python scripts/memory-recall.py "your question here"')
+        print(f'  uv run python scripts/memory_recall.py "your question here"')
 
 
 # ---------------------------------------------------------------------------
@@ -673,10 +673,10 @@ def main():
                     quiet=opts["quiet"], json_mode=opts["json_mode"])
     else:
         print("ERROR: Provide --build, --append-json, --append-text, or --append-file", file=sys.stderr)
-        print("Usage: uv run python scripts/memory-ingest.py --build", file=sys.stderr)
-        print("       uv run python scripts/memory-ingest.py --append-json '{...}'", file=sys.stderr)
-        print("       uv run python scripts/memory-ingest.py --append-text 'some text'", file=sys.stderr)
-        print("       uv run python scripts/memory-ingest.py --append-file /path/to/file.pdf", file=sys.stderr)
+        print("Usage: uv run python scripts/memory_ingest.py --build", file=sys.stderr)
+        print("       uv run python scripts/memory_ingest.py --append-json '{...}'", file=sys.stderr)
+        print("       uv run python scripts/memory_ingest.py --append-text 'some text'", file=sys.stderr)
+        print("       uv run python scripts/memory_ingest.py --append-file /path/to/file.pdf", file=sys.stderr)
         sys.exit(1)
 
 

@@ -4,12 +4,12 @@
 
 Run this checklist at the end of every cycle, regardless of cycle type.
 
-## FAST PATH — Use cycle-close.py (recommended)
+## FAST PATH — Use cycle_close.py (recommended)
 
 Instead of running steps 1–3 manually, use the automation script:
 
 ```bash
-uv run python scripts/cycle-close.py \
+uv run python scripts/cycle_close.py \
     --type evolve \           # evolve | goal | self-heal (see prompts/enum.md → Cycle Type)
     --category efficiency \   # required for evolve cycles (see prompts/enum.md → Evolution Category)
     --summary "One or two sentence summary of what was done and why it matters" \
@@ -22,19 +22,19 @@ Use `--dry-run` to preview before writing. Still do steps 4 and 9 manually (port
 
 ## 0. Record cycle start (if not already done)
 
-`cycle-close.py` handles this automatically — it creates the entry if it doesn't exist.
+`cycle_close.py` handles this automatically — it creates the entry if it doesn't exist.
 **No manual action needed** unless you explicitly want a stub at cycle start for long-running cycles.
 
 If you do need a manual start stub (rare):
 ```bash
-# Just run cycle-close.py at the end — it creates + completes the entry in one step
-uv run python scripts/cycle-close.py --cycle <N> --type evolve --category <CAT> --summary "..."
+# Just run cycle_close.py at the end — it creates + completes the entry in one step
+uv run python scripts/cycle_close.py --cycle <N> --type evolve --category <CAT> --summary "..."
 ```
 
 ## 1. Update cycles.json entry
 
-> **→ Use the FAST PATH above** (`cycle-close.py`) — it handles this automatically.
-> The code below documents the schema only; use it only if `cycle-close.py` is unavailable.
+> **→ Use the FAST PATH above** (`cycle_close.py`) — it handles this automatically.
+> The code below documents the schema only; use it only if `cycle_close.py` is unavailable.
 
 Find this cycle's entry and mark it completed with timing:
 
@@ -58,7 +58,7 @@ Plus `category` for evolve cycles (reliability | observability | capability | ef
 
 ## 1b. Normalize cycles.json (automatic)
 
-`cycle-close.py` automatically normalizes cycles.json on every run (inlined logic).
+`cycle_close.py` automatically normalizes cycles.json on every run (inlined logic).
 This fixes: `timestamp` → `start`, `goal` → `summary`, computes `duration_seconds` where possible.
 Use `--no-normalize` to skip if needed.
 
@@ -68,9 +68,9 @@ Set these fields:
 - `cycle_number`: current cycle number
 - `status`: "idle" (or "working" if goal continues next cycle)
 - `current_goal`: what you worked on (or null)
-- `goal_status`: "completed" / "in-progress" / null
+- `goal_status`: "completed" / "in_progress" / null
 - `last_cycle_summary`: 1-2 sentence summary of what you did
-- `last_cycle_end`: current timestamp (set automatically by cycle-close.py)
+- `last_cycle_end`: current timestamp (set automatically by cycle_close.py)
 
 ## 3. Write journal entry
 
@@ -93,7 +93,7 @@ journal.append({
 open('/agent/memory/journal.json', 'w').write(json.dumps(journal, indent=2))
 ```
 
-**IMPORTANT:** Use `summary` (not `outcome`) — cycle-start.py reads `summary` when displaying recent journal entries. Using `outcome` will cause blank lines in the cycle briefing.
+**IMPORTANT:** Use `summary` (not `outcome`) — cycle_start.py reads `summary` when displaying recent journal entries. Using `outcome` will cause blank lines in the cycle briefing.
 
 Omit `category` for `goal` and `self-heal` entries.
 
@@ -108,7 +108,7 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:8081/app/_stcore/health 
 ## 5. Update outbox
 
 If there's new information for the user (goal complete, question, status update), write
-it to `/agent/messages/outbox.json` **before** running `cycle-close.py`.
+it to `/agent/messages/outbox.json` **before** running `cycle_close.py`.
 
 **Do NOT clear or archive outbox.json** — the user will read and clear messages manually
 via the portal's "Clear All" button (which archives to `outbox_history.json` first).
@@ -118,31 +118,31 @@ via the portal's "Clear All" button (which archives to `outbox_history.json` fir
 - Where to find outputs (file paths, portal tab, or URL)
 - Next steps the user should take (if any)
 
-## 6. Create memory backup (automated — cycle-close.py does this for you)
+## 6. Create memory backup (automated — cycle_close.py does this for you)
 
-**As of cycle 167, `cycle-close.py` runs a memory backup automatically** when the last
-backup is >1h old. cycle-start.py shows ⚠ STALE when the last backup is older than 1 hour —
+**As of cycle 167, `cycle_close.py` runs a memory backup automatically** when the last
+backup is >1h old. cycle_start.py shows ⚠ STALE when the last backup is older than 1 hour —
 this step keeps that warning quiet and protects against data loss.
 
-**No manual action needed** — the backup status is reported in cycle-close.py output.
+**No manual action needed** — the backup status is reported in cycle_close.py output.
 
-If you need to run manually (e.g., cycle-close.py is unavailable):
+If you need to run manually (e.g., cycle_close.py is unavailable):
 ```bash
-uv run python scripts/memory-backup.py
+uv run python scripts/memory_backup.py
 ```
 
 Auto-prunes at 20 snapshots, so storage is not a concern.
 
-## 7. Check for stale counts (automated — cycle-close.py does this for you)
+## 7. Check for stale counts (automated — cycle_close.py does this for you)
 
-**As of cycle 114, `cycle-close.py` runs this check automatically every cycle.**
+**As of cycle 114, `cycle_close.py` runs this check automatically every cycle.**
 It compares actual tab count (TAB_REGISTRY), test count (self_test.py), and script count
 against AGENTS.md and prompts — printing `[STALE COUNTS DETECTED]` warnings only when drift
 is found. Silent when everything matches.
 
-**No manual action needed** unless cycle-close.py reports a mismatch.
+**No manual action needed** unless cycle_close.py reports a mismatch.
 
-If you need to check manually (e.g., cycle-close.py is unavailable):
+If you need to check manually (e.g., cycle_close.py is unavailable):
 ```bash
 # Tab count
 python3 -c "src=open('/agent/server.py').read(); idx=src.find('TAB_REGISTRY = ['); body=src[idx:]; n=body[:body.find(']')].count('('); print(f'{n} tabs')"
@@ -159,7 +159,7 @@ If you added scripts, portal modules, or commands/skills this cycle:
 1. Add the new script/module to the **Utility Scripts** section in `AGENTS.md`
    so future cycles can discover it via the briefing.
 2. Update `capabilities.md` in auto memory if needed (auto memory is synced
-   automatically by `cycle-close.py` for state, cycles, journal, and goals).
+   automatically by `cycle_close.py` for state, cycles, journal, and goals).
 
 ## 9. Clear resolved tab errors (optional)
 
@@ -170,10 +170,10 @@ If you fixed tab errors this cycle, clear them before the next briefing:
 python3 -c "import json; open('/agent/memory/server_errors.json','w').write('[]')"
 
 # Auto-clear via cycle-start (may fail silently if Streamlit re-writes the file):
-uv run python scripts/cycle-start.py --clear-all-errors
+uv run python scripts/cycle_start.py --clear-all-errors
 
 # Clear only errors >1h old (if you're unsure whether they're fixed):
-uv run python scripts/cycle-start.py --clear-old-errors
+uv run python scripts/cycle_start.py --clear-old-errors
 ```
 
 Only run if you actually fixed the root cause — don't clear errors that may still recur.

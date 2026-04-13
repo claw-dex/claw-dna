@@ -1,11 +1,12 @@
 #!/bin/bash
-# server-restart.sh — Trigger Streamlit hot-reload
+set -euo pipefail
+# server_restart.sh — Trigger Streamlit hot-reload
 #
 # Streamlit (managed by bootstrap.sh) watches Python files and reloads
 # automatically when they change (runOnSave=true in .streamlit/config.toml).
 # Touching server.py is the standard way to force a reload.
 #
-# Usage: ./server-restart.sh [--verify]
+# Usage: ./server_restart.sh [--verify]
 
 VERIFY=false
 [ "$1" = "--verify" ] && VERIFY=true

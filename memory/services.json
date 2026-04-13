@@ -46,7 +46,7 @@
     "command": [
       "bash",
       "-c",
-      "echo y | claude remote-control --name claw-dna-debug-agent --permission-mode bypassPermissions --spawn same-dir --capacity 3"
+      "echo y | claude remote-control --name claw-dna-debug-agent --permission-mode bypassPermissions --spawn same-dir"
     ],
     "started": null,
     "stdout_log": "/agent/memory/logs/service-claude_remote.stdout.log",

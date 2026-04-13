@@ -4,35 +4,17 @@ Tab: Command Center — goal/message form, scheduled tasks, goals, inbox/outbox,
 Enum Reference: See prompts/enum.md → Message Type for valid command types, Goal Status for status values.
 """
 
-import html as _html
 from datetime import datetime, timezone
 
 import streamlit as st
 
-# ── Status / type styling constants ──────────────────────────
-# See prompts/enum.md for complete enum definitions
+from app.shared import _badge, _STATUS_COLORS, _TYPE_COLORS
 
-# Goal Status colors and icons
-_STATUS_COLORS = {
-    "completed": "#4CAF50", "failed": "#F44336",
-    "in_progress": "#2196F3", "in-progress": "#2196F3", "pending": "#FF9800",
-}
+# ── Status / type icons (tab-specific, not in shared) ────────
+# See prompts/enum.md for complete enum definitions
 _STATUS_ICONS = {
     "completed": "✅", "failed": "❌",
-    "in_progress": "🔄", "in-progress": "🔄", "pending": "⏳",
-}
-
-# Message Type colors and icons (inbox + outbox)
-_TYPE_COLORS = {
-    # Inbox types
-    "goal": "#2196F3",
-    "message": "#9C27B0",
-    "bash": "#FF9800",
-    # Outbox types
-    "response": "#4CAF50",
-    "needs_human": "#F44336",
-    "goal_complete": "#4CAF50",
-    "goal_failed": "#F44336",
+    "in_progress": "🔄", "pending": "⏳",
 }
 _TYPE_ICONS = {
     # Inbox types
@@ -45,14 +27,6 @@ _TYPE_ICONS = {
     "goal_complete": "✅",
     "goal_failed": "❌",
 }
-
-
-def _badge(text, color):
-    """Render a colored pill badge (HTML-escaped)."""
-    return (
-        f'<span style="background:{_html.escape(str(color))};color:#fff;padding:1px 8px;'
-        f'border-radius:10px;font-size:11px;font-weight:600">{_html.escape(str(text))}</span>'
-    )
 
 
 def render():
@@ -149,7 +123,7 @@ def render():
     inbox = load_inbox() or []
     outbox = load_outbox() or []
 
-    active_goals = [g for g in goals if g.get("status") in ("in_progress", "in-progress", "pending")]
+    active_goals = [g for g in goals if g.get("status") in ("in_progress", "pending")]
 
     # Summary metrics strip
     m1, m2, m3 = st.columns(3)
@@ -179,7 +153,7 @@ def render():
                 icon = _STATUS_ICONS.get(status, "•")
                 created = (g.get("created_at") or "")[:10]
 
-                with st.expander(f"{icon} {goal_id} — {preview}", expanded=(status in ("in_progress", "in-progress"))):
+                with st.expander(f"{icon} {goal_id} — {preview}", expanded=(status == "in_progress")):
                     # Status + source badges
                     s_color = _STATUS_COLORS.get(status, "#666")
                     source = g.get("source", "")

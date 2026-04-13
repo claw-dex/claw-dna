@@ -5,7 +5,7 @@ description: RAG-powered question answering over memvid .mv2 files. Retrieves ad
 
 # memory-ask
 
-**Path:** `scripts/memory-ask.py`
+**Path:** `scripts/memory_ask.py`
 
 RAG pipeline that combines memvid CLI retrieval (hybrid lexical + semantic) with Claude synthesis via claude-agent-sdk. Retrieves relevant context from a `.mv2` file, then sends it to Claude for a natural-language answer.
 
@@ -26,19 +26,19 @@ RAG pipeline that combines memvid CLI retrieval (hybrid lexical + semantic) with
 
 ```bash
 # Ask about agent's past work (uses long_term_memory.mv2 by default)
-uv run python scripts/memory-ask.py "What portal work was done recently?"
+uv run python scripts/memory_ask.py "What portal work was done recently?"
 
 # Ask using a specific .mv2 file (e.g. an ITEZ product knowledge base)
-uv run python scripts/memory-ask.py "What iPhones are available?" --mv2 /agent/workspace/itez_sg.mv2
+uv run python scripts/memory_ask.py "What iPhones are available?" --mv2 /agent/workspace/itez_sg.mv2
 
 # Get just the retrieved context (no Claude call)
-uv run python scripts/memory-ask.py "corporate leasing" --mv2 /agent/workspace/itez_sg.mv2 --context-only
+uv run python scripts/memory_ask.py "corporate leasing" --mv2 /agent/workspace/itez_sg.mv2 --context-only
 
 # JSON output for programmatic use
-uv run python scripts/memory-ask.py "MacBook Pro M5 price" --mv2 /agent/workspace/itez_sg.mv2 --json
+uv run python scripts/memory_ask.py "MacBook Pro M5 price" --mv2 /agent/workspace/itez_sg.mv2 --json
 
 # Custom system prompt
-uv run python scripts/memory-ask.py "warranty policy" --mv2 /agent/workspace/itez_sg.mv2 --system "Answer in bullet points only"
+uv run python scripts/memory_ask.py "warranty policy" --mv2 /agent/workspace/itez_sg.mv2 --system "Answer in bullet points only"
 ```
 
 ## How it works
