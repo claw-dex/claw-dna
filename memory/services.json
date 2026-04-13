@@ -1,0 +1,55 @@
+{
+  "webhook_receiver": {
+    "pid": null,
+    "port": 8082,
+    "auto_start": true,
+    "health_url": "http://localhost:8082/health",
+    "command": [
+      "uv",
+      "run",
+      "python",
+      "/agent/services/webhook_receiver.py"
+    ],
+    "started": null,
+    "stdout_log": "/agent/memory/logs/service-webhook_receiver.stdout.log",
+    "stderr_log": "/agent/memory/logs/service-webhook_receiver.stderr.log"
+  },
+  "telegram_bridge": {
+    "pid": null,
+    "port": null,
+    "command": [
+      "uv",
+      "run",
+      "python",
+      "/agent/services/telegram_bridge.py"
+    ],
+    "started": null,
+    "stdout_log": "/agent/memory/logs/service-telegram_bridge.stdout.log",
+    "stderr_log": "/agent/memory/logs/service-telegram_bridge.stderr.log"
+  },
+  "whatsapp_bridge": {
+    "pid": null,
+    "port": 8083,
+    "command": [
+      "uv",
+      "run",
+      "python",
+      "/agent/services/whatsapp_bridge.py"
+    ],
+    "started": null,
+    "stdout_log": "/agent/memory/logs/service-whatsapp_bridge.stdout.log",
+    "stderr_log": "/agent/memory/logs/service-whatsapp_bridge.stderr.log"
+  },
+  "claude_remote": {
+    "pid": null,
+    "port": null,
+    "command": [
+      "bash",
+      "-c",
+      "echo y | claude remote-control --name claw-dna-debug-agent --permission-mode bypassPermissions --spawn same-dir"
+    ],
+    "started": null,
+    "stdout_log": "/agent/memory/logs/service-claude_remote.stdout.log",
+    "stderr_log": "/agent/memory/logs/service-claude_remote.stderr.log"
+  }
+}

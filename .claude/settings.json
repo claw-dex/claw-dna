@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "includeCoAuthoredBy": false,
+  "enableAllProjectMcpServers": true,
+  "autoDreamEnabled": true,
+  "autoUpdatesChannel": "latest",
+  "autoMemoryDirectory": "/agent/memory",
+  "env": {
+    "ENABLE_CLAUDEAI_MCP_SERVERS": "false"
+  },
+  "enabledPlugins": {
+    "agent-browser@agent-browser": true,
+    "claude-md-management@claude-plugins-official": true,
+    "playground@claude-plugins-official": true
+  },
+  "extraKnownMarketplaces": {
+    "agent-browser": {
+      "source": {
+        "source": "github",
+        "repo": "vercel-labs/agent-browser"
+      }
+    },
+    "claude-plugins-official": {
+      "source": {
+        "source": "github",
+        "repo": "anthropics/claude-plugins-official"
+      }
+    },
+    "knowledge-work-plugins": {
+      "source": {
+        "source": "github",
+        "repo": "anthropics/knowledge-work-plugins"
+      }
+    }
+  },
+  "model": "sonnet",
+  "effortLevel": "medium",
+  "advisorModel": "opus",
+  "alwaysThinkingEnabled": true,
+  "autoUpdate": true
+}

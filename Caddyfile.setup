@@ -1,0 +1,28 @@
+{
+    admin localhost:2019
+    auto_https off
+}
+
+:8080 {
+    # First-run setup page — shown while waiting for CLI authentication
+    handle / {
+        root * /agent
+        rewrite * /setup.html
+        file_server
+    }
+
+    # File browser still accessible during setup (useful for debugging)
+    handle /_/* {
+        @blocked_credentials path /home/agent/.config/gws /home/agent/.config/gws/* /home/agent/.keepass /home/agent/.keepass/* /home/agent/.ssh /home/agent/.ssh/*
+        respond @blocked_credentials 403
+
+        root * /
+        uri strip_prefix /_
+        file_server browse
+    }
+
+    # Streamlit is not running yet during setup
+    handle /app/* {
+        respond "Setup in progress — visit / for status." 503
+    }
+}

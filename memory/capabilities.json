@@ -1,0 +1,303 @@
+[
+  {
+    "id": "bootstrap_process_manager",
+    "name": "Bootstrap Process Manager",
+    "description": "PID 1 entrypoint that manages Caddy gateway and Streamlit portal, auto-restarts crashed services",
+    "category": "core",
+    "enabled": true
+  },
+  {
+    "id": "heartbeat_cycle_runner",
+    "name": "Heartbeat Cycle Runner",
+    "description": "Single-cycle execution engine triggered via docker exec; loads memory, executes prompts via Claude SDK",
+    "category": "core",
+    "enabled": true
+  },
+  {
+    "id": "caddy_gateway",
+    "name": "Caddy Gateway",
+    "description": "HTTP reverse proxy on port 8080; routes to Streamlit, file browser, and static files; dynamic reconfiguration via admin API",
+    "category": "core",
+    "enabled": true
+  },
+  {
+    "id": "streamlit_portal",
+    "name": "Streamlit Web Portal",
+    "description": "Multi-tab web portal at /app/ with hot-reload; dashboard, chat, and grouped feature tabs",
+    "category": "core",
+    "enabled": true
+  },
+  {
+    "id": "memory_persistence",
+    "name": "Memory Persistence",
+    "description": "JSON-based persistent memory system (state, cycles, journal, goals); survives container restarts",
+    "category": "core",
+    "enabled": true
+  },
+  {
+    "id": "message_queue",
+    "name": "Message Queue",
+    "description": "Inbox/outbox message passing for goals, messages, and human-needs-input signals",
+    "category": "core",
+    "enabled": true
+  },
+  {
+    "id": "prompt_selection",
+    "name": "Prompt Selection Engine",
+    "description": "Automatic prompt routing based on agent state: bootstrap, self-heal, goal execution, or evolution",
+    "category": "core",
+    "enabled": true
+  },
+  {
+    "id": "file_browser",
+    "name": "File Browser",
+    "description": "Caddy-served file browser at /_/ for browsing agent filesystem with download links",
+    "category": "core",
+    "enabled": true
+  },
+  {
+    "id": "portal_config",
+    "name": "Portal Configuration",
+    "description": "Unified portal configuration for hostname (public Cloudflare Tunnel URL), timezone, and HTTP basic auth; replaces legacy portal-hostname and portal-auth scripts",
+    "category": "core",
+    "enabled": true
+  },
+  {
+    "id": "cycle_start",
+    "name": "Cycle Start Briefing",
+    "description": "Startup briefing combining memory repair, state summary, recent journal, inbox peek, and evolve recommendation",
+    "category": "memory",
+    "enabled": true
+  },
+  {
+    "id": "cycle_close",
+    "name": "Cycle Close Automation",
+    "description": "Auto-close cycles by updating state, marking completion with duration, appending journal entry",
+    "category": "memory",
+    "enabled": true
+  },
+  {
+    "id": "memory_repair",
+    "name": "Memory Repair",
+    "description": "Detects and auto-repairs corrupted JSON memory files; restores from backups or safe defaults",
+    "category": "memory",
+    "enabled": true
+  },
+  {
+    "id": "memory_backup",
+    "name": "Memory Backup",
+    "description": "Timestamped snapshots of critical memory files; supports restore and pruning (keeps max 20)",
+    "category": "memory",
+    "enabled": true
+  },
+  {
+    "id": "journal_archival",
+    "name": "Journal Archival",
+    "description": "Archives old journal entries (>20 cycles) to keep active journal lean for fast loading",
+    "category": "memory",
+    "enabled": true
+  },
+  {
+    "id": "memory_sync",
+    "name": "Memory Sync",
+    "description": "Generates .md auto-memory files from JSON memory data (state, capabilities, goals); makes memory accessible to the agent's memory system",
+    "category": "memory",
+    "enabled": true
+  },
+  {
+    "id": "memory_ingest",
+    "name": "Long-Term Memory Ingest",
+    "description": "Bulk-ingests journal, cycle, and goal data into a memvid .mv2 semantic memory index; supports incremental append and raw text/file ingestion",
+    "category": "memory",
+    "enabled": true
+  },
+  {
+    "id": "memory_recall",
+    "name": "Long-Term Memory Recall",
+    "description": "Queries the memvid .mv2 semantic memory index; retrieves past cycle experiences, related historical work, and chronological timeline browsing",
+    "category": "memory",
+    "enabled": true
+  },
+  {
+    "id": "memory_ask",
+    "name": "Memory Q&A",
+    "description": "RAG-powered natural-language Q&A over memvid .mv2 long-term memory; retrieves adaptive context then synthesizes answers via Claude",
+    "category": "memory",
+    "enabled": true
+  },
+  {
+    "id": "keepass_credentials",
+    "name": "KeePass Credential Manager",
+    "description": "Local KeePass database for API keys, passwords, and secrets; CLI get/store/list/search; imported directly by services to avoid subprocess spawns",
+    "category": "security",
+    "enabled": true
+  },
+  {
+    "id": "chat_interface",
+    "name": "Chat Interface",
+    "description": "Claude SDK chat UI with streaming responses, tool use display, and persistent history",
+    "category": "communication",
+    "enabled": true
+  },
+  {
+    "id": "telegram_bridge",
+    "name": "Telegram Bridge",
+    "description": "Bridges inbox/outbox with a Telegram bot; polls for incoming messages, forwards outbox to Telegram, auto-discovers chat ID; supports /remind, /note, /notes, /status, /goals, /services commands; writes heartbeat for liveness monitoring",
+    "category": "communication",
+    "enabled": false
+  },
+  {
+    "id": "whatsapp_bridge",
+    "name": "WhatsApp Bridge",
+    "description": "Bridges inbox/outbox with WhatsApp Business Cloud API; receives messages via webhook on port 8083, forwards outbox to WhatsApp, auto-discovers owner phone; writes heartbeat for liveness monitoring",
+    "category": "communication",
+    "enabled": false
+  },
+  {
+    "id": "callmebot",
+    "name": "CallMeBot Voice Escalation",
+    "description": "Voice call escalation via CallMeBot Telegram API; calls the human when a needs_human outbox message goes unanswered; credentials stored in KeePass",
+    "category": "communication",
+    "enabled": false
+  },
+  {
+    "id": "email_imap",
+    "name": "Email IMAP Client",
+    "description": "IMAP email client supporting any provider; fetch, search, delete, and verify emails using credentials from KeePass (entry 'Email IMAP' with server URL, username, and app password)",
+    "category": "communication",
+    "enabled": false
+  },
+  {
+    "id": "metrics_collector",
+    "name": "Metrics Collector",
+    "description": "Time-series metrics for Streamlit response time, CPU, memory, and disk usage",
+    "category": "observability",
+    "enabled": true
+  },
+  {
+    "id": "self_test",
+    "name": "Self-Test Suite",
+    "description": "Comprehensive test suite validating API endpoints, memory files, disk health, processes, and imports",
+    "category": "observability",
+    "enabled": true
+  },
+  {
+    "id": "health_check",
+    "name": "Health Check",
+    "description": "Multi-service health check with retry logic for Streamlit and Caddy endpoints",
+    "category": "observability",
+    "enabled": true
+  },
+  {
+    "id": "app_render_check",
+    "name": "App Render Check",
+    "description": "Headless AppTest framework catching syntax errors, missing imports, and runtime exceptions",
+    "category": "observability",
+    "enabled": true
+  },
+  {
+    "id": "cycle_report",
+    "name": "Cycle Reporting",
+    "description": "Summary reports of agent activity showing recent cycles with duration, type, and category",
+    "category": "observability",
+    "enabled": true
+  },
+  {
+    "id": "milestone_report",
+    "name": "Milestone Reporting",
+    "description": "Narrative growth snapshots at significant cycle intervals (25, 50, 75, 100...)",
+    "category": "observability",
+    "enabled": true
+  },
+  {
+    "id": "maintenance",
+    "name": "Auto Maintenance",
+    "description": "Memory validation, journal archival, log cleanup, zombie process detection, and disk usage reporting",
+    "category": "observability",
+    "enabled": true
+  },
+  {
+    "id": "task_scheduler",
+    "name": "Task Scheduler",
+    "description": "Evaluates scheduled_tasks.json for due tasks; supports interval, once, and cron schedules; features include --forecast (48h timeline), --history (per-task execution ring buffer), --run-now, --test (cron dry-run), and execution stats",
+    "category": "automation",
+    "enabled": true
+  },
+  {
+    "id": "reminder",
+    "name": "Reminder Manager",
+    "description": "Create and manage personal reminders that fire as inbox messages via the scheduler; supports one-time (--at), recurring (--every N minutes), and cron-based (--cron) reminders",
+    "category": "automation",
+    "enabled": true
+  },
+  {
+    "id": "service_manager",
+    "name": "Service Manager",
+    "description": "Manages long-running background services (optional port 8082-8090); start, stop, restart, status, health-check (with heartbeat staleness detection), list, and cleanup; atomic state files prevent concurrent corruption",
+    "category": "automation",
+    "enabled": true
+  },
+  {
+    "id": "webhook_receiver",
+    "name": "Webhook Receiver",
+    "description": "Generic HTTP webhook handler on port 8082; records POST/PUT/PATCH/DELETE payloads to webhook.json; Caddy routes /webhook/* to this service; managed via service-manager",
+    "category": "automation",
+    "enabled": true
+  },
+  {
+    "id": "agent_browser",
+    "name": "Agent Browser",
+    "description": "Headless Chromium automation via agent-browser CLI for web interaction and scraping",
+    "category": "automation",
+    "enabled": true
+  },
+  {
+    "id": "skill_creator",
+    "name": "Skill Creator",
+    "description": "Create new skills from scratch, modify and improve existing skills, run evals, and benchmark skill performance with variance analysis and triggering accuracy optimization",
+    "category": "automation",
+    "enabled": true
+  },
+  {
+    "id": "notes",
+    "name": "Notes Manager",
+    "description": "Personal notes and scratchpad; add, list, search, edit, delete, tag, pin, export (Markdown/JSON), and view stats; importable as a Python module by services for direct in-process note creation",
+    "category": "productivity",
+    "enabled": true
+  },
+  {
+    "id": "workspace_file_upload",
+    "name": "Workspace File Upload",
+    "description": "Upload files from local machine to /agent/workspace/ via portal with subdirectory support",
+    "category": "portal",
+    "enabled": true
+  },
+  {
+    "id": "command_center",
+    "name": "Command Center",
+    "description": "Portal tab for sending goals/messages, running scripts, and browsing command history",
+    "category": "portal",
+    "enabled": true
+  },
+  {
+    "id": "memory_viewer",
+    "name": "Memory Viewer",
+    "description": "Portal tab for browsing journal, logs, goals, and memory files with cross-file search",
+    "category": "portal",
+    "enabled": true
+  },
+  {
+    "id": "system_diagnostics",
+    "name": "System Diagnostics",
+    "description": "Portal tab for health checks, error tracking, validation, services, and script inventory",
+    "category": "portal",
+    "enabled": true
+  },
+  {
+    "id": "overview_dashboard",
+    "name": "Overview Dashboard",
+    "description": "Portal tab with suggestions, goal performance, evolution balance, and activity summary",
+    "category": "portal",
+    "enabled": true
+  }
+]

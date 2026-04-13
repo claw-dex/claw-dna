@@ -205,3 +205,23 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# All lock file
+*.lock
+
+# Agent
+messages/inbox.json
+messages/outbox.json
+memory/logs/
+
+# Ignore symlink/copy files
+Dockerfile
+.claude/CLAUDE.md
+.claude/skills
+
+# Ignore memory files except for seed memory
+memory/*
+!memory/capabilities.json
+!memory/MEMORY.md
+!memory/services.json
+!memory/scheduled_tasks.json
