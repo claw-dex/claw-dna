@@ -77,6 +77,34 @@ _SCRIPT_ARGS: dict[str, list] = {
         {"flag": "--keep", "help": "Keep N most recent entries", "placeholder": "20"},
         {"flag": "--search", "help": "Search across journal by keyword", "placeholder": "keyword"},
     ],
+    "memory_ask.py": [
+        {"flag": "--k", "help": "Max retrieval results", "placeholder": "20"},
+        {"flag": "--context-only", "help": "Show retrieved context without Claude synthesis"},
+        {"flag": "--json", "help": "Output as JSON"},
+    ],
+    "memory_recall.py": [
+        {"flag": "--k", "help": "Number of results to return", "placeholder": "5"},
+        {"flag": "--timeline", "help": "Show timeline entries instead of semantic search"},
+        {"flag": "--since", "help": "Filter entries since date (ISO format)", "placeholder": "2024-01-01"},
+        {"flag": "--until", "help": "Filter entries until date (ISO format)", "placeholder": "2024-12-31"},
+        {"flag": "--json", "help": "Output as JSON"},
+    ],
+    "memory_ingest.py": [
+        {"type": "select", "label": "Mode", "options": [
+            ("--build", "Rebuild .mv2 index from scratch"),
+            ("--append-json", "Append a single entry (JSON string or @file.json)"),
+            ("--append-text", "Ingest raw text directly"),
+            ("--append-file", "Ingest a file (PDF, DOCX, TXT, MD, etc.)"),
+        ]},
+        {"flag": "--title", "help": "Title for appended entry", "placeholder": "My note"},
+        {"flag": "--dry-run", "help": "Preview without writing"},
+        {"flag": "--json", "help": "Output as JSON"},
+        {"flag": "--quiet", "help": "Suppress progress output"},
+    ],
+    "memory_sync.py": [
+        {"flag": "--dry-run", "help": "Preview only, do not write .md files"},
+        {"flag": "--only", "help": "Comma-separated sync targets", "placeholder": "capabilities,services,state"},
+    ],
     # Diagnostics
     "self_test.py": [
         {"flag": "--json", "help": "Output results as JSON"},
@@ -151,6 +179,59 @@ _SCRIPT_ARGS: dict[str, list] = {
         {"flag": "--json", "help": "Output raw JSON"},
         {"flag": "--cycle", "help": "Target cycle number", "placeholder": "N"},
     ],
+    # Notes / Reminders / Emails
+    "notes.py": [
+        {"type": "select", "label": "Subcommand", "options": [
+            ("add", "Add a new note"),
+            ("list", "List notes"),
+            ("get", "Get a note by ID"),
+            ("search", "Search notes"),
+            ("edit", "Edit a note"),
+            ("delete", "Delete a note"),
+            ("tags", "List all tags"),
+            ("export", "Export notes"),
+            ("stats", "Show statistics"),
+        ]},
+        {"flag": "--id", "help": "Note ID", "placeholder": "abc123"},
+        {"flag": "--title", "help": "Note title", "placeholder": "My note"},
+        {"flag": "--content", "help": "Note body", "placeholder": "text"},
+        {"flag": "--tags", "help": "Comma-separated tags", "placeholder": "tag1,tag2"},
+        {"flag": "--query", "help": "Search query", "placeholder": "keyword"},
+        {"flag": "--format", "help": "Export format: md or json", "placeholder": "md"},
+        {"flag": "--pin", "help": "Pin the note"},
+        {"flag": "--unpin", "help": "Unpin the note"},
+        {"flag": "--json", "help": "Output as JSON"},
+    ],
+    "reminder.py": [
+        {"type": "select", "label": "Subcommand", "options": [
+            ("add", "Add a reminder"),
+            ("list", "List reminders"),
+            ("delete", "Delete a reminder"),
+            ("clear", "Remove all fired/disabled reminders"),
+        ]},
+        {"flag": "--text", "help": "Reminder message", "placeholder": "text"},
+        {"flag": "--at", "help": "Fire once at this time (ISO 8601)", "placeholder": "2024-06-01T09:00:00"},
+        {"flag": "--every", "help": "Fire every N minutes", "placeholder": "60"},
+        {"flag": "--cron", "help": "Cron schedule pattern", "placeholder": "0 9 * * 1"},
+        {"flag": "--priority", "help": "Priority 1-5 (1=highest)", "placeholder": "1"},
+        {"flag": "--id", "help": "Reminder ID", "placeholder": "abc123"},
+        {"flag": "--json", "help": "Output as JSON"},
+    ],
+    "email_imap.py": [
+        {"type": "select", "label": "Subcommand", "options": [
+            ("auth", "Verify IMAP credentials"),
+            ("fetch", "Fetch emails"),
+            ("search", "Search emails"),
+            ("delete", "Delete emails by UID"),
+        ]},
+        {"flag": "--mailbox", "help": "IMAP mailbox", "placeholder": "INBOX"},
+        {"flag": "--filter", "help": "Email filter: unseen, seen, or all", "placeholder": "all"},
+        {"flag": "--max", "help": "Max emails to fetch", "placeholder": "20"},
+        {"flag": "--query", "help": "Search query text", "placeholder": "keyword"},
+        {"flag": "--field", "help": "Field to search: subject, from, or text", "placeholder": "text"},
+        {"flag": "--uid", "help": "One or more IMAP UIDs to delete (space-separated)", "placeholder": "123 456"},
+        {"flag": "--json", "help": "Output as JSON"},
+    ]
 }
 
 

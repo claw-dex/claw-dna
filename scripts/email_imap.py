@@ -11,6 +11,7 @@ Usage:
     python3 email_imap.py fetch [--mailbox INBOX] [--filter unseen|seen|all] [--max 20] [--json]
     python3 email_imap.py search --query TEXT [--field subject|from|text] [--mailbox INBOX] [--filter unseen|seen|all] [--max 20] [--json]
     python3 email_imap.py delete --uid UID [--uid UID ...] [--mailbox INBOX] [--json]
+    python3 email_imap.py read --uid UID [--mailbox INBOX] [--json]
 
 Exit codes:
     0 = success
@@ -22,8 +23,10 @@ import argparse
 import email
 import email.header
 import email.utils
+import html as html_module
 import imaplib
 import json
+import re
 import sys
 
 # Ensure /agent is on sys.path so 'from scripts.keepass import ...' works
@@ -170,6 +173,51 @@ def _parse_message_headers(raw_headers):
     }
 
 
+def _extract_body(msg):
+    """Extract text/plain and text/html body from a parsed email.Message."""
+    text_body = None
+    html_body = None
+
+    if msg.is_multipart():
+        for part in msg.walk():
+            content_type = part.get_content_type()
+            disposition = str(part.get("Content-Disposition", ""))
+            if "attachment" in disposition:
+                continue
+            if content_type == "text/plain" and text_body is None:
+                charset = part.get_content_charset() or "utf-8"
+                payload = part.get_payload(decode=True)
+                if payload:
+                    text_body = payload.decode(charset, errors="replace")
+            elif content_type == "text/html" and html_body is None:
+                charset = part.get_content_charset() or "utf-8"
+                payload = part.get_payload(decode=True)
+                if payload:
+                    html_body = payload.decode(charset, errors="replace")
+    else:
+        content_type = msg.get_content_type()
+        charset = msg.get_content_charset() or "utf-8"
+        payload = msg.get_payload(decode=True)
+        if payload:
+            decoded = payload.decode(charset, errors="replace")
+            if content_type == "text/html":
+                html_body = decoded
+            else:
+                text_body = decoded
+
+    # Fallback: strip HTML tags to produce plain text when no text/plain part
+    if text_body is None and html_body is not None:
+        unescaped = html_module.unescape(html_body)
+        no_scripts = re.sub(
+            r"<(script|style)[^>]*>.*?</(script|style)>", "",
+            unescaped, flags=re.DOTALL | re.IGNORECASE,
+        )
+        stripped = re.sub(r"<[^>]+>", "", no_scripts)
+        text_body = re.sub(r"\n{3,}", "\n\n", stripped).strip()
+
+    return text_body or "", html_body or ""
+
+
 def _fetch_messages(conn, uids, max_results):
     """Fetch message headers for the newest UIDs."""
     if not uids:
@@ -231,6 +279,48 @@ def cmd_fetch(args):
             return 0
 
         _print_json({"messages": messages, "count": len(messages)})
+        return 0
+
+    except imaplib.IMAP4.error as exc:
+        _print_json({"error": f"IMAP error: {exc}"})
+        return 1
+    except Exception as exc:
+        _print_json({"error": str(exc)})
+        return 1
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+
+
+def cmd_read(args):
+    """Fetch the full body of a single email by UID."""
+    conn, _ = _connect_and_login(timeout=25)
+    if not conn:
+        return 1
+
+    try:
+        if not _select_mailbox(conn, args.mailbox, readonly=True):
+            return 1
+
+        uid_str = str(args.uid).strip()
+        status, msg_data = conn.uid("FETCH", uid_str, "(BODY.PEEK[])")
+        if status != "OK" or not msg_data or not isinstance(msg_data[0], tuple):
+            _print_json({"error": f"Could not fetch message UID {uid_str}"})
+            return 1
+
+        raw = msg_data[0][1]
+        msg = email.message_from_bytes(raw)
+        headers = _parse_message_headers(raw)
+        text_body, html_body = _extract_body(msg)
+
+        _print_json({
+            "uid": uid_str,
+            **headers,
+            "body_text": text_body[:15000],
+            "has_html": bool(html_body),
+        })
         return 0
 
     except imaplib.IMAP4.error as exc:
@@ -379,6 +469,13 @@ def main():
     p_delete.add_argument("--uid", required=True, nargs="+",
                           help="One or more IMAP UIDs to delete")
 
+    # read
+    p_read = sub.add_parser("read", help="Read full email body by UID")
+    p_read.add_argument("--mailbox", default="INBOX",
+                        help="IMAP mailbox (default: INBOX)")
+    p_read.add_argument("--uid", required=True,
+                        help="IMAP UID of the message to read")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -390,6 +487,7 @@ def main():
         "fetch": cmd_fetch,
         "search": cmd_search,
         "delete": cmd_delete,
+        "read": cmd_read,
     }
 
     return cmd_map[args.command](args)

@@ -149,8 +149,12 @@ def render():
             cache_ts_key = f"{cache_key}_ts"
 
             if refresh:
-                st.session_state.pop(cache_key, None)
-                st.session_state.pop(cache_ts_key, None)
+                for k in list(st.session_state.keys()):
+                    if k.startswith("imap_gmail_cache") or k.startswith("imap_read_cache_"):
+                        st.session_state.pop(k, None)
+                for k in list(st.session_state.keys()):
+                    if k.startswith("imap_email_select_"):
+                        st.session_state.pop(k, None)
 
             gmail_now = time.time()
             if gmail_now - st.session_state.get(cache_ts_key, 0) > 60:
@@ -190,18 +194,23 @@ def render():
                 else:
                     import pandas as pd
 
+                    uid_to_msg = {m["uid"]: m for m in messages if m.get("uid")}
+
                     rows = []
                     for msg in messages:
                         rows.append({
                             "Subject": msg.get("subject", "(no subject)"),
                             "From": msg.get("from", "unknown"),
                             "Date": msg.get("date", ""),
+                            "_uid": msg.get("uid", ""),
                         })
                     df = pd.DataFrame(rows)
 
                     df["_date_parsed"] = pd.to_datetime(df["Date"], errors="coerce")
                     df = df.sort_values("_date_parsed", ascending=False)
-                    df = df.drop(columns=["_date_parsed"]).reset_index(drop=True)
+                    sorted_uids = df["_uid"].tolist()
+                    df = df.drop(columns=["_date_parsed", "_uid"]).reset_index(drop=True)
+                    sorted_messages = [uid_to_msg[u] for u in sorted_uids if u in uid_to_msg]
 
                     st.caption(f"Showing {len(df)} emails")
                     st.dataframe(
@@ -210,3 +219,55 @@ def render():
                         height=min(400, 35 * (len(df) + 1)),
                         hide_index=True,
                     )
+
+                    # ── Email detail viewer ──────────────────────
+                    email_options = [
+                        f"{m.get('subject', '(no subject)')[:60]}  —  {m.get('from', '')}"
+                        for m in sorted_messages
+                    ]
+                    selected_idx = st.selectbox(
+                        "Read email",
+                        range(len(email_options)),
+                        format_func=lambda i: email_options[i],
+                        index=None,
+                        key=f"imap_email_select_{cache_key}",
+                    )
+
+                    if selected_idx is not None:
+                        selected_msg = sorted_messages[selected_idx]
+                        selected_uid = selected_msg.get("uid", "")
+
+                        read_cache_key = f"imap_read_cache_{selected_uid}"
+                        if read_cache_key not in st.session_state:
+                            with st.spinner("Loading email..."):
+                                read_result = run_script("email_imap.py", [
+                                    "read",
+                                    "--mailbox", mailbox,
+                                    "--uid", selected_uid,
+                                ])
+                                if (read_result.get("ok")
+                                        and read_result.get("exit_code") == 0):
+                                    try:
+                                        st.session_state[read_cache_key] = json.loads(
+                                            read_result.get("stdout", "{}")
+                                        )
+                                    except json.JSONDecodeError:
+                                        st.session_state[read_cache_key] = {
+                                            "error": "Invalid response"
+                                        }
+                                else:
+                                    st.session_state[read_cache_key] = {
+                                        "error": read_result.get("stderr", "Read failed")
+                                    }
+
+                        email_data = st.session_state.get(read_cache_key, {})
+
+                        if "error" in email_data:
+                            st.error(f"Could not load email: {email_data['error']}")
+                        else:
+                            st.divider()
+                            st.write(f"**Subject:** {email_data.get('subject', '')}")
+                            st.write(f"**From:** {email_data.get('from', '')}")
+                            st.write(f"**Date:** {email_data.get('date', '')}")
+                            body = email_data.get("body_text", "") or "(no content)"
+                            st.code(body, language=None)
