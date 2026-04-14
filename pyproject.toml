@@ -1,7 +1,7 @@
 [project]
 name = "agent"
 version = "1.0.0"
-description = "Claw DNA - Python dependencies"
+description = "claw-dex/claw-dna - v1/codasst - Python dependencies"
 requires-python = ">=3.11"
 # ── Dependencies ─────────────────────────────────────────────
 # The agent can add packages here and run `uv sync` to install.
