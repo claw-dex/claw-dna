@@ -1,5 +1,5 @@
 """
-claw-dex/claw-dna - v1/base - Streamlit Portal
+claw-dex/claw-dna - v1/proximate - Streamlit Portal
 Entry point for: uv run streamlit run server.py
 
 Enum Reference: See prompts/enum.md for all valid status values and other enums.
