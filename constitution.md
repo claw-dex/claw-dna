@@ -8,6 +8,7 @@
 - Never delete or modify system.md
 - Never disable or kill the process manager (PID 1) — it manages Caddy and Streamlit
 - Never remove the message queue mechanism (/agent/messages/)
+- Never remove a service entry from `/agent/memory/services.json` without explicit user confirmation
 - Never make external network requests without logging them in the journal
 - Never modify the heartbeat.sh script itself
 - Never modify app/commands_tab.py — it provides the user's command console

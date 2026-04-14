@@ -8,7 +8,7 @@ description: Fetch and merge the latest changes from the claw-dex/claw-dna.git r
 Pull the latest changes from the `origin` remote and integrate them into the current local branch, resolving all conflicts autonomously.
 
 **Remote:** the current `origin` remote configured in git (or `https://github.com/claw-dex/claw-dna.git` if no remote is configured)
-**Branch:** use the current branch name (or `v1/base` if can't determine)
+**DNA Branch:** use the current branch name for the `{dna-branch-name}` placeholder
 
 ## Step-by-Step Process
 
@@ -21,10 +21,13 @@ git branch -a
 ```
 
 Check for:
+
 - **Uncommitted changes** (staged or unstaged)
 - **Untracked files**
 - **Current branch** and its tracking remote
 - **Ahead/behind status** relative to remote
+
+If can't determine current branch name, must pause and ask user to provide the name of the branch to pull from remote (DNA branch name)
 
 ### Step 2: Stash Local Changes (if any)
 
@@ -40,18 +43,21 @@ git stash --include-untracked -m "Auto-stash before pull"
 
 > **Edge case — stash partially fails:**
 > If stash fails entirely (e.g., permission errors), fall back to committing the changes on a temporary branch:
+>
 > ```bash
 > git checkout -b temp-local-changes
 > git add -A && git commit -m "temp: save local changes before pull"
-> git checkout v1/base
+> git checkout {dna-branch-name}
 > ```
 
 > **Edge case — stash succeeds but tracked files remain dirty:**
 > Some files may remain modified after stash (e.g., files in mounted volumes). Clean them manually before rebase:
+>
 > ```bash
 > git diff --name-only
 > git checkout -- <file1> <file2> ...
 > ```
+>
 > These changes are safe to discard from the working tree because they are already saved in the stash.
 
 ### Step 3: Fetch from Remote
@@ -61,8 +67,9 @@ git fetch origin
 ```
 
 Check if there are new commits:
+
 ```bash
-git log --oneline HEAD..origin/v1/base
+git log --oneline HEAD..origin/{dna-branch-name}
 ```
 
 If no new commits, skip to **Step 6** (restore stash and exit — already up to date).
@@ -72,17 +79,19 @@ If no new commits, skip to **Step 6** (restore stash and exit — already up to 
 Choose the integration strategy based on the situation.
 
 First, check how many local commits diverge from the remote:
+
 ```bash
-git rev-list --count origin/v1/base..HEAD
+git rev-list --count origin/{dna-branch-name}..HEAD
 ```
 
 #### Strategy A: Rebase (preferred — clean linear history)
 
 ```bash
-git rebase origin/v1/base
+git rebase origin/{dna-branch-name}
 ```
 
 Use rebase when:
+
 - Local branch has **10 or fewer** commits ahead of remote
 - You want a clean, linear commit history
 - No shared/pushed commits that others depend on
@@ -90,10 +99,11 @@ Use rebase when:
 #### Strategy B: Merge (preferred when heavily diverged)
 
 ```bash
-git pull origin v1/base
+git pull origin {dna-branch-name}
 ```
 
 Use merge when:
+
 - Local branch has **more than 10 commits** ahead of remote (rebase on large divergence is risky and produces excessive conflict rounds)
 - Rebase fails with complex conflicts
 - Local commits have already been pushed and shared
@@ -102,7 +112,7 @@ Use merge when:
 #### Strategy C: Fast-forward only (no local commits)
 
 ```bash
-git pull --ff-only origin v1/base
+git pull --ff-only origin {dna-branch-name}
 ```
 
 Use when the local branch has zero commits ahead of remote (just behind).
@@ -138,9 +148,10 @@ git rebase --skip
 
 > **Edge case — rebase becomes too complex (many conflicts across commits):**
 > Abort and fall back to merge:
+>
 > ```bash
 > git rebase --abort
-> git merge origin/v1/base
+> git merge origin/{dna-branch-name}
 > ```
 
 #### 5c: Merge conflicts
@@ -168,9 +179,9 @@ Get the current cycle number from `state.json` (`cycle_number` field + 1, since 
 
 ```bash
 git commit -m "$(cat <<'EOF'
-#<cycle_number> merge(origin/v1/base): <summary of upstream changes>
+#<cycle_number> merge(origin/{dna-branch-name}): <summary of upstream changes>
 
-Source: origin/v1/base DNA update
+Source: origin/{dna-branch-name} DNA update
 Conflicts: <number of files with conflicts, or "none">
 
 Changes merged:
@@ -221,6 +232,7 @@ git stash pop
 
 > **Edge case — stash pop conflicts:**
 > If the stash conflicts with the newly merged code:
+>
 > ```bash
 > # Drop the conflicting stash pop
 > git checkout -- .
@@ -233,6 +245,7 @@ git stash pop
 > ```
 
 > **Edge case — stash was on a temp branch (from Step 2 fallback):**
+>
 > ```bash
 > git cherry-pick temp-local-changes --no-commit
 > git branch -D temp-local-changes
@@ -295,21 +308,21 @@ This is **mandatory** per constitution — failing to sync after pyproject.toml 
 
 ```bash
 # Full update in one shot (happy path, no local changes, ≤10 local commits)
-git fetch origin && git rebase origin/v1/base
+git fetch origin && git rebase origin/{dna-branch-name}
 
 # Full update when >10 local commits diverge (use merge instead of rebase)
-git fetch origin && git pull origin v1/base
+git fetch origin && git pull origin {dna-branch-name}
 
 # Full update with stash (has local changes, ≤10 local commits)
 git stash --include-untracked -m "Auto-stash before pull"
 git fetch origin
-git rebase origin/v1/base
+git rebase origin/{dna-branch-name}
 git stash pop
 
 # Nuclear option — discard ALL local uncommitted changes and force-sync
 # (ONLY if user explicitly requests it)
 git fetch origin
-git reset --hard origin/v1/base
+git reset --hard origin/{dna-branch-name}
 ```
 
 ## Common Edge Cases Summary
@@ -330,5 +343,5 @@ git reset --hard origin/v1/base
 | Portal broken after pull | `bash scripts/server_restart.sh --verify` |
 | `seed/install.sh` changed | Re-run `bash seed/install.sh` to install new OS-level dependencies |
 | `pyproject.toml` changed | Run `uv sync` immediately |
-| Diverged history (force-push on remote) | `git fetch origin && git reset --hard origin/v1/base` (destructive — confirm with user) |
+| Diverged history (force-push on remote) | `git fetch origin && git reset --hard origin/{dna-branch-name}` (destructive — confirm with user) |
 | Authentication failure on fetch | Check GitHub credentials / SSH keys — may need human intervention |
