@@ -31,6 +31,12 @@ npx playwright install-deps     || ok_agent_browser=false
 npm install -g agent-browser    || ok_agent_browser=false
 su -c "agent-browser install" agent || ok_agent_browser=false
 
+# ── GitHub CLI ────────────────────────────────────────────────
+echo "==> Installing GitHub CLI"
+chmod +x "$SCRIPT_DIR/install_gh.sh"
+ok_gh=true
+"$SCRIPT_DIR/install_gh.sh" || ok_gh=false
+
 # ── Long-term memory (LanceDB + fastembed) ────────────────────
 # Syncs the Python deps and pre-downloads the ~130 MB bge-small ONNX weights,
 # so the first ingest doesn't pay for that download inside a heartbeat cycle.
@@ -57,4 +63,5 @@ echo ""
 echo "==> Installation summary:"
 _status() { $1 && echo "OK" || echo "FAILED"; }
 echo "    agent-browser       : $(_status $ok_agent_browser)"
+echo "    github-cli          : $(_status $ok_gh)"
 echo "    memory (lancedb)    : ${memory_status}"
