@@ -139,37 +139,6 @@ passwords, and other sensitive data.
 - The database file is NOT in `/agent/web/` or `/agent/workspace/` — it is not browsable
 - The database path (`/home/agent/.keepass/`) is outside the Caddy file-server root
 
-## Google Workspace CLI (`gws`)
-
-The agent has the `gws` CLI pre-installed for accessing Google Workspace services
-(Gmail, Google Calendar, Google Drive, and more).
-
-- **CLI**: `gws <service> <command>` — services: gmail, calendar, drive, etc.
-- **Auth check**: `gws auth status` — verify credentials are configured
-- **Credentials path**: `/home/agent/.config/gws/credentials.json`
-- **Portal UI**:  No Portal UI available yet, you must implement an upload interface for users
-  to upload their `credentials.json` file to the required path when user requests Google Workspace integration features (e.g., "connect to my Google Calendar", "read my Gmail inbox", etc.)
-
-### Setup
-
-The CLI requires a Google OAuth credentials file at `/home/agent/.config/gws/credentials.json`.
-Users can upload this file via your implemented Streamlit portal's Google Workspace section.
-Without this file, `gws auth status` will report unconfigured.
-
-### Usage
-
-Before using any `gws` command, first check auth status:
-```bash
-gws auth status
-```
-
-To discover available commands for a specific Google product, MUST use the `skills-sh-find-skills`
-skill to locate the relevant gws skill documentation:
-```bash
-sudo npx -y skills find "googleworkspace/cli"
-```
-Chose the skill that matches the product you want to use (e.g., Gmail, Calendar, Drive) and follow the `skills-sh-find-skills` instructions to install it.
-
 ## Telegram Bridge
 
 A background service that bridges Telegram messages to the agent's inbox/outbox queue.

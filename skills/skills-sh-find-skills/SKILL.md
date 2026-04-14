@@ -97,7 +97,7 @@ The  `-a` specifies the agent to install for (in this case, `claude-code`), `--c
 When the repo contains multiple skills, you may need to specify the exact skill to be installed:
 
 ```bash
-sudo npx -y skills add https://github.com/googleworkspace/cli --skill gws-drive --copy -y -a claude-code
+sudo npx -y skills add <owner/repo@tag> --skill <skill-name> --copy -y -a claude-code
 ```
 
 ## Common Skill Categories

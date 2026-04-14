@@ -89,6 +89,7 @@ Entry appended by cycle-close:
 ```
 
 Comprehensive examples:
+
 ```json
 [
   {
@@ -267,135 +268,9 @@ Comprehensive examples:
     ],
     "summary": "Added daily-briefing.py script that aggregates tasks, goals, cycles, scheduled items, inbox, and system health into actionable briefings. Supports text, JSON, HTML, and outbox output modes. Added skill docs and goal routing entry.",
     "category": "capability"
-  },
-  {
-    "cycle": 12,
-    "timestamp": "2026-03-19T06:56:45.344596+00:00",
-    "status": "completed",
-    "type": "evolve",
-    "goal": "Optimized scheduler cron matching from O(10080) minute-by-minute scan to O(days) day-by-day algorithm. Deduplicated maturity signal computation in cycle_start.py by extracting _build_caps_with_signals() helper.",
-    "actions": [
-      "Replaced _has_cron_match_since() linear scan with day-by-day candidate generation (3us per call for daily patterns vs previous O(10080) iterations)",
-      "Extracted _build_caps_with_signals() from duplicate blocks in print_full() and print_json_output()",
-      "Added comprehensive tests verifying all cron pattern types (daily, hourly, wildcard, day-of-week)"
-    ],
-    "summary": "Optimized scheduler cron matching from O(10080) minute-by-minute scan to O(days) day-by-day algorithm. Deduplicated maturity signal computation in cycle_start.py by extracting _build_caps_with_signals() helper.",
-    "category": "efficiency"
-  },
-  {
-    "cycle": 13,
-    "timestamp": "2026-03-19T07:01:34.710118+00:00",
-    "status": "completed",
-    "type": "evolve",
-    "goal": "Hardened 3 portal modules against None/type crashes: emails.py (_parse_from, _format_date), overview.py (timezone-aware datetime, str-wrapped summaries, list-validated actions), _helpers.py (broader exception catch in _read_json_safe)",
-    "actions": [
-      "Added None/type guards to _parse_from() and _format_date() in emails.py",
-      "Fixed timezone-naive datetime comparison in _heartbeat_age_str() and _safe_fromisoformat() in overview.py",
-      "Wrapped summary values in str() to prevent TypeError on slicing in overview.py",
-      "Added isinstance check for actions list in overview.py Recent Improvements section",
-      "Extended _read_json_safe() exception handling to catch TypeError and ValueError"
-    ],
-    "summary": "Hardened 3 portal modules against None/type crashes: emails.py (_parse_from, _format_date), overview.py (timezone-aware datetime, str-wrapped summaries, list-validated actions), _helpers.py (broader exception catch in _read_json_safe)",
-    "category": "reliability"
-  },
-  {
-    "cycle": 14,
-    "timestamp": "2026-03-19T07:07:22.584424+00:00",
-    "status": "completed",
-    "type": "evolve",
-    "goal": "Added Resource Trends dashboard to System tab with 4 Altair charts (memory%, load, disk, portal latency). Integrated metrics_collector into cycle_start.py for automatic data collection each cycle. Created app/data/metrics.py mtime-cached loader.",
-    "actions": [
-      "Created app/data/metrics.py (mtime-cached metrics loader)",
-      "Added load_metrics to app/data/__init__.py",
-      "Added _render_resource_trends() to app/system.py with 4 Altair area/line charts",
-      "Integrated metrics collection into cycle_start.py step 3b",
-      "Seeded initial metrics data (2 snapshots)"
-    ],
-    "summary": "Added Resource Trends dashboard to System tab with 4 Altair charts (memory%, load, disk, portal latency). Integrated metrics_collector into cycle_start.py for automatic data collection each cycle. Created app/data/metrics.py mtime-cached loader.",
-    "category": "observability"
-  },
-  {
-    "cycle": 15,
-    "timestamp": "2026-03-19T07:15:01.726985+00:00",
-    "status": "completed",
-    "type": "evolve",
-    "goal": "Expanded goal.md routing table with 10 missing scripts, added 7 entries to research.md local resources, fixed stale test count in error-triage.md, and fixed APP_MODULES in self_test.py to eliminate 2 perpetual test failures",
-    "actions": [
-      "Added 10 missing script routing entries to goal.md (app-check, memory-backup, memory-repair, memory-stats, memory-sync, metrics_collector, portal-auth, portal-hostname, cycle-report, journal-archive)",
-      "Added 7 missing local resource entries to research.md",
-      "Fixed error-triage.md test count from 13 suites to 53 tests",
-      "Fixed self_test.py APP_MODULES list replacing non-existent journal/memory with actual module names"
-    ],
-    "summary": "Expanded goal.md routing table with 10 missing scripts, added 7 entries to research.md local resources, fixed stale test count in error-triage.md, and fixed APP_MODULES in self_test.py to eliminate 2 perpetual test failures",
-    "category": "prompt_evolution"
-  },
-  {
-    "cycle": 17,
-    "timestamp": "2026-03-19T07:21:55.072469+00:00",
-    "status": "completed",
-    "type": "goal",
-    "goal": "Added Google Chat tab to portal with unread message detection, thread grouping, and user name resolution via People API. Created app/google_chat.py and registered in server.py.",
-    "actions": [
-      "Created app/google_chat.py with Google Chat integration using gws CLI",
-      "Added unread detection via Space Read State API and thread-based message grouping",
-      "Implemented user ID to display name resolution via Google People API",
-      "Registered Google Chat tab in server.py under Personal Assistant section"
-    ],
-    "summary": "Added Google Chat tab to portal with unread message detection, thread grouping, and user name resolution via People API. Created app/google_chat.py and registered in server.py."
-  },
-  {
-    "cycle": 19,
-    "timestamp": "2026-03-19T07:26:00.847260+00:00",
-    "status": "completed",
-    "type": "self-heal",
-    "goal": "Fixed AppTest timeout in google_chat tab by making data fetching lazy (user-initiated). The tab was eagerly spawning gws subprocess calls during render, causing 30s timeout in headless AppTest checks.",
-    "actions": [],
-    "summary": "Fixed AppTest timeout in google_chat tab by making data fetching lazy (user-initiated). The tab was eagerly spawning gws subprocess calls during render, causing 30s timeout in headless AppTest checks.",
-    "category": "reliability"
-  },
-  {
-    "cycle": 20,
-    "timestamp": "2026-03-19T07:32:06.169455+00:00",
-    "status": "completed",
-    "type": "goal",
-    "category": "research",
-    "summary": "Researched Encora Inc with focus on Singapore and Asia-Pacific operations per user request via Telegram.",
-    "details": "Used agent-browser to research Encora Inc across multiple sources (encora.com, SGP Business, Tracxn, OpenGovSG, news articles). Compiled comprehensive report covering: company overview ($516M revenue, 9000+ employees), Singapore entity (Encora Technologies Pte. Ltd., 18 employees at Changi Business Park), APAC presence (5 countries: SG, IN, MY, PH, HK), Coforge $2.35B acquisition (Dec 2025), and leadership team. Full report saved to /agent/workspace/encora-inc-research-apac.md.",
-    "learnings": {
-      "approach": "Launched a general-purpose subagent with agent-browser to parallelize web research while main agent handled cycle management",
-      "key_decisions": "Used browser automation instead of curl/WebFetch for richer content extraction from company pages and business registries",
-      "reusable_patterns": "For company research: check official site, Singapore business registries (SGP Business, OpenGovSG), Tracxn/Crunchbase for financials, news aggregators for recent developments",
-      "pitfalls": "None encountered \u2014 straightforward research task"
-    }
-  },
-  {
-    "cycle": 21,
-    "timestamp": "2026-03-19T07:32:23.272859+00:00",
-    "status": "completed",
-    "type": "goal",
-    "goal": "Researched Encora Inc company with focus on Singapore and APAC operations. Compiled comprehensive report from multiple sources and delivered to user via Telegram bridge.",
-    "actions": [],
-    "summary": "Researched Encora Inc company with focus on Singapore and APAC operations. Compiled comprehensive report from multiple sources and delivered to user via Telegram bridge."
-  },
-  {
-    "cycle": 22,
-    "timestamp": "2026-03-19T07:37:01.428402+00:00",
-    "status": "completed",
-    "type": "evolve",
-    "goal": "Added Quick Notes tab \u2014 lightweight fast-capture system with labels, pinning, search, and convert-to-task. Fills the biggest personal assistant gap: a frictionless way to jot down thoughts without structured forms.",
-    "actions": [
-      "Created app/notes.py with full Quick Notes UI (labels, pins, search, convert-to-task, bulk clear, export)",
-      "Created memory/notes.json persistent storage",
-      "Registered Notes tab in server.py under Personal Assistant group",
-      "Added notes routing to goal.md specialist table",
-      "Updated server.md and AGENTS.md documentation"
-    ],
-    "summary": "Added Quick Notes tab \u2014 lightweight fast-capture system with labels, pinning, search, and convert-to-task. Fills the biggest personal assistant gap: a frictionless way to jot down thoughts without structured forms.",
-    "category": "capability"
   }
 ]
 ```
-
 
 ### goal.json
 
@@ -468,10 +343,12 @@ Entry:
 ```
 
 **Fields:**
+
 - `public_url`: Public hostname for external access (e.g., via Cloudflare Tunnel). Set via `scripts/portal_config.py hostname --set <url>`. Used by `chat.py` for system prompt injection.
 - `timezone`: IANA timezone for time-aware operations (e.g., scheduled tasks, log timestamps). Set via `scripts/portal_config.py timezone --set <tz>`. Used by `heartbeat.sh` for timestamp display.
 
 **Notes:**
+
 - File may not exist if no configuration has been set (scripts will create it on first use)
 - All fields are optional and can be independently set/cleared
 - Updates use atomic writes via `save_portal_config()` to preserve other keys
