@@ -8,6 +8,7 @@ import streamlit as st
 
 
 def render():
+    import json
     import subprocess
     import time
     from pathlib import Path
@@ -18,6 +19,17 @@ def render():
 
     KEEPASS_DIR = Path("/home/agent/.keepass")
     DB_PATH = KEEPASS_DIR / "credentials.kdbx"
+    MCP_JSON_PATH = Path(__file__).resolve().parents[1] / ".mcp.json"
+
+    def _update_mcp_json_token(token: str) -> bool:
+        """Write the PAT into .mcp.json, replacing any existing Authorization value."""
+        try:
+            data = json.loads(MCP_JSON_PATH.read_text())
+            data["mcpServers"]["github"]["headers"]["Authorization"] = f"Bearer {token}"
+            MCP_JSON_PATH.write_text(json.dumps(data, indent=2) + "\n")
+            return True
+        except Exception:
+            return False
 
     # ── Init guard ────────────────────────────────────────────────
     if not DB_PATH.exists():
@@ -366,6 +378,8 @@ def render():
                     if not saved_ok:
                         st.error("Failed to save token to KeePass.")
                     else:
+                        if not _update_mcp_json_token(new_gh_pat.strip()):
+                            st.warning("Token saved, but failed to update `.mcp.json`.")
                         try:
                             login_result = subprocess.run(
                                 ["gh", "auth", "login", "--with-token"],
@@ -416,6 +430,8 @@ def render():
                 if not saved_ok:
                     st.error("Failed to save token to KeePass.")
                 else:
+                    if not _update_mcp_json_token(gh_pat.strip()):
+                        st.warning("Token saved, but failed to update `.mcp.json`.")
                     try:
                         login_result = subprocess.run(
                             ["gh", "auth", "login", "--with-token"],
