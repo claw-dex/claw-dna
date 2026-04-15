@@ -226,4 +226,9 @@ If a goal is too large for one cycle:
 
 Review `/agent/messages/outbox.json`, if no messages was written within this cycle, write a summary of what you accomplished in the outbox so the user has visibility into your progress.
 Also update portal to show current goal progress if applicable.
+
+Before running cycle-close, get the current cycle number:
+`cycle_n = state.cycle_number + 1` (state stores the *last completed* cycle).
+Pass it explicitly: `uv run python scripts/cycle_close.py --cycle <N> --type goal ...`
+
 Then follow the `/agent/prompts/cycle-close.md` checklist (includes running `cycle_close.py`) to close the cycle.

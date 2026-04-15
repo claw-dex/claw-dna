@@ -37,9 +37,7 @@ MESSAGES = Path("/agent/messages")
 MV2_PATH = MEMORY / "long_term_memory.mv2"
 SCRIPTS = Path("/agent/scripts")
 
-# Import memory_repair from the same scripts/ directory
-sys.path.insert(0, str(SCRIPTS))
-from memory_repair import run_repair as _run_memory_repair  # noqa: E402
+from scripts.memory_repair import run_repair as _run_memory_repair  # noqa: E402
 
 # ── Flags ───────────────────────────────────────────────────────────────────────
 args = sys.argv[1:]
@@ -527,8 +525,6 @@ def _fetch_old_memories(limit: int = 50, inbox=None, goals=None) -> list:
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
     until_ts = str(int(cutoff.timestamp()))
     try:
-        if "/agent" not in sys.path:
-            sys.path.insert(0, "/agent")
         from scripts.memory_recall import recall
         return recall(query, k=limit, until=until_ts)
     except Exception:

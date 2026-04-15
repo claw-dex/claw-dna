@@ -52,8 +52,6 @@ def main() -> int:
 
     # Change to /agent so relative imports in server.py work
     os.chdir(str(AGENT_DIR))
-    if str(AGENT_DIR) not in sys.path:
-        sys.path.insert(0, str(AGENT_DIR))
 
     # Run headless render
     try:

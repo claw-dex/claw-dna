@@ -29,11 +29,6 @@ import json
 import re
 import sys
 
-# Ensure /agent is on sys.path so 'from scripts.keepass import ...' works
-# regardless of the working directory when invoked
-if "/agent" not in sys.path:
-    sys.path.insert(0, "/agent")
-
 KEEPASS_ENTRY = "Email IMAP"
 IMAP_PORT = 993
 

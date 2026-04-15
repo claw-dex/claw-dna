@@ -264,8 +264,6 @@ def apply_fix(fix_name):
     """Apply a specific fix."""
     if fix_name == "journal_archive":
         try:
-            if "/agent" not in sys.path:
-                sys.path.insert(0, "/agent")
             from scripts.journal_archive import cmd_archive
             cmd_archive(keep=JOURNAL_KEEP_ENTRIES)
             return "archived"

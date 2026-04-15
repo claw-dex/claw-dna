@@ -29,10 +29,6 @@ import sys
 import tempfile
 import urllib.parse
 
-# Ensure /agent is on sys.path so 'from scripts.keepass import ...' works
-# regardless of the working directory when invoked
-if "/agent" not in sys.path:
-    sys.path.insert(0, "/agent")
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path

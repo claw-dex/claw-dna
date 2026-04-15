@@ -38,10 +38,6 @@ SCRIPTS_DIR = AGENT_DIR / "scripts"
 BASE_URL = "http://localhost:8081/app"
 HEALTH_URL = f"{BASE_URL}/_stcore/health"
 
-# Ensure agent dir is on path for app imports
-if str(AGENT_DIR) not in sys.path:
-    sys.path.insert(0, str(AGENT_DIR))
-
 # ── Result accumulator ──────────────────────────────────────────────────────
 
 results = []   # list of {"name", "passed", "detail", "duration_ms"}

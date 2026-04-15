@@ -301,8 +301,6 @@ def check_stale_counts():
             else:
                 # Cache miss — run self_test and cache result
                 try:
-                    if "/agent" not in sys.path:
-                        sys.path.insert(0, "/agent")
                     import importlib.util
                     spec = importlib.util.spec_from_file_location("self_test", str(self_test))
                     self_test_mod = importlib.util.module_from_spec(spec)
@@ -445,8 +443,6 @@ def _sync_auto_memory() -> None:
     Non-fatal: if sync fails, cycle-close prints a warning but exits 0.
     """
     try:
-        if "/agent" not in sys.path:
-            sys.path.insert(0, "/agent")
         from scripts.memory_sync import sync_all
         sync_all()
         print(f"  ✓ auto memory — synced via memory_sync.py")
@@ -468,8 +464,6 @@ def _store_to_memvid(journal_entry: dict) -> None:
     entry_json = json.dumps(journal_entry)
 
     try:
-        if "/agent" not in sys.path:
-            sys.path.insert(0, "/agent")
         from scripts.memory_ingest import append_json, DEFAULT_MV2
         append_json(DEFAULT_MV2, entry_json, quiet=True)
         print(f"  ✓ memvid — stored cycle {cycle} to long_term_memory.mv2")
@@ -529,19 +523,24 @@ def main():
 
     # ── Auto-detect cycle number if not provided ─────────────────────────────
     if opts["cycle"] is None:
-        # Use state.cycle_number + 1 as the current cycle.
-        # state.cycle_number holds the LAST COMPLETED cycle, so the running
-        # cycle is always +1. Fall back to max(cycles)+1 if state is missing.
-        state_cycle = state.get("cycle_number")
-        if state_cycle is not None and isinstance(state_cycle, int):
-            detected = state_cycle + 1
-        elif cycles:
-            detected = max(c.get("cycle", 0) for c in cycles) + 1
+        # Prefer the most recent in_progress entry — cycle_start.py always writes one.
+        # This is immune to state.cycle_number being pre-updated by the agent.
+        ip_entries = [c for c in cycles if c.get("status") == "in_progress" and c.get("cycle")]
+        if ip_entries:
+            detected = max(c["cycle"] for c in ip_entries)
+            print(f"  ℹ  --cycle not specified — auto-detected from in_progress entry: {detected}")
         else:
-            detected = 1
+            # Fallback: state.cycle_number + 1 (no in_progress entry means cycle_start.py didn't run)
+            state_cycle = state.get("cycle_number")
+            if state_cycle is not None and isinstance(state_cycle, int):
+                detected = state_cycle + 1
+            elif cycles:
+                detected = max(c.get("cycle", 0) for c in cycles) + 1
+            else:
+                detected = 1
+            print(f"  ℹ  --cycle not specified — auto-detected from state: {detected} "
+                  f"(no in_progress entry found)")
         opts["cycle"] = detected
-        print(f"  ℹ  --cycle not specified — auto-detected: {detected} "
-              f"(state.cycle_number={state_cycle})")
 
     cycle_n = opts["cycle"]
 
@@ -642,9 +641,13 @@ def main():
     print(f"  ✓ state.json updated (cycle_number={cycle_n})")
 
     # 3. Append journal entry
-    journal.append(journal_entry)
-    write_atomic(journal_path, journal)
-    print(f"  ✓ journal.json — appended entry (total: {len(journal)})")
+    already_in_journal = any(e.get("cycle") == cycle_n for e in journal)
+    if already_in_journal:
+        print(f"  ⚠ journal.json — entry for cycle {cycle_n} already exists, skipping duplicate write")
+    else:
+        journal.append(journal_entry)
+        write_atomic(journal_path, journal)
+        print(f"  ✓ journal.json — appended entry (total: {len(journal)})")
 
     # 4. Normalize cycles (optional) — inlined to avoid subprocess overhead
     if not opts["no_normalize"]:

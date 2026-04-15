@@ -56,7 +56,12 @@ def run_script(script_name, args=None):
     else:
         return {"ok": False, "error": "Unsupported script type"}
     if args:
-        cmd.extend(str(a) for a in args[:30])
+        def _strip_quotes(v):
+            s = str(v)
+            if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+                return s[1:-1]
+            return s
+        cmd.extend(_strip_quotes(a) for a in args[:30])
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=AGENT_DIR)
         _cache_clear_all()
@@ -174,8 +179,6 @@ def remove_service(name):
     if not _valid_service_name(name):
         return {"ok": False, "error": "Invalid service name"}
     try:
-        if "/agent" not in sys.path:
-            sys.path.insert(0, "/agent")
         from scripts.service_manager import cmd_remove
         result = _call_svc(cmd_remove, name)
         _cache_clear_all()
@@ -195,8 +198,6 @@ def stop_service(name):
     if not _valid_service_name(name):
         return {"ok": False, "error": "Invalid service name"}
     try:
-        if "/agent" not in sys.path:
-            sys.path.insert(0, "/agent")
         from scripts.service_manager import cmd_stop
         result = _call_svc(cmd_stop, name)
         _cache_clear_all()
@@ -225,8 +226,6 @@ def start_service(name):
             return {"ok": False, "error": f"Invalid port value for '{name}'"}
 
     try:
-        if "/agent" not in sys.path:
-            sys.path.insert(0, "/agent")
         from scripts.service_manager import cmd_start
         result = _call_svc(cmd_start, name, port, command)
         _cache_clear_all()

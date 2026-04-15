@@ -48,11 +48,6 @@ from urllib.parse import urlparse, parse_qs
 
 import requests
 
-# Ensure /agent is on sys.path so 'from scripts.keepass import ...' works
-# regardless of the working directory when launched via service-manager
-if "/agent" not in sys.path:
-    sys.path.insert(0, "/agent")
-
 from shared import atomic_write_json, write_to_inbox, append_to_history
 
 # --- Paths ---
