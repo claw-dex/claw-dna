@@ -8,9 +8,13 @@ import streamlit as st
 
 
 def render():
+    import subprocess
+    import time
     from pathlib import Path
 
     from pykeepass import PyKeePass, create_database
+    from scripts.keepass import get_credential_entry as _gh_get_entry
+    from scripts.keepass import store_credential as _gh_store_credential
 
     KEEPASS_DIR = Path("/home/agent/.keepass")
     DB_PATH = KEEPASS_DIR / "credentials.kdbx"
@@ -300,6 +304,141 @@ def render():
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Failed to save SSH key: {exc}")
+
+    # ── GitHub CLI (gh) section ────────────────────────────────────
+    st.divider()
+    st.subheader("GitHub CLI (gh)")
+
+    GH_KEEPASS_TITLE = "GITHUB_TOKEN_1"
+    GH_KEEPASS_GROUP = "API Keys"
+
+    # Check for existing credential (cached 60s)
+    gh_cache_ts = st.session_state.get("gh_cred_check_ts", 0)
+    if time.time() - gh_cache_ts > 60 or "gh_cred_data" not in st.session_state:
+        st.session_state["gh_cred_data"] = _gh_get_entry(GH_KEEPASS_TITLE)
+        st.session_state["gh_cred_check_ts"] = time.time()
+
+    gh_cred = st.session_state.get("gh_cred_data")
+
+    if gh_cred is not None:
+        gh_username = gh_cred.get("username", "")
+        st.success(f"GitHub token stored for **{gh_username}**.")
+
+        # Test button
+        if st.button("Test gh auth", key="gh_test_btn"):
+            try:
+                test_result = subprocess.run(
+                    ["gh", "auth", "status"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                output = test_result.stdout or test_result.stderr
+                if test_result.returncode == 0:
+                    st.success(output.strip())
+                else:
+                    st.error(output.strip() or "gh auth status returned a non-zero exit code.")
+            except FileNotFoundError:
+                st.error("`gh` is not installed or not in PATH.")
+            except subprocess.TimeoutExpired:
+                st.error("gh auth status timed out.")
+            except Exception as exc:
+                st.error(f"Error: {exc}")
+
+        # Replace token
+        if st.button("Replace Token", key="gh_replace_btn"):
+            st.session_state["gh_replace"] = True
+            st.rerun()
+
+        if st.session_state.get("gh_replace", False):
+            with st.form("gh_replace_form", clear_on_submit=True):
+                new_gh_user = st.text_input("GitHub Username", value=gh_username)
+                new_gh_pat = st.text_input("New Personal Access Token (PAT)", type="password")
+                replace_submitted = st.form_submit_button("Save & Login")
+            if replace_submitted:
+                if not new_gh_user.strip() or not new_gh_pat.strip():
+                    st.error("Username and PAT are required.")
+                else:
+                    saved_ok = _gh_store_credential(
+                        GH_KEEPASS_TITLE,
+                        new_gh_user.strip(),
+                        new_gh_pat.strip(),
+                        group=GH_KEEPASS_GROUP,
+                    )
+                    if not saved_ok:
+                        st.error("Failed to save token to KeePass.")
+                    else:
+                        try:
+                            login_result = subprocess.run(
+                                ["gh", "auth", "login", "--with-token"],
+                                input=new_gh_pat.strip(),
+                                capture_output=True, text=True, timeout=15,
+                            )
+                            if login_result.returncode == 0:
+                                for k in ("gh_cred_data", "gh_cred_check_ts", "gh_replace"):
+                                    st.session_state.pop(k, None)
+                                st.success("Token saved and gh CLI authenticated.")
+                                st.rerun()
+                            else:
+                                for k in ("gh_cred_data", "gh_cred_check_ts", "gh_replace"):
+                                    st.session_state.pop(k, None)
+                                st.error(f"Token saved but gh login failed: {login_result.stderr.strip()}")
+                        except FileNotFoundError:
+                            st.session_state.pop("gh_cred_data", None)
+                            st.session_state.pop("gh_cred_check_ts", None)
+                            st.session_state.pop("gh_replace", None)
+                            st.warning("Token saved to KeePass, but `gh` is not installed or not in PATH.")
+                        except Exception as exc:
+                            st.session_state.pop("gh_cred_data", None)
+                            st.session_state.pop("gh_cred_check_ts", None)
+                            st.session_state.pop("gh_replace", None)
+                            st.error(f"Token saved but gh login error: {exc}")
+
+    else:
+        st.caption(
+            "Paste a GitHub Personal Access Token to save it to KeePass and authenticate the `gh` CLI. "
+            "Create one at **GitHub → Settings → Developer settings → Personal access tokens** "
+            "(scopes: `repo`, `read:org`, `workflow`)."
+        )
+        with st.form("gh_add_form", clear_on_submit=True):
+            gh_user = st.text_input("GitHub Username")
+            gh_pat = st.text_input("Personal Access Token (PAT)", type="password")
+            gh_submitted = st.form_submit_button("Save & Login")
+
+        if gh_submitted:
+            if not gh_user.strip() or not gh_pat.strip():
+                st.error("Username and PAT are required.")
+            else:
+                saved_ok = _gh_store_credential(
+                    GH_KEEPASS_TITLE,
+                    gh_user.strip(),
+                    gh_pat.strip(),
+                    group=GH_KEEPASS_GROUP,
+                )
+                if not saved_ok:
+                    st.error("Failed to save token to KeePass.")
+                else:
+                    try:
+                        login_result = subprocess.run(
+                            ["gh", "auth", "login", "--with-token"],
+                            input=gh_pat.strip(),
+                            capture_output=True, text=True, timeout=15,
+                        )
+                        st.session_state.pop("gh_cred_data", None)
+                        st.session_state.pop("gh_cred_check_ts", None)
+                        if login_result.returncode == 0:
+                            st.success("Token saved and gh CLI authenticated.")
+                        else:
+                            st.error(f"Token saved but gh login failed: {login_result.stderr.strip()}")
+                        st.rerun()
+                    except FileNotFoundError:
+                        st.session_state.pop("gh_cred_data", None)
+                        st.session_state.pop("gh_cred_check_ts", None)
+                        st.warning("Token saved to KeePass, but `gh` is not installed or not in PATH.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.session_state.pop("gh_cred_data", None)
+                        st.session_state.pop("gh_cred_check_ts", None)
+                        st.error(f"Token saved but gh login error: {exc}")
+                        st.rerun()
 
     # ── Replace Database ───────────────────────────────────────────
     st.divider()
