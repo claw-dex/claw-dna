@@ -6,8 +6,11 @@
 
 ```
 User Browser → localhost:8080 (Caddy Gateway)
-                  ├── /          → redirect to /app/
-                  └── /app/*     → localhost:8081 (Streamlit, baseUrlPath=/app/)
+                  ├── /              → /agent/web/index.html (home page)
+                  ├── /web/*         → /agent/web/* (static files from /agent/web/)
+                  ├── /_/*           → /* (file browser)
+                  ├── /webhook/*     → localhost:8082 (webhook receiver)
+                  └── /app/*         → localhost:8081 (Streamlit, baseUrlPath=/app/)
 
 bootstrap.sh (PID 1) — process manager with watchdog
   ├── caddy run (port 8080, admin API on 2019)
@@ -16,7 +19,7 @@ bootstrap.sh (PID 1) — process manager with watchdog
 
 | Service | Port | URL Path | Notes |
 |---------|------|----------|-------|
-| Caddy | 8080 | `/` (redirect), `/app/*` | Gateway, admin API on 2019 |
+| Caddy | 8080 | `/` (home), `/web/*`, `/_/*`, `/app/*` | Gateway, admin API on 2019 |
 | Streamlit | 8081 | `/app/` (via Caddy) | Hot-reload, baseUrlPath=/app/ |
 
 **Caddy admin API:** `http://localhost:2019/config/` (JSON API for dynamic route configuration, internal only)

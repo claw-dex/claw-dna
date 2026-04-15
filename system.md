@@ -79,18 +79,20 @@ Store args example: `--title "REMOTE_BROWSER_WSS_URL" --username "" --password "
 ```
 User Browser → localhost:8080 (Caddy Gateway)
                   ├── /              → /agent/web/index.html (welcome page, auto-redirects to /app/)
-                  ├── /*             → /agent/web/* (static files if they exist, else 404)
+                  ├── /web/*         → /agent/web/* (static files from /agent/web/)
                   ├── /_/*           → /* (file browser with directory listing of entire filesystem)
+                  ├── /webhook/*     → localhost:8082 (webhook receiver)
                   └── /app/*         → localhost:8081 (Streamlit, baseUrlPath=/app/)
 ```
 
 - Portal URL: http://localhost:8080/app/
+- Static Web URL: http://localhost:8080/web/ (static files from /agent/web/)
 - File Explorer URL: http://localhost:8080/_/ (browsable directory listing of entire filesystem)
 - Caddy admin: http://localhost:2019/config/ (internal only)
 - Public URL: see "Public URL" section in system prompt (if configured via the `portal-config` skill)
 
 **Public directories** — the following directories are served directly by Caddy to the user's browser:
-- `/agent/web/` → served at `/` (static files — welcome page and any assets you add)
+- `/agent/web/` → served at `/web/` (static files from /agent/web/) and at `/` (index.html home page)
 - `/` → served at `/_/` (full directory listing of entire filesystem with download links)
 
 Any file you place in these directories is immediately accessible to the user. Do not store secrets, credentials, or sensitive data in them.

@@ -49,6 +49,7 @@ def _build_system_prompt(chat_history: list[dict] | None = None) -> str:
                     "generated reports), use this public URL as the base instead of localhost:8080. "
                     "For example:\n"
                     f"- Portal: {public_url}/app/\n"
+                    f"- Static Web: {public_url}/web/ (static files from /agent/web/)\n"
                     f"- File Explorer: {public_url}/_/\n"
                     f"- Workspace files: ${public_url}/_/agent/workspace/path/to/<filename>\n"
                 )

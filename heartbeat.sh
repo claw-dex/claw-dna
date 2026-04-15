@@ -234,6 +234,7 @@ This agent is accessible at: ${public_url}
 
 When sharing links with the user (portal, file explorer, workspace files, generated reports), use this public URL as the base instead of localhost:8080. For example:
 - Portal: ${public_url}/app/
+- Static Web: ${public_url}/web/ (static files from /agent/web/)
 - File Explorer: ${public_url}/_/
 - Workspace files: ${public_url}/_/agent/workspace/path/to/<filename>
 
