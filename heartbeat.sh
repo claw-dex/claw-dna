@@ -304,7 +304,7 @@ build_task_prompt() {
             echo ""
             echo "## Your Goal Statuses"
             echo '```json'
-            cat /agent/memory/goal.json 2>/dev/null || echo '[]'
+            jq '[.[] | select(.status == "pending" or .status == "in-progress" or .status == "in_progress")] | sort_by(.created_at) | .[0:10]' /agent/memory/goal.json 2>/dev/null || echo '[]'
             echo '```'
             ;;
         evolve)
@@ -312,7 +312,7 @@ build_task_prompt() {
             echo ""
             echo "## Your Goal Statuses"
             echo '```json'
-            cat /agent/memory/goal.json 2>/dev/null || echo '[]'
+            jq '[.[] | select(.status == "pending" or .status == "in-progress" or .status == "in_progress")] | sort_by(.created_at) | .[0:10]' /agent/memory/goal.json 2>/dev/null || echo '[]'
             echo '```'
             ;;
     esac

@@ -3,6 +3,7 @@
 > **Enum Reference:** See `prompts/enum.md` for all valid values of `status`, `type`, and other enum fields used in this prompt.
 
 This prompt is triggered when either:
+
 - **New commands** are waiting in /agent/messages/inbox.json, OR
 - **In-progress goals** exist in /agent/memory/goal.json (inbox may be empty)
 
@@ -52,10 +53,8 @@ Read /agent/messages/inbox.json. For each command:
 4. Otherwise, treat it as a new goal:
    a. Check goal.json for duplicates (see Duplicate Detection below)
    b. If not a duplicate, add the goal entry to goal.json with status "pending"
-   c. Set current_goal in state.json to this content
-   d. Set status to "working"
-   e. Plan the approach (break into steps if complex)
-   f. **Route to specialist prompt if needed** (scan the table, pick the best match):
+   c. Plan the approach (break into steps if complex)
+   d. **Route to specialist prompt if needed** (scan the table, pick the best match):
 
       | Trigger | Action |
       |---------|--------|
@@ -70,8 +69,8 @@ Read /agent/messages/inbox.json. For each command:
       | System maintenance / housekeeping | `scripts/maintain.py --fix` |
       | Agent growth summary / milestone report | `scripts/milestone_report.py` |
       | Unanswered `needs_human` outbox message | Check `callmebot` skill for voice call escalation |
-   g. Execute the first step (or as much as fits in one cycle)
-   h. Update the web portal to show progress
+   g. Execute all steps (or as much as fits in one cycle)
+   h. Update `state.json` -> `current_goal` with the current goal/task in this format: `{goal-id} A short task description no more than 20 words` (concise and short)
    i. Write journal entry with plan and progress
    j. **If goal is completed:** write a summary to `/agent/messages/outbox.json` so the user knows it's done and where to find results. Then read `/agent/prompts/post-goal-review.md` and add a Review line.
    k. **If goal failed:** set status to "failed" in goal.json; write explanation to outbox.json; log failure in journal entry with diagnosis and prevention
@@ -86,7 +85,8 @@ Some goals require multiple phases that each use a different specialist prompt/s
 3. **Phase 3 (Execution Setup):** Build portal UI, submission tracker, handoff brief
 
 When a goal spans phases:
-- Write a clear handoff note in `state.json.last_cycle_summary` (future you reads this)
+
+- Write a clear handoff note in `state.json` -> `last_cycle_summary` (future you reads this)
 - Set goal status to "in_progress" between phases
 - Begin each subsequent cycle by reading journal for last phase's output before continuing
 
@@ -164,10 +164,10 @@ for goals with status "pending" or "in_progress":
 
 1. Read `/agent/memory/goal.json`
 2. Find the oldest goal with status "in_progress" (or "pending" if none in-progress)
-3. Read `state.json` for `last_cycle_summary` — this tells you what was done last cycle
+3. Read `state.json` -> `last_cycle_summary` — this tells you what was done last cycle
 4. Read journal.json for the most recent entry to understand current progress
 5. Continue working from where you left off
-6. Update goal status and state.json as you make progress
+6. Update `state.json` -> `status` and `current_goal` as you make progress
 7. If the goal is complete, set status to "completed" and `updated_at` to now
 8. After completing a non-trivial goal, read `/agent/prompts/post-goal-review.md` and add a Review line to your journal
 
@@ -181,9 +181,11 @@ and the inbox is empty (the human hasn't responded):
 
 1. Run `uv run python scripts/callmebot.py --json status` to check if configured and not rate-limited
 2. If `can_call_now` is true, make a voice call with a summary of the blocker:
+
    ```bash
    uv run python scripts/callmebot.py call --text "<subject from the needs_human message>"
    ```
+
 3. Close the cycle normally — don't retry the blocked work
 
 If CallMeBot is not configured or is rate-limited, skip the call and close the cycle.

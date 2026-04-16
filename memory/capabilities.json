@@ -22,8 +22,8 @@
   },
   {
     "id": "streamlit_portal",
-    "name": "Streamlit Web Portal",
-    "description": "Multi-tab web portal at /app/ with hot-reload; dashboard, chat, and grouped feature tabs",
+    "name": "Streamlit app portal",
+    "description": "Multi-tab Streamlit app portal at /app/ with hot-reload; dashboard, chat, and grouped feature tabs",
     "category": "core",
     "enabled": true
   },

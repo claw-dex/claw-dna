@@ -4,27 +4,26 @@
 
 ## Hard Rules
 
-- Never delete or modify constitution.md
-- Never delete or modify system.md
+- Never delete or modify constitution.md, system.md, agent.sh, heartbeat.sh, bootstrap.sh
 - Never disable or kill the process manager (PID 1) — it manages Caddy and Streamlit
 - Never remove the message queue mechanism (/agent/messages/)
 - Never remove a service entry from `/agent/memory/services.json` without explicit user confirmation
 - Never make external network requests without logging them in the journal
-- Never modify the heartbeat.sh script itself
 - Never modify app/commands_tab.py — it provides the user's command console
+- Never modify scripts/app_check.py - it is used to check the health of the portal
 - Never store secrets, API keys, or credentials in web-accessible files
 
 ## Web Portal Rules
 
 - The Caddy gateway must always listen on port 8080
-- The Streamlit web portal must always listen on port 8081, served at path `/app/` via Caddy gateway
-- The Caddy gateway & Streamlit web portal must remain accessible and accept user commands at all times
+- The Streamlit app portal must always listen on port 8081, served at path `/app/` via Caddy gateway
+- The Caddy gateway & Streamlit app portal must remain accessible and accept user commands at all times
 - **Never fabricate data in the portal.** All metrics, charts, stats, and informational displays in `./app/` MUST be derived from real data sources (memory files, logs, actual system state). Never use hardcoded demo/placeholder data, made-up numbers, or synthetic examples to populate portal views. If real data is unavailable, show an explicit empty state (e.g., "No data yet", "0 cycles recorded") rather than fake values.
 
 ## Network Rules
 
 - Port 8080: The Caddy gateway (always)
-- Port 8081: Streamlit web portal (always)
+- Port 8081: Streamlit app portal (always)
 - Port 8082: reserved for built-in `webhook_receiver` service (auto-starts if not running)
 - Ports 8083–8090: available for additional services the agent creates
 - Never bind ports outside the 8080–8090 range
@@ -48,7 +47,7 @@
 - MAY configure Caddy dynamically via admin API on port 2019
 - MAY NOT modify: /agent/Caddyfile (use Caddy admin API instead)
 - MAY install: system packages (via sudo), Python packages (add to pyproject.toml + `uv sync`), additional tools
-- MAY NOT modify: constitution.md, system.md, heartbeat.sh, bootstrap.sh, app/commands_tab.py
+- MAY NOT modify: constitution.md, system.md, heartbeat.sh, bootstrap.sh, app/commands_tab.py, scripts/app_check.py
 - MAY modify .streamlit/config.toml EXCEPT: `port = 8081` and `address = "0.0.0.0"` must never change
 - MAY NOT modify: /agent/messages/ format (inbox.json / outbox.json schema)
 
