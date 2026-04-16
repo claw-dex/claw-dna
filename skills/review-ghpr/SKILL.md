@@ -61,6 +61,11 @@ Check whether the repository is already cloned to a local workspace directory by
   - If the file already exists, read it and verify it contains the **Core Principles**, **Guidelines for Comprehensive Code Review**, and **Important Points to follow** sections. It is ok for the file content to differ from the template as long as those three sections are present.
 - Use the GitHub MCP server to get pull request details: title, description, branch name, base branch name, and PR comments
   - If the PR does not exist, stop execution immediately.
+- **Check for a previous review feedback file:**
+  - Look for `ghpr-code-review/pr_${pr_number}_${pr_branch_name}_review_feedback.md`
+    (`${pr_branch_name}` is the branch name with slashes and hyphens replaced by underscores — snake_case)
+  - If the file exists, set `${has_previous_review}` = `true` and read it to note every previously identified issue
+  - If the file does not exist, set `${has_previous_review}` = `false`
 - Update the PR base branch to ensure diffs are computed against the latest upstream state:
   - Run `git fetch origin ${base_branch}:${base_branch}` to update the local base branch ref
 - Check out the git branch of the PR using `git` CLI commands
@@ -82,7 +87,60 @@ Check whether the repository is already cloned to a local workspace directory by
 
 **Phase 2: Perform Code Review**
 
-Invoke a general-purpose subagent with the following prompt (replace `${pr_number}` and `${pr_branch_name}` with actual values before invoking, and confirm the PR details file path exists first — if not, search with `find ghpr-code-review -name "pr_${pr_number}*.md"` to locate it):
+Confirm the PR details file path exists — if not, search with `find ghpr-code-review -name "pr_${pr_number}*.md"` to locate it. Then choose **one** of the two subagent prompts below based on `${has_previous_review}`.
+
+---
+
+### 2A — Re-review (use when `${has_previous_review}` = `true`)
+
+Invoke a general-purpose subagent with the following prompt (replace placeholders with actual values before invoking):
+
+> You are an expert software engineer doing a **follow-up code review**. A previous review was already performed on this PR. Your sole job is to check whether the previously reported issues have been addressed in the latest commits. You are in **read-only** mode: do NOT edit files, run code, install dependencies, run tests, or start servers. You may use Read, Grep, Glob, Bash(git), and MCP tools only for reading and searching.
+>
+> **Setup steps:**
+>
+> - Run `git status` to confirm the current branch
+> - Run `git remote show origin` to understand the repository context
+> - Read `ghpr-code-review/CLAUDE.md` for review guidelines
+> - Read `ghpr-code-review/pr_${pr_number}_${pr_branch_name}.md` for PR details, summary, and key areas
+> - Read `ghpr-code-review/pr_${pr_number}_${pr_branch_name}_review_feedback.md` — this is the **previous review**; it is the authoritative list of issues that must be verified
+>
+> **Verification steps:**
+> For each issue reported in the previous review feedback file:
+>
+> - Identify the file and code location of the issue
+> - Run `git diff -U0 --no-color [base-branch]..[current-branch] -- [file-path]` to examine the latest diff for that file
+> - Read the current file content around the affected lines
+> - Determine whether the issue has been **resolved**, **partially addressed**, or **still present / not addressed**
+> - If the issue does not appear resolved or partially addressed by the code diff, retrieve the original review comment and any author replies using the commands in **Section 4** of this skill:
+>   - Look up the comment URL from the previous review feedback file (stored as the submitted review comment URL)
+>   - Extract the comment ID from the URL (the number after `discussion_r`)
+>   - Run the full-thread command to fetch the original comment and all replies
+>   - Read the author's reply carefully — the author may have acknowledged the issue as an **intentional trade-off**, deferred it to a follow-up PR, or given a valid explanation
+>   - If the author has explicitly acknowledged the issue and provided a clear justification or deferral, treat the issue as **Acknowledged by Author** rather than still present
+> - Do NOT introduce new findings outside the scope of the previous review — focus entirely on verifying the prior issues
+>
+> **Verdict per issue:**
+>
+> - ✅ **Resolved** — the fix is present and correct
+> - ⚠️ **Partially Addressed** — some change was made but the issue is not fully resolved; explain what is still missing
+> - 💬 **Acknowledged by Author** — no code change, but the author replied with a clear justification (intentional trade-off, deferred to another PR, accepted risk, etc.); do not block the PR on this issue
+> - ❌ **Still Present** — no meaningful change and no author acknowledgement; the original issue remains
+>
+> **Overall verdict:**
+>
+> - If ALL previously reported issues are **Resolved** or **Acknowledged by Author** → overall verdict = **APPROVE**
+> - If ANY issue is **Partially Addressed** or **Still Present** → overall verdict = **REQUEST_CHANGES**
+>
+> **Output:** Overwrite `ghpr-code-review/pr_${pr_number}_${pr_branch_name}_review_feedback.md` with an updated report that contains:
+> 1. A header section listing each original issue with its verification verdict (✅ / ⚠️ / ❌) and a brief explanation
+> 2. A final **Summary** section (≤ 200 words) stating the overall verdict (**APPROVE** or **REQUEST_CHANGES**) and what remains to be fixed (if anything)
+
+---
+
+### 2B — Full review (use when `${has_previous_review}` = `false`)
+
+Invoke a general-purpose subagent with the following prompt (replace `${pr_number}` and `${pr_branch_name}` with actual values before invoking):
 
 > You are an expert software engineer doing a comprehensive code review. You are in **read-only** mode: do NOT edit files, run code, install dependencies, run tests, or start servers. You may use Read, Grep, Glob, Bash(git), and MCP tools only for reading and searching.
 >
@@ -168,9 +226,47 @@ All files produced by this command are stored in the directory `ghpr-code-review
 
 ---
 
-## 4. Interactions With Other Commands
+## 4. Fetching PR Comment Threads (gh CLI Reference)
 
-No interactions.
+Used in **Phase 2A** when an issue does not appear resolved by the code diff. These commands retrieve the original review comment and any author replies so their intent can be factored into the verdict.
+
+### Extract the comment ID from a URL
+
+A GitHub review comment URL looks like:
+```
+https://github.com/OWNER/REPO/pull/365#discussion_r3090628650
+```
+The number after `discussion_r` is the **comment ID**.
+
+### Fetch a single comment by ID
+
+```bash
+gh api repos/OWNER/REPO/pulls/comments/COMMENT_ID \
+  --jq '"[\(.created_at)] \(.user.login) on \(.path):\(.line // "?")\n\(.body)"'
+```
+
+### Fetch a full thread (original comment + all replies)
+
+```bash
+COMMENT_ID=<id>
+
+gh api repos/OWNER/REPO/pulls/PR_NUMBER/comments --jq --argjson id "$COMMENT_ID" '
+  . as $all |
+  ($all | map(select(.id == $id))[0]) as $root |
+  ($all | map(select(.in_reply_to_id == $id))) as $replies |
+  ([$root] + $replies) | .[] |
+    "[\(.created_at)] \(.user.login)\n\(.body)\n---"
+'
+```
+
+### Key fields
+
+| Field | Description |
+|-------|-------------|
+| `id` | Unique comment ID (matches the number in `discussion_r<ID>` URL fragment) |
+| `in_reply_to_id` | `null` for top-level comments; parent `id` for replies |
+| `user.login` | GitHub username of the commenter |
+| `body` | Comment text |
 
 ---
 
