@@ -357,8 +357,8 @@ if [ -n "$SESSION_ID" ] && [ "$SESSION_ID" != "null" ] && [ "$SESSION_ID" != "" 
 fi
 
 /agent/agent.sh --yolo \
-    -s "$SYSTEM_PROMPT" \
-    -p "$TASK_PROMPT" \
+    --system-prompt-file "/agent/memory/logs/cycle-${CYCLE_NUM}-system.md" \
+    --task-prompt-file "/agent/memory/logs/cycle-${CYCLE_NUM}-prompt.md" \
     $RESUME_OPT \
     --output-format text \
     2>&1 | tee "/agent/memory/logs/cycle-${CYCLE_NUM}.log" &

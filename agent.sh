@@ -62,6 +62,7 @@ show_usage() {
 # ── Parse arguments ────────────────────────────────────────────
 AGENT_USER=""
 TASK_PROMPT=""
+TASK_PROMPT_FILE=""
 SYSTEM_PROMPT=""
 YOLO_MODE=false
 RESUME_SESSION=""
@@ -86,8 +87,16 @@ while [[ $# -gt 0 ]]; do
             SYSTEM_PROMPT="$2"
             shift 2
             ;;
+        --system-prompt-file)
+            SYSTEM_PROMPT="$(cat "$2" 2>/dev/null)"
+            shift 2
+            ;;
         -p)
             TASK_PROMPT="$2"
+            shift 2
+            ;;
+        --task-prompt-file)
+            TASK_PROMPT_FILE="$2"
             shift 2
             ;;
         --output-format)
@@ -174,11 +183,6 @@ ${claude_system_content}"
         cmd_args+=("--system-prompt" "$final_system_prompt")
     fi
 
-    # Task prompt
-    if [ -n "$TASK_PROMPT" ]; then
-        cmd_args+=("-p" "$TASK_PROMPT")
-    fi
-
     # Resume session
     if [ -n "$RESUME_SESSION" ]; then
         if [ "$RESUME_SESSION" = "last" ]; then
@@ -193,7 +197,15 @@ ${claude_system_content}"
         cmd_args+=("--output-format" "$OUTPUT_FORMAT")
     fi
 
-    run_cmd claude "${cmd_args[@]}"
+    # Task prompt: prefer file redirection (avoids ARG_MAX), fall back to -p flag or no prompt
+    # claude reads stdin as the user prompt when --output-format is set (non-interactive mode)
+    if [ -n "$TASK_PROMPT_FILE" ]; then
+        run_cmd claude "${cmd_args[@]}" < "$TASK_PROMPT_FILE"
+    elif [ -n "$TASK_PROMPT" ]; then
+        printf '%s' "$TASK_PROMPT" | run_cmd claude "${cmd_args[@]}"
+    else
+        run_cmd claude "${cmd_args[@]}"
+    fi
 }
 
 # ══════════════════════════════════════════════════════════════
