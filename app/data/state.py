@@ -12,8 +12,10 @@ from app.data._helpers import _read_json_safe, _pid_alive
 from app.shared import MEMORY_DIR
 
 
-@_mfile_cache(lambda: f"{MEMORY_DIR}/state.json",
-              lambda: {"status": "awaiting_first_heartbeat", "cycle_number": 0})
+@_mfile_cache(
+    lambda: f"{MEMORY_DIR}/state.json",
+    lambda: {"status": "awaiting_first_heartbeat", "cycle_number": 0},
+)
 def load_state(data):
     """Load state.json — mtime-cached, invalidates on every heartbeat write."""
     return data

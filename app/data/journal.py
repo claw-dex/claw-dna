@@ -6,7 +6,6 @@ from app.data._cache import _register_cache
 from app.data._helpers import _read_json_safe
 from app.shared import MEMORY_DIR
 
-
 _JOURNAL_CACHE = _register_cache()
 
 
@@ -17,7 +16,7 @@ def _parse_journal_entries():
     More efficient than TTL-based caching — avoids redundant I/O when multiple
     load_journal(limit=N) calls occur within the same render cycle.
     """
-    active_path  = f"{MEMORY_DIR}/journal.json"
+    active_path = f"{MEMORY_DIR}/journal.json"
     archive_path = f"{MEMORY_DIR}/journal-archive.json"
 
     try:
@@ -54,5 +53,10 @@ def load_journal(limit=20, offset=0):
     """Paginate journal entries from JSON files."""
     all_entries = _parse_journal_entries()
     total = len(all_entries)
-    page = all_entries[offset:offset + limit] if limit > 0 else all_entries[offset:]
-    return {"entries": page, "total": total, "offset": offset, "has_more": (offset + len(page)) < total}
+    page = all_entries[offset : offset + limit] if limit > 0 else all_entries[offset:]
+    return {
+        "entries": page,
+        "total": total,
+        "offset": offset,
+        "has_more": (offset + len(page)) < total,
+    }

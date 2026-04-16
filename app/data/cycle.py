@@ -33,7 +33,9 @@ def load_cycle_velocity():
     """
     try:
         cycles_data = load_cycles() or []
-        completed = [c for c in cycles_data if c.get("status") == "completed" and c.get("start")]
+        completed = [
+            c for c in cycles_data if c.get("status") == "completed" and c.get("start")
+        ]
         if len(completed) < 2:
             return None
         recent = sorted(completed, key=lambda c: c.get("start", ""), reverse=True)[:10]
@@ -87,7 +89,14 @@ def load_cycle_logs():
             except OSError:
                 size_bytes = 0
                 file_mtime = 0
-            cycle_logs.append({"cycle": cycle_num, "path": path, "size": size_bytes, "mtime": file_mtime})
+            cycle_logs.append(
+                {
+                    "cycle": cycle_num,
+                    "path": path,
+                    "size": size_bytes,
+                    "mtime": file_mtime,
+                }
+            )
     cycle_logs.sort(key=lambda x: x["cycle"], reverse=True)
 
     _CYCLE_LOGS_CACHE["data"] = (cycle_logs, dir_mtime)
@@ -176,7 +185,9 @@ def load_balance():
         cycles = []
     categories = {}
     recent_categories = {}
-    evolve_cycles = [c for c in cycles if c.get("type") == "evolve" and c.get("category")]
+    evolve_cycles = [
+        c for c in cycles if c.get("type") == "evolve" and c.get("category")
+    ]
     for c in evolve_cycles:
         cat = c["category"]
         categories[cat] = categories.get(cat, 0) + 1
@@ -184,13 +195,25 @@ def load_balance():
         cat = c["category"]
         recent_categories[cat] = recent_categories.get(cat, 0) + 1
     total = sum(categories.values())
-    all_cats = ["reliability", "observability", "capability", "efficiency", "prompt_evolution"]
+    all_cats = [
+        "reliability",
+        "observability",
+        "capability",
+        "efficiency",
+        "prompt_evolution",
+    ]
 
     # ── Load dynamic weights from evolution_weights.json (written by cycle_start.py) ──
     weights_data = _read_json_safe(weights_path, {})
     weights = weights_data.get("weights", {}) if isinstance(weights_data, dict) else {}
-    goal_signals = weights_data.get("goal_signals", []) if isinstance(weights_data, dict) else []
-    maturity_signals = weights_data.get("maturity_signals", {}) if isinstance(weights_data, dict) else {}
+    goal_signals = (
+        weights_data.get("goal_signals", []) if isinstance(weights_data, dict) else []
+    )
+    maturity_signals = (
+        weights_data.get("maturity_signals", {})
+        if isinstance(weights_data, dict)
+        else {}
+    )
 
     # Use weights-based suggestion if available, else fall back to least-done
     suggestion = None
@@ -237,12 +260,14 @@ def load_activity():
         if not ts:
             continue
         etype = type_map.get(h.get("type"), "bash_cmd")
-        events.append({
-            "time": ts,
-            "type": etype,
-            "summary": (h.get("content") or "")[:120],
-            "detail": h.get("result", ""),
-        })
+        events.append(
+            {
+                "time": ts,
+                "type": etype,
+                "summary": (h.get("content") or "")[:120],
+                "detail": h.get("result", ""),
+            }
+        )
     cycles = load_cycles()
     if isinstance(cycles, list):
         # Only scan the most recent 30 cycles — activity feed only shows 50 events total,
@@ -251,19 +276,23 @@ def load_activity():
         recent_cycles = cycles[-30:] if len(cycles) > 30 else cycles
         for c in recent_cycles:
             if c.get("start"):
-                events.append({
-                    "time": c["start"],
-                    "type": "cycle_start",
-                    "summary": f"Cycle {c.get('cycle', '')} started",
-                    "detail": (c.get("goal") or "")[:120],
-                })
+                events.append(
+                    {
+                        "time": c["start"],
+                        "type": "cycle_start",
+                        "summary": f"Cycle {c.get('cycle', '')} started",
+                        "detail": (c.get("goal") or "")[:120],
+                    }
+                )
             if c.get("end"):
                 dur = c.get("duration_seconds", "?")
-                events.append({
-                    "time": c["end"],
-                    "type": "cycle_end",
-                    "summary": f"Cycle {c.get('cycle', '')} completed ({dur}s)",
-                    "detail": (c.get("goal") or "")[:120],
-                })
+                events.append(
+                    {
+                        "time": c["end"],
+                        "type": "cycle_end",
+                        "summary": f"Cycle {c.get('cycle', '')} completed ({dur}s)",
+                        "detail": (c.get("goal") or "")[:120],
+                    }
+                )
     events.sort(key=lambda e: e.get("time", ""), reverse=True)
     return events[:50]

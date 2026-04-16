@@ -40,14 +40,23 @@ HEALTH_URL = f"{BASE_URL}/_stcore/health"
 
 # ── Result accumulator ──────────────────────────────────────────────────────
 
-results = []   # list of {"name", "passed", "detail", "duration_ms"}
+results = []  # list of {"name", "passed", "detail", "duration_ms"}
+
 
 def _check(name: str, passed: bool, detail: str = "", duration_ms: float = 0.0):
-    results.append({"name": name, "passed": passed, "detail": detail, "duration_ms": round(duration_ms, 1)})
+    results.append(
+        {
+            "name": name,
+            "passed": passed,
+            "detail": detail,
+            "duration_ms": round(duration_ms, 1),
+        }
+    )
     return passed
 
 
 # ── HTTP helpers ────────────────────────────────────────────────────────────
+
 
 def _get(path: str, timeout: float = 5.0):
     """Return (status_code, parsed_json_or_None, elapsed_ms)."""
@@ -70,6 +79,7 @@ def _get(path: str, timeout: float = 5.0):
 
 
 # ── Suite 1: Infrastructure ─────────────────────────────────────────────────
+
 
 def test_server_reachable():
     """Streamlit health endpoint returns 'ok'."""
@@ -102,7 +112,11 @@ def test_memory_files():
         try:
             data = json.loads(path.read_text())
             ok = isinstance(data, expected_type)
-            detail = f"type ok ({expected_type.__name__})" if ok else f"expected {expected_type.__name__}, got {type(data).__name__}"
+            detail = (
+                f"type ok ({expected_type.__name__})"
+                if ok
+                else f"expected {expected_type.__name__}, got {type(data).__name__}"
+            )
             _check(f"mem_{fname}", ok, detail)
         except json.JSONDecodeError as e:
             _check(f"mem_{fname}", False, f"invalid JSON: {e}")
@@ -134,7 +148,11 @@ def test_state_fields():
     else:
         _check("state_heartbeat_fresh", False, "no last_heartbeat")
 
-    _check("state_fields", True, f"cycle={state.get('cycle_number')}, status={state.get('status')!r}")
+    _check(
+        "state_fields",
+        True,
+        f"cycle={state.get('cycle_number')}, status={state.get('status')!r}",
+    )
 
 
 def test_disk_space():
@@ -145,7 +163,11 @@ def test_disk_space():
         total_bytes = stat.f_blocks * stat.f_frsize
         used_pct = 100 * (1 - free_bytes / total_bytes)
         ok = used_pct < 90
-        _check("disk_space", ok, f"{used_pct:.1f}% disk used, {free_bytes // 1024 // 1024}MB free")
+        _check(
+            "disk_space",
+            ok,
+            f"{used_pct:.1f}% disk used, {free_bytes // 1024 // 1024}MB free",
+        )
     except Exception as e:
         _check("disk_space", False, str(e))
 
@@ -160,7 +182,11 @@ def test_disk_space():
                 if f.is_file() and not any(f.is_relative_to(d) for d in SKIP_DIRS)
             )
             ok = total < 1024 * 1024 * 1024
-            _check("disk_workspace_limit", ok, f"workspace {total // 1024 // 1024}MB (excl. browser profile)")
+            _check(
+                "disk_workspace_limit",
+                ok,
+                f"workspace {total // 1024 // 1024}MB (excl. browser profile)",
+            )
     except Exception as e:
         _check("disk_workspace_limit", False, str(e))
 
@@ -171,9 +197,13 @@ def test_streamlit_running():
         with open("/proc/1/status") as f:
             content = f.read()
         name_line = next((l for l in content.splitlines() if l.startswith("Name:")), "")
-        state_line = next((l for l in content.splitlines() if l.startswith("State:")), "")
+        state_line = next(
+            (l for l in content.splitlines() if l.startswith("State:")), ""
+        )
         ok = "Z" not in state_line
-        _check("process_manager_pid1", ok, f"{name_line.strip()} | {state_line.strip()}")
+        _check(
+            "process_manager_pid1", ok, f"{name_line.strip()} | {state_line.strip()}"
+        )
     except Exception as e:
         _check("process_manager_pid1", False, str(e))
 
@@ -188,7 +218,11 @@ def test_messages_dir():
         try:
             data = json.loads(path.read_text())
             ok = isinstance(data, list)
-            _check(f"msg_{fname}", ok, f"{len(data)} items" if ok else f"not a list: {type(data)}")
+            _check(
+                f"msg_{fname}",
+                ok,
+                f"{len(data)} items" if ok else f"not a list: {type(data)}",
+            )
         except json.JSONDecodeError as e:
             _check(f"msg_{fname}", False, f"invalid JSON: {e}")
 
@@ -201,7 +235,9 @@ def test_web_portal_served():
             elapsed = (time.monotonic() - t0) * 1000
             html = resp.read().decode("utf-8", errors="replace")
             ok = resp.status == 200 and len(html) > 100
-            _check("portal_served", ok, f"HTTP {resp.status}, {len(html)} chars", elapsed)
+            _check(
+                "portal_served", ok, f"HTTP {resp.status}, {len(html)} chars", elapsed
+            )
     except Exception as e:
         elapsed = (time.monotonic() - t0) * 1000
         _check("portal_served", False, str(e), elapsed)
@@ -210,8 +246,13 @@ def test_web_portal_served():
 # ── Suite 2: App module imports ─────────────────────────────────────────────
 
 APP_MODULES = [
-    "commands_tab", "glance", "memory_tab", "overview_tab", "system_tab",
+    "commands_tab",
+    "glance",
+    "memory_tab",
+    "overview_tab",
+    "system_tab",
 ]
+
 
 def test_app_module_imports():
     """All app/ modules import cleanly and expose render()."""
@@ -241,6 +282,7 @@ def test_app_module_imports():
 
 # ── Suite 3: Data loader return types ───────────────────────────────────────
 
+
 def test_data_loaders():
     """Key data.py loaders return the expected Python types."""
     try:
@@ -250,25 +292,25 @@ def test_data_loaders():
         return
 
     checks = [
-        ("load_state",          dict,  "state"),
-        ("load_goals",          list,  "goals"),
-        ("load_inbox",          list,  "inbox"),
-        ("load_outbox",         list,  "outbox"),
-        ("load_cycles",         list,  "cycles"),
-        ("load_journal",        dict,  "journal"),
-        ("load_errors",         list,  "errors"),
-        ("load_balance",        dict,  "balance"),
-        ("load_goal_stats",     dict,  "goal_stats"),
-        ("load_cycle_logs",     list,  "cycle_logs"),
-        ("load_system_info",    dict,  "system_info"),
-        ("load_scripts",        list,  "scripts"),
-        ("load_services",       dict,  "services"),
-        ("load_activity",       list,  "activity"),
-        ("load_outbox_history", list,  "outbox_history"),
-        ("load_history",        list,  "history"),
-        ("load_suggest",        list,  "suggest"),
-        ("load_validate",       dict,  "validate"),
-        ("load_logs",           list,  "logs"),
+        ("load_state", dict, "state"),
+        ("load_goals", list, "goals"),
+        ("load_inbox", list, "inbox"),
+        ("load_outbox", list, "outbox"),
+        ("load_cycles", list, "cycles"),
+        ("load_journal", dict, "journal"),
+        ("load_errors", list, "errors"),
+        ("load_balance", dict, "balance"),
+        ("load_goal_stats", dict, "goal_stats"),
+        ("load_cycle_logs", list, "cycle_logs"),
+        ("load_system_info", dict, "system_info"),
+        ("load_scripts", list, "scripts"),
+        ("load_services", dict, "services"),
+        ("load_activity", list, "activity"),
+        ("load_outbox_history", list, "outbox_history"),
+        ("load_history", list, "history"),
+        ("load_suggest", list, "suggest"),
+        ("load_validate", dict, "validate"),
+        ("load_logs", list, "logs"),
     ]
 
     # load_cycle_velocity returns float | None — just verify it doesn't raise
@@ -279,8 +321,16 @@ def test_data_loaders():
             result = fn()
             elapsed = (time.monotonic() - t0) * 1000
             ok = result is None or isinstance(result, (int, float))
-            _check("loader_cycle_velocity", ok,
-                   f"float ok ({result})" if ok else f"unexpected type {type(result).__name__}", elapsed)
+            _check(
+                "loader_cycle_velocity",
+                ok,
+                (
+                    f"float ok ({result})"
+                    if ok
+                    else f"unexpected type {type(result).__name__}"
+                ),
+                elapsed,
+            )
         except Exception as e:
             elapsed = (time.monotonic() - t0) * 1000
             _check("loader_cycle_velocity", False, f"raised: {str(e)[:60]}", elapsed)
@@ -295,7 +345,11 @@ def test_data_loaders():
             result = fn()
             elapsed = (time.monotonic() - t0) * 1000
             ok = isinstance(result, expected_type)
-            detail = f"{expected_type.__name__} ok" if ok else f"expected {expected_type.__name__}, got {type(result).__name__}"
+            detail = (
+                f"{expected_type.__name__} ok"
+                if ok
+                else f"expected {expected_type.__name__}, got {type(result).__name__}"
+            )
             _check(f"loader_{label}", ok, detail, elapsed)
         except Exception as e:
             elapsed = (time.monotonic() - t0) * 1000
@@ -305,11 +359,18 @@ def test_data_loaders():
 # ── Suite 4: Script syntax validation ───────────────────────────────────────
 
 CRITICAL_SCRIPTS = [
-    "cycle_start.py", "cycle_close.py", "memory_repair.py", "memory_backup.py",
-    "self_test.py", "journal_archive.py",
-    "memory_stats.py", "metrics_collector.py",
-    "milestone_report.py", "maintain.py",
+    "cycle_start.py",
+    "cycle_close.py",
+    "memory_repair.py",
+    "memory_backup.py",
+    "self_test.py",
+    "journal_archive.py",
+    "memory_stats.py",
+    "metrics_collector.py",
+    "milestone_report.py",
+    "maintain.py",
 ]
+
 
 def test_scripts_syntax():
     """Key scripts in /agent/scripts/ have valid Python syntax."""
@@ -328,17 +389,26 @@ def test_scripts_syntax():
 
 # ── Suite 5: cycle-start quick smoke test ────────────────────────────────────
 
+
 def test_cycle_start_runs():
     """cycle_start.py --short exits 0 with non-empty output."""
     t0 = time.monotonic()
     try:
         r = subprocess.run(
             ["uv", "run", "python", "scripts/cycle_start.py", "--short"],
-            capture_output=True, text=True, timeout=20, cwd=str(AGENT_DIR),
+            capture_output=True,
+            text=True,
+            timeout=20,
+            cwd=str(AGENT_DIR),
         )
         elapsed = (time.monotonic() - t0) * 1000
         ok = r.returncode == 0 and len(r.stdout.strip()) > 0
-        _check("cycle_start_runs", ok, f"exit={r.returncode}, {len(r.stdout)} chars", elapsed)
+        _check(
+            "cycle_start_runs",
+            ok,
+            f"exit={r.returncode}, {len(r.stdout)} chars",
+            elapsed,
+        )
     except subprocess.TimeoutExpired:
         _check("cycle_start_runs", False, "timed out (20s)")
     except Exception as e:
@@ -346,6 +416,7 @@ def test_cycle_start_runs():
 
 
 # ── Suite 7: Active tab error check ─────────────────────────────────────────
+
 
 def test_no_active_tab_errors():
     """No tab errors younger than 6 hours in server_errors.json."""
@@ -371,7 +442,11 @@ def test_no_active_tab_errors():
             except Exception:
                 pass
         ok = len(active) == 0
-        detail = "0 active tab errors" if ok else f"{len(active)} active: {', '.join(active[:3])}"
+        detail = (
+            "0 active tab errors"
+            if ok
+            else f"{len(active)} active: {', '.join(active[:3])}"
+        )
         _check("no_active_tab_errors", ok, detail)
     except Exception as e:
         _check("no_active_tab_errors", False, str(e)[:80])
@@ -379,13 +454,17 @@ def test_no_active_tab_errors():
 
 # ── Suite 8: AppTest headless render ──────────────────────────────────────────
 
+
 def test_app_render():
     """Headless AppTest render of server.py completes without exception."""
     t0 = time.monotonic()
     try:
         r = subprocess.run(
             ["uv", "run", "python", "scripts/app_check.py"],
-            capture_output=True, text=True, timeout=45, cwd=str(AGENT_DIR),
+            capture_output=True,
+            text=True,
+            timeout=45,
+            cwd=str(AGENT_DIR),
         )
         elapsed = (time.monotonic() - t0) * 1000
         if r.returncode == 3:  # AppTest unavailable — skip
@@ -403,23 +482,24 @@ def test_app_render():
 # ── Suite registry ───────────────────────────────────────────────────────────
 
 SUITES = {
-    "server":      (test_server_reachable,    "Streamlit health endpoint"),
-    "memory":      (test_memory_files,         "Memory file JSON validity"),
-    "state":       (test_state_fields,         "state.json fields + heartbeat freshness"),
-    "disk":        (test_disk_space,           "Disk usage limits"),
-    "process":     (test_streamlit_running,    "Process manager PID 1 alive"),
-    "messages":    (test_messages_dir,         "Message queue files"),
-    "portal":      (test_web_portal_served,    "Portal HTML response"),
-    "imports":     (test_app_module_imports,   "App module imports + render()"),
-    "loaders":     (test_data_loaders,         "Data loader return types"),
-    "syntax":      (test_scripts_syntax,       "Script syntax validity"),
-    "cycle_start": (test_cycle_start_runs,     "cycle_start.py --short smoke test"),
-    "tab_errors":  (test_no_active_tab_errors, "No active tab errors (6h)"),
-    "apptest":     (test_app_render,           "AppTest headless render of server.py"),
+    "server": (test_server_reachable, "Streamlit health endpoint"),
+    "memory": (test_memory_files, "Memory file JSON validity"),
+    "state": (test_state_fields, "state.json fields + heartbeat freshness"),
+    "disk": (test_disk_space, "Disk usage limits"),
+    "process": (test_streamlit_running, "Process manager PID 1 alive"),
+    "messages": (test_messages_dir, "Message queue files"),
+    "portal": (test_web_portal_served, "Portal HTML response"),
+    "imports": (test_app_module_imports, "App module imports + render()"),
+    "loaders": (test_data_loaders, "Data loader return types"),
+    "syntax": (test_scripts_syntax, "Script syntax validity"),
+    "cycle_start": (test_cycle_start_runs, "cycle_start.py --short smoke test"),
+    "tab_errors": (test_no_active_tab_errors, "No active tab errors (6h)"),
+    "apptest": (test_app_render, "AppTest headless render of server.py"),
 }
 
 
 # ── Main runner ──────────────────────────────────────────────────────────────
+
 
 def run_all(fail_fast: bool = False, suite_filter: str = None):
     for name, (fn, _desc) in SUITES.items():
@@ -453,15 +533,17 @@ def record_failures(cycle_hint: int = None):
 
     now = datetime.now(timezone.utc).isoformat()
     descriptions = [f"{f['name']}: {f['detail']}" for f in failed[:5]]
-    journal.append({
-        "cycle": cycle_hint,
-        "timestamp": now,
-        "type": "self-heal",
-        "status": "failed",
-        "goal": "self_test health check",
-        "summary": f"Self-test: {len(failed)} failure(s) — {'; '.join(descriptions)}",
-        "actions": [],
-    })
+    journal.append(
+        {
+            "cycle": cycle_hint,
+            "timestamp": now,
+            "type": "self-heal",
+            "status": "failed",
+            "goal": "self_test health check",
+            "summary": f"Self-test: {len(failed)} failure(s) — {'; '.join(descriptions)}",
+            "actions": [],
+        }
+    )
 
     tmp = journal_path.with_suffix(".tmp")
     tmp.write_text(json.dumps(journal, indent=2))
@@ -483,7 +565,9 @@ def print_report(quiet: bool = False):
             color = "\033[32m" if r["passed"] else "\033[31m"
             reset = "\033[0m"
             ms_str = f"  {r['duration_ms']:.0f}ms" if r["duration_ms"] > 0 else ""
-            print(f"  {r['name']:<{width}}  {color}{status}{reset:<8}  {r['detail']}{ms_str}")
+            print(
+                f"  {r['name']:<{width}}  {color}{status}{reset:<8}  {r['detail']}{ms_str}"
+            )
         print()
 
     print(f"  Results: {len(passed)}/{total} passed", end="")
@@ -509,14 +593,23 @@ def print_json():
 
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser(description="Agent self-test and health check")
     parser.add_argument("--json", action="store_true", help="Output JSON results")
-    parser.add_argument("--record", action="store_true", help="Record failures to journal.json")
-    parser.add_argument("--fail-fast", action="store_true", help="Stop on first failure")
+    parser.add_argument(
+        "--record", action="store_true", help="Record failures to journal.json"
+    )
+    parser.add_argument(
+        "--fail-fast", action="store_true", help="Stop on first failure"
+    )
     parser.add_argument("--quiet", action="store_true", help="Only print summary line")
     parser.add_argument("--cycle", type=int, help="Cycle number for failure recording")
-    parser.add_argument("--suite", choices=list(SUITES.keys()), help="Run only a specific test suite")
-    parser.add_argument("--list-suites", action="store_true", help="List available test suites")
+    parser.add_argument(
+        "--suite", choices=list(SUITES.keys()), help="Run only a specific test suite"
+    )
+    parser.add_argument(
+        "--list-suites", action="store_true", help="List available test suites"
+    )
     args = parser.parse_args()
 
     if args.list_suites:

@@ -108,6 +108,7 @@ def parse_datetime(s: str) -> str:
         # Try to use the agent's configured timezone
         try:
             import zoneinfo
+
             tz_name = os.environ.get("TZ", "UTC")
             tz = zoneinfo.ZoneInfo(tz_name)
             dt = dt.replace(tzinfo=tz)
@@ -197,7 +198,11 @@ def cmd_add(args: list) -> int:
 def cmd_list(args: list) -> int:
     as_json = "--json" in args
     tasks = load_tasks()
-    reminders = [t for t in tasks if t.get("source") == "reminder" or t.get("id", "").startswith("reminder-")]
+    reminders = [
+        t
+        for t in tasks
+        if t.get("source") == "reminder" or t.get("id", "").startswith("reminder-")
+    ]
 
     if not reminders:
         if as_json:
@@ -263,9 +268,13 @@ def cmd_clear(args: list) -> int:
         tasks = load_tasks()
         before = len(tasks)
         tasks = [
-            t for t in tasks
+            t
+            for t in tasks
             if not (
-                (t.get("source") == "reminder" or t.get("id", "").startswith("reminder-"))
+                (
+                    t.get("source") == "reminder"
+                    or t.get("id", "").startswith("reminder-")
+                )
                 and not t.get("enabled", True)
             )
         ]
@@ -299,6 +308,7 @@ def main():
 
 
 # --- Public API (for direct import by services) ---
+
 
 def add_reminder(
     text: str,

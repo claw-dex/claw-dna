@@ -14,22 +14,33 @@ from streamlit_autorefresh import st_autorefresh
 
 from app.shared import _startup_check, heartbeat_freshness
 from app.data import load_state, load_errors, load_cycle_velocity, load_services
-from app import chat, commands_tab, memory_tab, workspace_tab, system_tab, overview_tab, credential_tab, emails_tab, glance, services_tab
+from app import (
+    chat,
+    commands_tab,
+    memory_tab,
+    workspace_tab,
+    system_tab,
+    overview_tab,
+    credential_tab,
+    emails_tab,
+    glance,
+    services_tab,
+)
 
 # ── Tab registry — add/remove tabs by editing this list only ─────────────────
 # Each entry: (label, module, display_name_for_errors[, group])
 # group defaults to "General" if omitted (backward compatible)
 TAB_REGISTRY = [
     # Agent Console — operational tools
-    ("🎛️ Command Center",   commands_tab,   "Command Center",  "Agent Console"),
-    ("📓 Memory",            memory_tab,     "Memory",          "Agent Console"),
-    ("⚙️ System",            system_tab,     "System",          "Agent Console"),
-    ("🔧 Services & Cron",   services_tab,   "Services & Cron", "Agent Console"),
-    ("🔭 Agent Overview",    overview_tab,   "Agent Overview",  "Agent Console"),
+    ("🎛️ Command Center", commands_tab, "Command Center", "Agent Console"),
+    ("📓 Memory", memory_tab, "Memory", "Agent Console"),
+    ("⚙️ System", system_tab, "System", "Agent Console"),
+    ("🔧 Services & Cron", services_tab, "Services & Cron", "Agent Console"),
+    ("🔭 Agent Overview", overview_tab, "Agent Overview", "Agent Console"),
     # Core — file / credential / email management
-    ("📁 Workspace",         workspace_tab,  "Workspace",       "Core"),
-    ("🔑 Credentials",       credential_tab, "Credentials",     "Core"),
-    ("📧 Email",             emails_tab,     "Email",           "Core"),
+    ("📁 Workspace", workspace_tab, "Workspace", "Core"),
+    ("🔑 Credentials", credential_tab, "Credentials", "Core"),
+    ("📧 Email", emails_tab, "Email", "Core"),
 ]
 
 
@@ -41,6 +52,7 @@ def _group_tabs(registry, default_group="General"):
         groups.setdefault(group, []).append((entry[0], entry[1], entry[2]))
     return list(groups.items())
 
+
 # ── Page config (must be first Streamlit call) ────────────────
 st.set_page_config(
     page_title="Autonomous AI Agent",
@@ -48,6 +60,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
 
 # ── Tab-level crash isolation ─────────────────────────────────
 def _is_cache_key_error(exc: Exception) -> bool:
@@ -61,7 +74,11 @@ def _is_cache_key_error(exc: Exception) -> bool:
         return False
     # The key is always a hex MD5 hash string (32 hex chars)
     raw = exc.args[0] if exc.args else ""
-    return isinstance(raw, str) and len(raw) == 32 and all(c in "0123456789abcdef" for c in raw)
+    return (
+        isinstance(raw, str)
+        and len(raw) == 32
+        and all(c in "0123456789abcdef" for c in raw)
+    )
 
 
 def _safe_render(module, tab_name: str):
@@ -95,6 +112,7 @@ def _safe_render(module, tab_name: str):
         try:
             import json, os, time
             from app.shared import ERROR_LOG_PATH, _write_json_atomic
+
             errors = []
             if os.path.exists(ERROR_LOG_PATH):
                 try:
@@ -102,12 +120,14 @@ def _safe_render(module, tab_name: str):
                         errors = json.load(f)
                 except (json.JSONDecodeError, OSError):
                     errors = []
-            errors.append({
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "tab": tab_name,
-                "error": str(exc),
-                "traceback": traceback.format_exc(),
-            })
+            errors.append(
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "tab": tab_name,
+                    "error": str(exc),
+                    "traceback": traceback.format_exc(),
+                }
+            )
             # Keep last 20 errors only
             _write_json_atomic(ERROR_LOG_PATH, errors[-20:], indent=2)
         except Exception:
@@ -116,7 +136,12 @@ def _safe_render(module, tab_name: str):
 
 # ── First-run setup screen ────────────────────────────────────
 def _render_first_run():
-    from app.data import write_first_goal, trigger_bootstrap_heartbeat, load_goals, save_portal_config
+    from app.data import (
+        write_first_goal,
+        trigger_bootstrap_heartbeat,
+        load_goals,
+        save_portal_config,
+    )
 
     st.subheader("Welcome — First Run Setup")
 
@@ -126,7 +151,8 @@ def _render_first_run():
 
     if st.session_state.get("bootstrap_triggered") or already_started:
         goal_text = (
-            goals[0].get("goal") or goals[0].get("content", "") if goals
+            goals[0].get("goal") or goals[0].get("content", "")
+            if goals
             else st.session_state.get("first_goal", "")
         )
         st.success("Goal saved. The agent is bootstrapping...")
@@ -151,6 +177,7 @@ def _render_first_run():
                 height=150,
             )
             from zoneinfo import available_timezones
+
             tz_list = sorted(available_timezones())
             default_idx = tz_list.index("UTC") if "UTC" in tz_list else 0
             selected_tz = st.selectbox(
@@ -224,7 +251,9 @@ _alive_services = sum(1 for s in _services.values() if s.get("alive"))
 st.title("Autonomous AI Agent")
 st.caption("Autonomous AI agent — self-improving, self-healing, self-evolving.")
 
-col_status, col_cycle, col_hb, col_vel, col_svc, col_goal, col_health = st.columns([1, 1, 1, 1, 1, 3, 1])
+col_status, col_cycle, col_hb, col_vel, col_svc, col_goal, col_health = st.columns(
+    [1, 1, 1, 1, 1, 3, 1]
+)
 with col_status:
     st.metric("Status", f"{status_icon} {agent_status}")
 with col_cycle:
@@ -233,17 +262,30 @@ with col_hb:
     st.metric("Heartbeat", f"{hb_icon} {hb_display}")
 with col_vel:
     vel_str = f"{velocity}/hr" if velocity is not None else "—"
-    st.metric("Velocity", vel_str, help="Cycles per hour (rolling last 10 completed cycles)")
+    st.metric(
+        "Velocity", vel_str, help="Cycles per hour (rolling last 10 completed cycles)"
+    )
 with col_svc:
-    _svc_icon = "🟢" if _alive_services == len(_services) and _alive_services > 0 else ("🟡" if _alive_services > 0 else "⚪")
-    st.metric("Services", f"{_svc_icon} {_alive_services}/{len(_services)}", help="Running / total registered services")
+    _svc_icon = (
+        "🟢"
+        if _alive_services == len(_services) and _alive_services > 0
+        else ("🟡" if _alive_services > 0 else "⚪")
+    )
+    st.metric(
+        "Services",
+        f"{_svc_icon} {_alive_services}/{len(_services)}",
+        help="Running / total registered services",
+    )
 with col_goal:
-    _goal_display = (current_goal or "—")[:60] + ("…" if current_goal and len(current_goal) > 60 else "")
+    _goal_display = (current_goal or "—")[:60] + (
+        "…" if current_goal and len(current_goal) > 60 else ""
+    )
     _goal_help = current_goal if current_goal and len(current_goal) > 60 else None
     st.metric("Current Goal", _goal_display, help=_goal_help)
 with col_health:
     try:
         from datetime import timedelta
+
         _errs = load_errors() or []
         _cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
         _recent_errs = [e for e in _errs if e.get("timestamp", "") >= _cutoff]
@@ -285,14 +327,18 @@ else:
         # Multiple groups → group selector + tabs
         group_names = [g for g, _ in grouped]
         selected = st.segmented_control(
-            "Section", group_names, default=group_names[0],
+            "Section",
+            group_names,
+            default=group_names[0],
             label_visibility="collapsed",
         )
         if selected is None:
             selected = group_names[0]
         tabs_in_group = next((t for g, t in grouped if g == selected), [])
         if len(tabs_in_group) > 12:
-            st.caption(f"⚠️ {len(tabs_in_group)} tabs in this section — consider splitting.")
+            st.caption(
+                f"⚠️ {len(tabs_in_group)} tabs in this section — consider splitting."
+            )
         if tabs_in_group:
             tab_objects = st.tabs([label for label, _, _ in tabs_in_group])
             for tab_obj, (_, module, name) in zip(tab_objects, tabs_in_group):

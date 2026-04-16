@@ -67,7 +67,9 @@ def parse_args(argv):
             try:
                 result["k"] = int(args[i])
             except ValueError:
-                print(f"ERROR: --k must be an integer, got: {args[i]!r}", file=sys.stderr)
+                print(
+                    f"ERROR: --k must be an integer, got: {args[i]!r}", file=sys.stderr
+                )
                 sys.exit(1)
         elif a == "--context-only":
             result["context_only"] = True
@@ -86,7 +88,10 @@ def retrieve_context(mv2_path, question, k):
     """Retrieve context from memvid using `memvid ask --context-only --json`."""
     if not shutil.which(MEMVID_BIN):
         print("ERROR: memvid CLI not found. Install with:", file=sys.stderr)
-        print("  curl -fsSL https://raw.githubusercontent.com/memvid/preflight-installer/main/install.sh | bash", file=sys.stderr)
+        print(
+            "  curl -fsSL https://raw.githubusercontent.com/memvid/preflight-installer/main/install.sh | bash",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     mv2 = Path(mv2_path)
@@ -95,10 +100,14 @@ def retrieve_context(mv2_path, question, k):
         sys.exit(1)
 
     cmd = [
-        MEMVID_BIN, "ask", str(mv2),
-        "--question", question,
+        MEMVID_BIN,
+        "ask",
+        str(mv2),
+        "--question",
+        question,
         "--context-only",
-        "--top-k", str(k),
+        "--top-k",
+        str(k),
         "--json",
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
@@ -119,9 +128,17 @@ def retrieve_context(mv2_path, question, k):
         # Clean internal memvid metadata from text
         lines = []
         for line in raw_text.splitlines():
-            if line.startswith(("uri: mv2://", "tags: category", "labels: ",
-                                "category: ", "extractous_metadata:", "memvid.",
-                                "metadata: {")):
+            if line.startswith(
+                (
+                    "uri: mv2://",
+                    "tags: category",
+                    "labels: ",
+                    "category: ",
+                    "extractous_metadata:",
+                    "memvid.",
+                    "metadata: {",
+                )
+            ):
                 continue
             lines.append(line)
         clean_text = "\n".join(lines).strip()
@@ -159,7 +176,13 @@ async def ask_claude(question, context, system_prompt):
         system_prompt=system_prompt,
         permission_mode="bypassPermissions",
         cwd="/agent",
-        allowed_tools=["Glob", "Grep", "Read", "WebFetch", "WebSearch"],  # Readonly tool
+        allowed_tools=[
+            "Glob",
+            "Grep",
+            "Read",
+            "WebFetch",
+            "WebSearch",
+        ],  # Readonly tool
         disallowed_tools=["AskUserQuestion"],
     )
 
@@ -199,8 +222,13 @@ def main():
         sys.exit(0)
 
     if not opts["question"]:
-        print("ERROR: QUESTION is required (first positional argument)", file=sys.stderr)
-        print('Usage: uv run python scripts/memory_ask.py "your question here"', file=sys.stderr)
+        print(
+            "ERROR: QUESTION is required (first positional argument)", file=sys.stderr
+        )
+        print(
+            'Usage: uv run python scripts/memory_ask.py "your question here"',
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     question = opts["question"]
@@ -211,13 +239,18 @@ def main():
 
     if not retrieval["results"]:
         if opts["json_mode"]:
-            print(json.dumps({
-                "question": question,
-                "mv2": mv2_path,
-                "answer": None,
-                "context_hits": 0,
-                "message": "No relevant context found.",
-            }, indent=2))
+            print(
+                json.dumps(
+                    {
+                        "question": question,
+                        "mv2": mv2_path,
+                        "answer": None,
+                        "context_hits": 0,
+                        "message": "No relevant context found.",
+                    },
+                    indent=2,
+                )
+            )
         else:
             print(f'[MEMORY ASK] "{question}"\n')
             print("No relevant context found in the memory store.")
@@ -226,40 +259,56 @@ def main():
     # Step 2: Context-only mode — just show what was retrieved
     if opts["context_only"]:
         if opts["json_mode"]:
-            print(json.dumps({
-                "question": question,
-                "mv2": mv2_path,
-                "context_hits": retrieval["total_hits"],
-                "retrieval_ms": retrieval["stats"].get("retrieval_ms"),
-                "context": retrieval["context"],
-                "results": [
-                    {"title": r.get("title", ""), "score": r.get("score", 0)}
-                    for r in retrieval["results"]
-                ],
-            }, indent=2))
+            print(
+                json.dumps(
+                    {
+                        "question": question,
+                        "mv2": mv2_path,
+                        "context_hits": retrieval["total_hits"],
+                        "retrieval_ms": retrieval["stats"].get("retrieval_ms"),
+                        "context": retrieval["context"],
+                        "results": [
+                            {"title": r.get("title", ""), "score": r.get("score", 0)}
+                            for r in retrieval["results"]
+                        ],
+                    },
+                    indent=2,
+                )
+            )
         else:
-            print(f'[MEMORY ASK] Context for "{question}" '
-                  f'({retrieval["total_hits"]} hits, '
-                  f'{retrieval["stats"].get("retrieval_ms", "?")}ms)\n')
+            print(
+                f'[MEMORY ASK] Context for "{question}" '
+                f'({retrieval["total_hits"]} hits, '
+                f'{retrieval["stats"].get("retrieval_ms", "?")}ms)\n'
+            )
             print(retrieval["context"])
         sys.exit(0)
 
     # Step 3: Synthesize answer with Claude
     if not opts["json_mode"]:
-        print(f'[MEMORY ASK] "{question}" '
-              f'({retrieval["total_hits"]} context hits from {Path(mv2_path).name})\n',
-              file=sys.stderr)
+        print(
+            f'[MEMORY ASK] "{question}" '
+            f'({retrieval["total_hits"]} context hits from {Path(mv2_path).name})\n',
+            file=sys.stderr,
+        )
 
-    answer = asyncio.run(ask_claude(question, retrieval["context"], opts["system_prompt"]))
+    answer = asyncio.run(
+        ask_claude(question, retrieval["context"], opts["system_prompt"])
+    )
 
     if opts["json_mode"]:
-        print(json.dumps({
-            "question": question,
-            "mv2": mv2_path,
-            "answer": answer,
-            "context_hits": retrieval["total_hits"],
-            "retrieval_ms": retrieval["stats"].get("retrieval_ms"),
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "question": question,
+                    "mv2": mv2_path,
+                    "answer": answer,
+                    "context_hits": retrieval["total_hits"],
+                    "retrieval_ms": retrieval["stats"].get("retrieval_ms"),
+                },
+                indent=2,
+            )
+        )
     else:
         print(answer)
 

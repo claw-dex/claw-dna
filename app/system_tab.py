@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 
 import streamlit as st
 
-
 _CATEGORY_ORDER = [
     "Cycle Management",
     "Memory",
@@ -37,11 +36,31 @@ _SCRIPT_ARGS: dict[str, list] = {
         {"flag": "--clear-all-errors", "help": "Purge ALL tab errors"},
     ],
     "cycle_close.py": [
-        {"flag": "--type", "help": "evolve | goal | self-heal", "placeholder": "evolve"},
-        {"flag": "--summary", "help": "1-2 sentence summary (required)", "placeholder": "text"},
-        {"flag": "--cycle", "help": "Cycle number (auto-detect if omitted)", "placeholder": "N"},
-        {"flag": "--category", "help": "For evolve: reliability | observability | capability | efficiency", "placeholder": "capability"},
-        {"flag": "--status", "help": "completed (default) | failed", "placeholder": "completed"},
+        {
+            "flag": "--type",
+            "help": "evolve | goal | self-heal",
+            "placeholder": "evolve",
+        },
+        {
+            "flag": "--summary",
+            "help": "1-2 sentence summary (required)",
+            "placeholder": "text",
+        },
+        {
+            "flag": "--cycle",
+            "help": "Cycle number (auto-detect if omitted)",
+            "placeholder": "N",
+        },
+        {
+            "flag": "--category",
+            "help": "For evolve: reliability | observability | capability | efficiency",
+            "placeholder": "capability",
+        },
+        {
+            "flag": "--status",
+            "help": "completed (default) | failed",
+            "placeholder": "completed",
+        },
         {"flag": "--no-normalize", "help": "Skip cycles.json normalization step"},
         {"flag": "--dry-run", "help": "Preview what would be written"},
     ],
@@ -66,44 +85,86 @@ _SCRIPT_ARGS: dict[str, list] = {
         {"flag": "--dry-run", "help": "Preview what restore would do"},
         {"flag": "--json", "help": "Output as JSON"},
         {"flag": "--quiet", "help": "Suppress output"},
-        {"flag": "--restore", "help": "Restore a backup (timestamp or 'latest')", "placeholder": "latest"},
-        {"flag": "--prune", "help": "Keep only N most recent backups", "placeholder": "5"},
-        {"flag": "--label", "help": "Label for the backup", "placeholder": "pre-deploy"},
+        {
+            "flag": "--restore",
+            "help": "Restore a backup (timestamp or 'latest')",
+            "placeholder": "latest",
+        },
+        {
+            "flag": "--prune",
+            "help": "Keep only N most recent backups",
+            "placeholder": "5",
+        },
+        {
+            "flag": "--label",
+            "help": "Label for the backup",
+            "placeholder": "pre-deploy",
+        },
     ],
     "journal_archive.py": [
         {"flag": "--dry-run", "help": "Preview without modifying files"},
         {"flag": "--list", "help": "Show entry counts and file sizes"},
         {"flag": "--json", "help": "Output as JSON"},
         {"flag": "--keep", "help": "Keep N most recent entries", "placeholder": "20"},
-        {"flag": "--search", "help": "Search across journal by keyword", "placeholder": "keyword"},
+        {
+            "flag": "--search",
+            "help": "Search across journal by keyword",
+            "placeholder": "keyword",
+        },
     ],
     "memory_ask.py": [
         {"flag": "--k", "help": "Max retrieval results", "placeholder": "20"},
-        {"flag": "--context-only", "help": "Show retrieved context without Claude synthesis"},
+        {
+            "flag": "--context-only",
+            "help": "Show retrieved context without Claude synthesis",
+        },
         {"flag": "--json", "help": "Output as JSON"},
     ],
     "memory_recall.py": [
         {"flag": "--k", "help": "Number of results to return", "placeholder": "5"},
-        {"flag": "--timeline", "help": "Show timeline entries instead of semantic search"},
-        {"flag": "--since", "help": "Filter entries since date (ISO format)", "placeholder": "2024-01-01"},
-        {"flag": "--until", "help": "Filter entries until date (ISO format)", "placeholder": "2024-12-31"},
+        {
+            "flag": "--timeline",
+            "help": "Show timeline entries instead of semantic search",
+        },
+        {
+            "flag": "--since",
+            "help": "Filter entries since date (ISO format)",
+            "placeholder": "2024-01-01",
+        },
+        {
+            "flag": "--until",
+            "help": "Filter entries until date (ISO format)",
+            "placeholder": "2024-12-31",
+        },
         {"flag": "--json", "help": "Output as JSON"},
     ],
     "memory_ingest.py": [
-        {"type": "select", "label": "Mode", "options": [
-            ("--build", "Rebuild .mv2 index from scratch"),
-            ("--append-json", "Append a single entry (JSON string or @file.json)"),
-            ("--append-text", "Ingest raw text directly"),
-            ("--append-file", "Ingest a file (PDF, DOCX, TXT, MD, etc.)"),
-        ]},
-        {"flag": "--title", "help": "Title for appended entry", "placeholder": "My note"},
+        {
+            "type": "select",
+            "label": "Mode",
+            "options": [
+                ("--build", "Rebuild .mv2 index from scratch"),
+                ("--append-json", "Append a single entry (JSON string or @file.json)"),
+                ("--append-text", "Ingest raw text directly"),
+                ("--append-file", "Ingest a file (PDF, DOCX, TXT, MD, etc.)"),
+            ],
+        },
+        {
+            "flag": "--title",
+            "help": "Title for appended entry",
+            "placeholder": "My note",
+        },
         {"flag": "--dry-run", "help": "Preview without writing"},
         {"flag": "--json", "help": "Output as JSON"},
         {"flag": "--quiet", "help": "Suppress progress output"},
     ],
     "memory_sync.py": [
         {"flag": "--dry-run", "help": "Preview only, do not write .md files"},
-        {"flag": "--only", "help": "Comma-separated sync targets", "placeholder": "capabilities,services,state"},
+        {
+            "flag": "--only",
+            "help": "Comma-separated sync targets",
+            "placeholder": "capabilities,services,state",
+        },
     ],
     # Diagnostics
     "self_test.py": [
@@ -112,13 +173,25 @@ _SCRIPT_ARGS: dict[str, list] = {
         {"flag": "--fail-fast", "help": "Stop on first failure"},
         {"flag": "--quiet", "help": "Only print summary"},
         {"flag": "--list-suites", "help": "List available test suites"},
-        {"flag": "--suite", "help": "Run specific test suite only", "placeholder": "suite_name"},
-        {"flag": "--cycle", "help": "Cycle number for failure recording", "placeholder": "N"},
+        {
+            "flag": "--suite",
+            "help": "Run specific test suite only",
+            "placeholder": "suite_name",
+        },
+        {
+            "flag": "--cycle",
+            "help": "Cycle number for failure recording",
+            "placeholder": "N",
+        },
     ],
     "maintain.py": [
         {"flag": "--fix", "help": "Run checks and apply fixes (default: report only)"},
         {"flag": "--json", "help": "Output results as JSON"},
-        {"flag": "--check", "help": "Run specific check only", "placeholder": "check_name"},
+        {
+            "flag": "--check",
+            "help": "Run specific check only",
+            "placeholder": "check_name",
+        },
     ],
     "metrics_collector.py": [
         {"flag": "--report", "help": "Print last snapshots as table"},
@@ -132,45 +205,78 @@ _SCRIPT_ARGS: dict[str, list] = {
     ],
     # Services / Portal
     "service_manager.py": [
-        {"type": "select", "label": "Command", "options": [
-            ("list", "Show all managed services"),
-            ("health", "Health check all services"),
-            ("cleanup", "Remove dead entries"),
-            ("start", "Start a service (add: name port -- cmd...)"),
-            ("stop", "Stop a service (add: name)"),
-            ("status", "Check one service (add: name)"),
-        ]},
+        {
+            "type": "select",
+            "label": "Command",
+            "options": [
+                ("list", "Show all managed services"),
+                ("health", "Health check all services"),
+                ("cleanup", "Remove dead entries"),
+                ("start", "Start a service (add: name port -- cmd...)"),
+                ("stop", "Stop a service (add: name)"),
+                ("status", "Check one service (add: name)"),
+            ],
+        },
     ],
     "portal_config.py": [
-        {"type": "select", "label": "Subcommand", "options": [
-            ("hostname", "Manage public hostname"),
-            ("timezone", "Manage timezone"),
-            ("auth", "Manage authentication"),
-        ]},
-        {"flag": "--set", "help": "Set value (hostname URL, timezone, or auth user:pass)", "placeholder": "value"},
+        {
+            "type": "select",
+            "label": "Subcommand",
+            "options": [
+                ("hostname", "Manage public hostname"),
+                ("timezone", "Manage timezone"),
+                ("auth", "Manage authentication"),
+            ],
+        },
+        {
+            "flag": "--set",
+            "help": "Set value (hostname URL, timezone, or auth user:pass)",
+            "placeholder": "value",
+        },
         {"flag": "--show", "help": "Show current value"},
         {"flag": "--clear", "help": "Clear value (hostname/timezone only)"},
-        {"flag": "--enable", "help": "Enable auth (auth subcommand only)", "placeholder": "user:pass"},
+        {
+            "flag": "--enable",
+            "help": "Enable auth (auth subcommand only)",
+            "placeholder": "user:pass",
+        },
         {"flag": "--disable", "help": "Disable auth (auth subcommand only)"},
-        {"flag": "--reapply", "help": "Re-apply auth from saved creds (auth subcommand only)"},
-        {"flag": "--rollback", "help": "Force-remove auth route (auth subcommand only)"},
+        {
+            "flag": "--reapply",
+            "help": "Re-apply auth from saved creds (auth subcommand only)",
+        },
+        {
+            "flag": "--rollback",
+            "help": "Force-remove auth route (auth subcommand only)",
+        },
     ],
     "scheduler.py": [
-        {"type": "select", "label": "Action", "options": [
-            ("--check", "Evaluate and inject due tasks"),
-            ("--list", "List all scheduled tasks"),
-        ]},
+        {
+            "type": "select",
+            "label": "Action",
+            "options": [
+                ("--check", "Evaluate and inject due tasks"),
+                ("--list", "List all scheduled tasks"),
+            ],
+        },
     ],
     "keepass.py": [
-        {"type": "select", "label": "Command", "options": [
-            ("init", "Create KeePass database"),
-            ("list", "List all entries"),
-            ("get", "Get entry (add: title)"),
-            ("store", "Store credential (add: --title T --username U --password P)"),
-            ("delete", "Delete entry (add: title)"),
-            ("groups", "List all groups"),
-            ("search", "Search entries (add: query)"),
-        ]},
+        {
+            "type": "select",
+            "label": "Command",
+            "options": [
+                ("init", "Create KeePass database"),
+                ("list", "List all entries"),
+                ("get", "Get entry (add: title)"),
+                (
+                    "store",
+                    "Store credential (add: --title T --username U --password P)",
+                ),
+                ("delete", "Delete entry (add: title)"),
+                ("groups", "List all groups"),
+                ("search", "Search entries (add: query)"),
+            ],
+        },
         {"flag": "--json", "help": "Output as JSON"},
     ],
     "milestone_report.py": [
@@ -181,17 +287,21 @@ _SCRIPT_ARGS: dict[str, list] = {
     ],
     # Notes / Reminders / Emails
     "notes.py": [
-        {"type": "select", "label": "Subcommand", "options": [
-            ("add", "Add a new note"),
-            ("list", "List notes"),
-            ("get", "Get a note by ID"),
-            ("search", "Search notes"),
-            ("edit", "Edit a note"),
-            ("delete", "Delete a note"),
-            ("tags", "List all tags"),
-            ("export", "Export notes"),
-            ("stats", "Show statistics"),
-        ]},
+        {
+            "type": "select",
+            "label": "Subcommand",
+            "options": [
+                ("add", "Add a new note"),
+                ("list", "List notes"),
+                ("get", "Get a note by ID"),
+                ("search", "Search notes"),
+                ("edit", "Edit a note"),
+                ("delete", "Delete a note"),
+                ("tags", "List all tags"),
+                ("export", "Export notes"),
+                ("stats", "Show statistics"),
+            ],
+        },
         {"flag": "--id", "help": "Note ID", "placeholder": "abc123"},
         {"flag": "--title", "help": "Note title", "placeholder": "My note"},
         {"flag": "--content", "help": "Note body", "placeholder": "text"},
@@ -203,14 +313,22 @@ _SCRIPT_ARGS: dict[str, list] = {
         {"flag": "--json", "help": "Output as JSON"},
     ],
     "reminder.py": [
-        {"type": "select", "label": "Subcommand", "options": [
-            ("add", "Add a reminder"),
-            ("list", "List reminders"),
-            ("delete", "Delete a reminder"),
-            ("clear", "Remove all fired/disabled reminders"),
-        ]},
+        {
+            "type": "select",
+            "label": "Subcommand",
+            "options": [
+                ("add", "Add a reminder"),
+                ("list", "List reminders"),
+                ("delete", "Delete a reminder"),
+                ("clear", "Remove all fired/disabled reminders"),
+            ],
+        },
         {"flag": "--text", "help": "Reminder message", "placeholder": "text"},
-        {"flag": "--at", "help": "Fire once at this time (ISO 8601)", "placeholder": "2024-06-01T09:00:00"},
+        {
+            "flag": "--at",
+            "help": "Fire once at this time (ISO 8601)",
+            "placeholder": "2024-06-01T09:00:00",
+        },
         {"flag": "--every", "help": "Fire every N minutes", "placeholder": "60"},
         {"flag": "--cron", "help": "Cron schedule pattern", "placeholder": "0 9 * * 1"},
         {"flag": "--priority", "help": "Priority 1-5 (1=highest)", "placeholder": "1"},
@@ -218,46 +336,64 @@ _SCRIPT_ARGS: dict[str, list] = {
         {"flag": "--json", "help": "Output as JSON"},
     ],
     "email_imap.py": [
-        {"type": "select", "label": "Subcommand", "options": [
-            ("auth", "Verify IMAP credentials"),
-            ("fetch", "Fetch emails"),
-            ("search", "Search emails"),
-            ("delete", "Delete emails by UID"),
-        ]},
+        {
+            "type": "select",
+            "label": "Subcommand",
+            "options": [
+                ("auth", "Verify IMAP credentials"),
+                ("fetch", "Fetch emails"),
+                ("search", "Search emails"),
+                ("delete", "Delete emails by UID"),
+            ],
+        },
         {"flag": "--mailbox", "help": "IMAP mailbox", "placeholder": "INBOX"},
-        {"flag": "--filter", "help": "Email filter: unseen, seen, or all", "placeholder": "all"},
+        {
+            "flag": "--filter",
+            "help": "Email filter: unseen, seen, or all",
+            "placeholder": "all",
+        },
         {"flag": "--max", "help": "Max emails to fetch", "placeholder": "20"},
         {"flag": "--query", "help": "Search query text", "placeholder": "keyword"},
-        {"flag": "--field", "help": "Field to search: subject, from, or text", "placeholder": "text"},
-        {"flag": "--uid", "help": "One or more IMAP UIDs to delete (space-separated)", "placeholder": "123 456"},
+        {
+            "flag": "--field",
+            "help": "Field to search: subject, from, or text",
+            "placeholder": "text",
+        },
+        {
+            "flag": "--uid",
+            "help": "One or more IMAP UIDs to delete (space-separated)",
+            "placeholder": "123 456",
+        },
         {"flag": "--json", "help": "Output as JSON"},
-    ]
+    ],
 }
 
 
 _MEMORY_FILE_LABELS = {
-    "state.json":                 ("Agent State", "Core agent status, cycle number, last heartbeat"),
-    "goal.json":                  ("Goals", "Pending / completed goals from user"),
-    "journal.json":               ("Journal (active)", "Recent cycle journal entries"),
-    "journal-archive.json":       ("Journal (archive)", "Archived older journal entries"),
-    "cycles.json":                ("Cycles", "Complete cycle history with durations"),
-    "outbox.json":                ("Outbox", "Pending messages for the user"),
-    "outbox_history.json":        ("Outbox History", "All past agent→user messages"),
-    "server_errors.json":         ("Tab Errors", "Portal tab crash errors"),
-    "bootstrap.json":             ("Bootstrap Config", "First-cycle initialization data (stable)"),
-    "command_history.json":       ("Command History", "Agent Console command history"),
-    "link_cache.json":            ("Link Cache", "URL health check cache (link-checker.py)"),
+    "state.json": ("Agent State", "Core agent status, cycle number, last heartbeat"),
+    "goal.json": ("Goals", "Pending / completed goals from user"),
+    "journal.json": ("Journal (active)", "Recent cycle journal entries"),
+    "journal-archive.json": ("Journal (archive)", "Archived older journal entries"),
+    "cycles.json": ("Cycles", "Complete cycle history with durations"),
+    "outbox.json": ("Outbox", "Pending messages for the user"),
+    "outbox_history.json": ("Outbox History", "All past agent→user messages"),
+    "server_errors.json": ("Tab Errors", "Portal tab crash errors"),
+    "bootstrap.json": ("Bootstrap Config", "First-cycle initialization data (stable)"),
+    "command_history.json": ("Command History", "Agent Console command history"),
+    "link_cache.json": ("Link Cache", "URL health check cache (link-checker.py)"),
 }
 
-_MEMORY_SIZE_WARN_KB = 500   # warn if file exceeds this
+_MEMORY_SIZE_WARN_KB = 500  # warn if file exceeds this
 _MEMORY_SIZE_CRIT_KB = 2000  # critical if file exceeds this
 _MEMORY_AGE_WARN_HOURS = 24  # warn if file not updated in this many hours
 _MEMORY_AGE_CRIT_HOURS = 72  # critical if not updated in this many hours
 
 # Files that are intentionally infrequently updated — skip age checks for these
 _MEMORY_AGE_EXEMPT = {
-    "bootstrap.json", "link_cache.json",
-    "command_history.json", "outbox_history.json",
+    "bootstrap.json",
+    "link_cache.json",
+    "command_history.json",
+    "outbox_history.json",
 }
 
 
@@ -285,7 +421,8 @@ def _render_memory_files_health():
 
     try:
         all_files = sorted(
-            f for f in os.listdir(memory_dir)
+            f
+            for f in os.listdir(memory_dir)
             if f.endswith(".json") and not f.endswith(".backup")
         )
     except OSError:
@@ -341,19 +478,21 @@ def _render_memory_files_health():
         else:
             age_str = f"{age_hours / 24:.1f}d ago"
 
-        rows.append({
-            "fname": fname,
-            "label": label,
-            "desc": desc,
-            "size_kb": size_kb,
-            "entry_count": entry_count,
-            "age_str": age_str,
-            "age_hours": age_hours,
-            "age_exempt": age_exempt,
-            "health": health,
-            "size_warn": size_warn or size_crit,
-            "age_warn": age_warn or age_crit,
-        })
+        rows.append(
+            {
+                "fname": fname,
+                "label": label,
+                "desc": desc,
+                "size_kb": size_kb,
+                "entry_count": entry_count,
+                "age_str": age_str,
+                "age_hours": age_hours,
+                "age_exempt": age_exempt,
+                "health": health,
+                "size_warn": size_warn or size_crit,
+                "age_warn": age_warn or age_crit,
+            }
+        )
 
     # Summary strip
     ok_count = len(rows) - warn_count - crit_count
@@ -380,26 +519,26 @@ def _render_memory_files_health():
         icon = health_icons[r["health"]]
         size_str = f"{r['size_kb']:.1f} KB"
         size_color = (
-            "#f44336" if r["size_kb"] >= _MEMORY_SIZE_CRIT_KB
-            else "#ff9800" if r["size_kb"] >= _MEMORY_SIZE_WARN_KB
-            else "#888"
+            "#f44336"
+            if r["size_kb"] >= _MEMORY_SIZE_CRIT_KB
+            else "#ff9800" if r["size_kb"] >= _MEMORY_SIZE_WARN_KB else "#888"
         )
         age_color = (
-            "#f44336" if r["age_hours"] >= _MEMORY_AGE_CRIT_HOURS
-            else "#ff9800" if r["age_hours"] >= _MEMORY_AGE_WARN_HOURS
-            else "#888"
+            "#f44336"
+            if r["age_hours"] >= _MEMORY_AGE_CRIT_HOURS
+            else "#ff9800" if r["age_hours"] >= _MEMORY_AGE_WARN_HOURS else "#888"
         )
         rows_html.append(
-            f'<tr>'
+            f"<tr>"
             f'<td style="padding:3px 8px;font-size:12px">{icon}</td>'
             f'<td style="padding:3px 8px;font-size:12px;font-weight:600;white-space:nowrap">'
             f'<code style="background:#1a1a1a;padding:1px 4px;border-radius:3px">{r["fname"]}</code>'
-            f'</td>'
+            f"</td>"
             f'<td style="padding:3px 8px;font-size:11px;color:#aaa">{r["label"]}</td>'
             f'<td style="padding:3px 8px;font-size:11px;color:{size_color};text-align:right">{size_str}</td>'
             f'<td style="padding:3px 8px;font-size:11px;color:#888;text-align:right">{r["entry_count"]}</td>'
             f'<td style="padding:3px 8px;font-size:11px;color:{age_color};text-align:right;white-space:nowrap">{r["age_str"]}</td>'
-            f'</tr>'
+            f"</tr>"
         )
 
     st.markdown(
@@ -412,10 +551,10 @@ def _render_memory_files_health():
         f'<th style="padding:4px 8px;font-size:11px;color:#666;text-align:right">Size</th>'
         f'<th style="padding:4px 8px;font-size:11px;color:#666;text-align:right">Entries</th>'
         f'<th style="padding:4px 8px;font-size:11px;color:#666;text-align:right">Updated</th>'
-        f'</tr></thead>'
+        f"</tr></thead>"
         f'<tbody>{"".join(rows_html)}</tbody>'
-        f'</table>'
-        f'</div>',
+        f"</table>"
+        f"</div>",
         unsafe_allow_html=True,
     )
 
@@ -438,8 +577,12 @@ def _render_memory_files_health():
 
 def render():
     from app.data import (
-        load_system_info, load_errors, load_validate,
-        load_scripts, run_script, load_cycle_logs,
+        load_system_info,
+        load_errors,
+        load_validate,
+        load_scripts,
+        run_script,
+        load_cycle_logs,
     )
     from app.shared import ERROR_LOG_PATH, _write_json_atomic
 
@@ -453,7 +596,9 @@ def render():
         mem = info.get("memory")
         if mem:
             pct = mem.get("percent", 0)
-            st.metric("Memory", f"{mem.get('used_mb', 0)} MB / {mem.get('total_mb', 0)} MB")
+            st.metric(
+                "Memory", f"{mem.get('used_mb', 0)} MB / {mem.get('total_mb', 0)} MB"
+            )
             st.progress(min(pct / 100, 1.0), text=f"{pct}% used")
         else:
             st.caption("Memory: N/A")
@@ -462,7 +607,9 @@ def render():
         disk = info.get("disk")
         if disk:
             pct = disk.get("percent", 0)
-            st.metric("Disk", f"{disk.get('used_gb', 0)} GB / {disk.get('total_gb', 0)} GB")
+            st.metric(
+                "Disk", f"{disk.get('used_gb', 0)} GB / {disk.get('total_gb', 0)} GB"
+            )
             st.progress(min(pct / 100, 1.0), text=f"{pct}% used")
         else:
             st.caption("Disk: N/A")
@@ -488,10 +635,14 @@ def render():
             st.caption("No scripts found in /agent/scripts/")
         else:
             script_names = [s["name"] for s in scripts]
-            selected_script = st.selectbox("Script", script_names, key="run_script_select")
+            selected_script = st.selectbox(
+                "Script", script_names, key="run_script_select"
+            )
 
             # Show script description
-            script_info = next((s for s in scripts if s["name"] == selected_script), None)
+            script_info = next(
+                (s for s in scripts if s["name"] == selected_script), None
+            )
             if script_info and script_info.get("description"):
                 st.caption(script_info["description"])
 
@@ -581,6 +732,7 @@ def render():
     else:
         # Separate resolved (old) from recent errors (last 24h)
         from datetime import timedelta
+
         now_utc = datetime.now(timezone.utc)
         recent, older = [], []
         for err in errors:
@@ -737,7 +889,9 @@ def render():
         st.caption(f"{total_logs} cycle logs · {total_kb:.0f} KB total")
 
         # Selector: choose a cycle to view
-        cycle_options = [f"Cycle {c['cycle']} ({c['size'] // 1024 or 1} KB)" for c in cycle_logs]
+        cycle_options = [
+            f"Cycle {c['cycle']} ({c['size'] // 1024 or 1} KB)" for c in cycle_logs
+        ]
         selected_idx = st.selectbox(
             "Select cycle to view",
             range(len(cycle_options)),
@@ -764,4 +918,3 @@ def render():
             key=f"dl_cycle_log_{selected['cycle']}",
         )
         st.code(log_content, language="markdown")
-

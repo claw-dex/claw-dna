@@ -9,6 +9,7 @@ def _show_image(path: str, caption: str) -> None:
     """Render an image from a local file path using PIL bytes (most robust approach)."""
     try:
         from PIL import Image
+
         with open(path, "rb") as f:
             data = f.read()
         img = Image.open(io.BytesIO(data))
@@ -19,8 +20,14 @@ def _show_image(path: str, caption: str) -> None:
 
 def render():
     from app.data import (
-        load_journal, load_goals, load_logs, load_log_detail,
-        load_history, load_cycles, load_memory_files, read_memory_file,
+        load_journal,
+        load_goals,
+        load_logs,
+        load_log_detail,
+        load_history,
+        load_cycles,
+        load_memory_files,
+        read_memory_file,
         search as do_search,
     )
 
@@ -40,7 +47,12 @@ def render():
         else:
             for r in results["results"]:
                 source = r.get("source", "")
-                icon = {"journal": "📓", "goal": "🎯", "cycle": "🔄", "history": "📜"}.get(source, "•")
+                icon = {
+                    "journal": "📓",
+                    "goal": "🎯",
+                    "cycle": "🔄",
+                    "history": "📜",
+                }.get(source, "•")
                 with st.expander(f"{icon} [{source}] {r.get('title', '')[:80]}"):
                     st.write(r.get("snippet", ""))
                     meta = []
@@ -83,7 +95,11 @@ def render():
                 goal = entry.get("goal", "Unknown")
                 status = entry.get("status", "completed")
                 ts = str(entry.get("timestamp", ""))[:19].replace("T", " ")
-                status_icon = {"completed": "✅", "failed": "❌", "in_progress": "🔄"}.get(status, "⏳")
+                status_icon = {
+                    "completed": "✅",
+                    "failed": "❌",
+                    "in_progress": "🔄",
+                }.get(status, "⏳")
 
                 with st.expander(f"{status_icon} Cycle {cycle} — {goal[:60]} `{ts}`"):
                     entry_type = entry.get("type", "")
@@ -91,7 +107,10 @@ def render():
                     actions = entry.get("actions", [])
                     summary = entry.get("summary") or entry.get("outcome", "")
                     if entry_type:
-                        st.caption(f"Type: {entry_type}" + (f" · Category: {category}" if category else ""))
+                        st.caption(
+                            f"Type: {entry_type}"
+                            + (f" · Category: {category}" if category else "")
+                        )
                     st.markdown(f"**Goal:** {goal}")
                     if actions:
                         st.markdown("**Actions:**")
@@ -136,28 +155,43 @@ def render():
                 duration = log.get("duration_seconds")
                 dur_str = f" ({duration}s)" if duration is not None else ""
 
-                status_badge = {"completed": "✅", "failed": "❌", "running": "⏳", "exited": "⚠️"}.get(status, "•")
+                status_badge = {
+                    "completed": "✅",
+                    "failed": "❌",
+                    "running": "⏳",
+                    "exited": "⚠️",
+                }.get(status, "•")
 
                 col1, col2 = st.columns([4, 1])
                 with col1:
-                    st.markdown(f"{status_badge} **#{num}** `{cmd}` — {started}{dur_str}")
+                    st.markdown(
+                        f"{status_badge} **#{num}** `{cmd}` — {started}{dur_str}"
+                    )
                 detail_key = f"mem_show_log_{num}"
                 with col2:
                     if st.button("Details", key=f"mem_log_detail_btn_{i}_{num}"):
-                        st.session_state[detail_key] = not st.session_state.get(detail_key, False)
+                        st.session_state[detail_key] = not st.session_state.get(
+                            detail_key, False
+                        )
 
                 if st.session_state.get(detail_key, False):
                     detail = load_log_detail(num)
                     if detail:
                         with st.container():
-                            st.caption(f"PID: {detail.get('pid')} | Exit code: {detail.get('exit_code', 'N/A')}")
+                            st.caption(
+                                f"PID: {detail.get('pid')} | Exit code: {detail.get('exit_code', 'N/A')}"
+                            )
                             tab_out, tab_err = st.tabs(["stdout", "stderr"])
                             with tab_out:
                                 stdout = detail.get("stdout", "")
-                                st.code(stdout if stdout else "(empty)", language="text")
+                                st.code(
+                                    stdout if stdout else "(empty)", language="text"
+                                )
                             with tab_err:
                                 stderr = detail.get("stderr", "")
-                                st.code(stderr if stderr else "(empty)", language="text")
+                                st.code(
+                                    stderr if stderr else "(empty)", language="text"
+                                )
                             if st.button("Refresh", key=f"mem_refresh_log_{num}"):
                                 load_log_detail.clear()
                                 st.rerun()
@@ -201,7 +235,11 @@ def render():
                     c_status = cycle.get("status", "unknown")
                     dur = cycle.get("duration_seconds")
                     cycle_type = cycle.get("type", "")
-                    c_icon = {"completed": "✅", "failed": "❌", "in_progress": "🔄"}.get(c_status, "⏳")
+                    c_icon = {
+                        "completed": "✅",
+                        "failed": "❌",
+                        "in_progress": "🔄",
+                    }.get(c_status, "⏳")
                     st.markdown(f"{c_icon} **#{cycle_num}**")
                     if cycle_type:
                         st.caption(cycle_type[:12])
@@ -211,14 +249,16 @@ def render():
             with st.expander(f"All {len(cycles)} cycles"):
                 rows = []
                 for c in reversed(cycles):
-                    rows.append({
-                        "Cycle": c.get("cycle", ""),
-                        "Type": c.get("type", ""),
-                        "Status": c.get("status", ""),
-                        "Duration (s)": c.get("duration_seconds"),
-                        "Goal": (c.get("goal") or "")[:60],
-                        "Start": str(c.get("start", ""))[:19].replace("T", " "),
-                    })
+                    rows.append(
+                        {
+                            "Cycle": c.get("cycle", ""),
+                            "Type": c.get("type", ""),
+                            "Status": c.get("status", ""),
+                            "Duration (s)": c.get("duration_seconds"),
+                            "Goal": (c.get("goal") or "")[:60],
+                            "Start": str(c.get("start", ""))[:19].replace("T", " "),
+                        }
+                    )
                 st.dataframe(rows, width="stretch")
 
     # ── Goals sub-tab ─────────────────────────────────────────
@@ -236,9 +276,18 @@ def render():
                 ["all"] + all_statuses,
                 key="mem_goal_status_filter",
             )
-            filtered = goals if selected_status == "all" else [g for g in goals if g.get("status") == selected_status]
+            filtered = (
+                goals
+                if selected_status == "all"
+                else [g for g in goals if g.get("status") == selected_status]
+            )
 
-            status_icons = {"completed": "✅", "failed": "❌", "in_progress": "🔄", "pending": "⏳"}
+            status_icons = {
+                "completed": "✅",
+                "failed": "❌",
+                "in_progress": "🔄",
+                "pending": "⏳",
+            }
 
             # Summary metrics
             total = len(goals)
@@ -265,7 +314,9 @@ def render():
                 g_status = g.get("status", "unknown")
                 icon = status_icons.get(g_status, "•")
                 content = g.get("content") or g.get("goal") or ""
-                created = (g.get("created_at") or g.get("source_timestamp") or "")[:19].replace("T", " ")
+                created = (g.get("created_at") or g.get("source_timestamp") or "")[
+                    :19
+                ].replace("T", " ")
                 with st.expander(f"{icon} {content[:80]} `{g_status}`"):
                     st.markdown(f"**Goal:** {content}")
                     st.caption(f"Status: {g_status} | Created: {created}")
@@ -280,7 +331,9 @@ def render():
         if not memory_files:
             st.caption("No memory files found in /agent/memory/")
         else:
-            selected_mem = st.selectbox("Select file", memory_files, key="mem_file_select")
+            selected_mem = st.selectbox(
+                "Select file", memory_files, key="mem_file_select"
+            )
             if selected_mem:
                 content = read_memory_file(selected_mem)
                 if content is None:

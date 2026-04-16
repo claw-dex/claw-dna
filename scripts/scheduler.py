@@ -141,11 +141,13 @@ def _record_execution(task: dict, status: str, note: str = ""):
     history = task.get("execution_history", [])
     if not isinstance(history, list):
         history = []
-    history.append({
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "status": status,  # "injected", "skipped", "run_now", "error"
-        "note": note[:200] if note else "",
-    })
+    history.append(
+        {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "status": status,  # "injected", "skipped", "run_now", "error"
+            "note": note[:200] if note else "",
+        }
+    )
     # Trim to ring buffer max
     task["execution_history"] = history[-EXEC_HISTORY_MAX:]
 
@@ -326,7 +328,10 @@ def _is_due(task: dict, now: datetime) -> bool:
         try:
             last_run = datetime.fromisoformat(last_run_str.replace("Z", "+00:00"))
         except (ValueError, TypeError) as e:
-            print(f"  [scheduler] Warning: invalid last_run '{last_run_str}' for task '{task.get('id', '?')}': {e}", file=sys.stderr)
+            print(
+                f"  [scheduler] Warning: invalid last_run '{last_run_str}' for task '{task.get('id', '?')}': {e}",
+                file=sys.stderr,
+            )
 
     if task_type == "interval":
         try:
@@ -352,7 +357,10 @@ def _is_due(task: dict, now: datetime) -> bool:
                 run_at = run_at.replace(tzinfo=timezone.utc)
             return now >= run_at
         except (ValueError, TypeError) as e:
-            print(f"  [scheduler] Warning: invalid run_at '{run_at_str}' for task '{task.get('id', '?')}': {e}", file=sys.stderr)
+            print(
+                f"  [scheduler] Warning: invalid run_at '{run_at_str}' for task '{task.get('id', '?')}': {e}",
+                file=sys.stderr,
+            )
             return False
 
     elif task_type == "cron":
@@ -366,9 +374,7 @@ def _is_due(task: dict, now: datetime) -> bool:
             return _has_cron_match_since(schedule, last_run, now)
         else:
             # Never run before — check if pattern matched recently (last 24h)
-            return _has_cron_match_since(
-                schedule, now - timedelta(hours=24), now
-            )
+            return _has_cron_match_since(schedule, now - timedelta(hours=24), now)
 
     return False
 
@@ -449,13 +455,18 @@ def check_and_inject():
                         write_atomic(TASKS_PATH, tasks)
                     except Exception as e:
                         # Tasks write failed — rollback state and skip inbox write
-                        print(f"  [scheduler] ERROR: tasks write failed: {e} — rolling back", file=sys.stderr)
+                        print(
+                            f"  [scheduler] ERROR: tasks write failed: {e} — rolling back",
+                            file=sys.stderr,
+                        )
                         for task in tasks:
                             orig = original_state.get(id(task))
                             if orig is not None:
                                 task["last_run"] = orig["last_run"]
                                 task["enabled"] = orig["enabled"]
-                                _record_execution(task, "error", f"tasks write failed: {e}")
+                                _record_execution(
+                                    task, "error", f"tasks write failed: {e}"
+                                )
                         injected = 0
                         due_entries = []
 
@@ -472,17 +483,25 @@ def check_and_inject():
                             # Inbox write failed but tasks already persisted.
                             # Tasks have last_run set so they won't re-fire —
                             # the injected items are lost for this interval only.
-                            print(f"  [scheduler] ERROR: inbox write failed: {e} — tasks already committed, items lost this cycle", file=sys.stderr)
+                            print(
+                                f"  [scheduler] ERROR: inbox write failed: {e} — tasks already committed, items lost this cycle",
+                                file=sys.stderr,
+                            )
                             for task in tasks:
                                 orig = original_state.get(id(task))
                                 if orig is not None:
-                                    _record_execution(task, "error", f"inbox write failed: {e}")
+                                    _record_execution(
+                                        task, "error", f"inbox write failed: {e}"
+                                    )
                             injected = 0
                 else:
                     # No due entries but still persist any task state changes
                     write_atomic(TASKS_PATH, tasks)
     except (TimeoutError, OSError) as e:
-        print(f"  [scheduler] WARNING: {e} — skipping injection this cycle", file=sys.stderr)
+        print(
+            f"  [scheduler] WARNING: {e} — skipping injection this cycle",
+            file=sys.stderr,
+        )
         return 0
 
     return injected
@@ -494,7 +513,9 @@ def list_tasks():
     if not tasks:
         print("No scheduled tasks.")
         return
-    print(f"{'ID':<20} {'Type':<10} {'Enabled':<8} {'Last Run':<22} {'Schedule/Interval':<20} {'Content'}")
+    print(
+        f"{'ID':<20} {'Type':<10} {'Enabled':<8} {'Last Run':<22} {'Schedule/Interval':<20} {'Content'}"
+    )
     print("-" * 110)
     for t in tasks:
         tid = t.get("id", "?")[:20]
@@ -532,7 +553,9 @@ def show_history(task_id: str):
         print(f"No execution history for task '{task_id}'.")
         return
 
-    print(f"Execution history for '{task_id}' ({len(history)} entries, max {EXEC_HISTORY_MAX}):")
+    print(
+        f"Execution history for '{task_id}' ({len(history)} entries, max {EXEC_HISTORY_MAX}):"
+    )
     print(f"{'Timestamp':<28} {'Status':<10} {'Note'}")
     print("-" * 80)
     for h in reversed(history):
@@ -549,7 +572,9 @@ def show_stats():
         print("No scheduled tasks.")
         return
 
-    print(f"{'Task ID':<20} {'Total':<7} {'Injected':<10} {'RunNow':<8} {'Errors':<8} {'Last Exec'}")
+    print(
+        f"{'Task ID':<20} {'Total':<7} {'Injected':<10} {'RunNow':<8} {'Errors':<8} {'Last Exec'}"
+    )
     print("-" * 85)
     for t in tasks:
         tid = t.get("id", "?")[:20]
@@ -559,18 +584,23 @@ def show_stats():
         run_now = sum(1 for h in history if h.get("status") == "run_now")
         errors = sum(1 for h in history if h.get("status") == "error")
         last_exec = history[-1].get("timestamp", "?")[:22] if history else "never"
-        print(f"{tid:<20} {total:<7} {injected:<10} {run_now:<8} {errors:<8} {last_exec}")
+        print(
+            f"{tid:<20} {total:<7} {injected:<10} {run_now:<8} {errors:<8} {last_exec}"
+        )
 
     # Summary
     all_history = [h for t in tasks for h in t.get("execution_history", [])]
     total = len(all_history)
     errors = sum(1 for h in all_history if h.get("status") == "error")
     if total:
-        print(f"\nTotal: {total} executions, {errors} errors ({errors*100//total}% error rate)")
+        print(
+            f"\nTotal: {total} executions, {errors} errors ({errors*100//total}% error rate)"
+        )
 
 
-def add_task(task_id, content, schedule_type, schedule_value,
-             task_type="goal", priority=3):
+def add_task(
+    task_id, content, schedule_type, schedule_value, task_type="goal", priority=3
+):
     """Add a new scheduled task."""
     # Skip pre-lock read — the authoritative duplicate check happens under
     # lock below. The unlocked read was redundant I/O that could also give
@@ -600,7 +630,9 @@ def add_task(task_id, content, schedule_type, schedule_value,
             tasks = _load_tasks()
             # Re-check after lock
             if any(t.get("id") == task_id for t in tasks):
-                print(f"Error: task '{task_id}' already exists (race).", file=sys.stderr)
+                print(
+                    f"Error: task '{task_id}' already exists (race).", file=sys.stderr
+                )
                 sys.exit(1)
             tasks.append(task)
             write_atomic(TASKS_PATH, tasks)
@@ -688,7 +720,10 @@ def run_now_task(task_id):
                 sys.exit(1)
 
             if not task.get("enabled", True):
-                print(f"Error: task '{task_id}' is disabled. Enable it first with --enable.", file=sys.stderr)
+                print(
+                    f"Error: task '{task_id}' is disabled. Enable it first with --enable.",
+                    file=sys.stderr,
+                )
                 sys.exit(1)
 
             content_text = task.get("content", "")
@@ -867,13 +902,18 @@ def test_cron(pattern):
     """Test a cron pattern: show next 5 fire times."""
     parts = pattern.strip().split()
     if len(parts) != 5:
-        print(f"Error: cron pattern must have 5 fields (got {len(parts)}).", file=sys.stderr)
+        print(
+            f"Error: cron pattern must have 5 fields (got {len(parts)}).",
+            file=sys.stderr,
+        )
         print("  Format: minute hour day_of_month month day_of_week", file=sys.stderr)
         print("  Example: 0 9 * * *  (every day at 09:00 UTC)", file=sys.stderr)
         sys.exit(1)
 
     print(f"Cron pattern: {pattern}")
-    print(f"Fields: min={parts[0]} hour={parts[1]} dom={parts[2]} mon={parts[3]} dow={parts[4]}")
+    print(
+        f"Fields: min={parts[0]} hour={parts[1]} dom={parts[2]} mon={parts[3]} dow={parts[4]}"
+    )
     print()
 
     now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
@@ -920,6 +960,7 @@ def _parse_every(value):
 
 def main():
     import argparse
+
     parser = argparse.ArgumentParser(
         description="Manage and evaluate scheduled tasks for the agent.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -937,60 +978,84 @@ Examples:
   scheduler.py --test --cron "0 9 * * 1"                        # test cron pattern
   scheduler.py --forecast                                       # show next 48h timeline
   scheduler.py --forecast --hours 72                             # show next 72h timeline
-        """
+        """,
     )
 
     # Mode flags
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--check", action="store_true",
-                      help="Evaluate and inject due tasks into inbox")
-    mode.add_argument("--list", action="store_true",
-                      help="List all scheduled tasks")
-    mode.add_argument("--add", action="store_true",
-                      help="Add a new scheduled task")
-    mode.add_argument("--remove", action="store_true",
-                      help="Remove a task by ID")
-    mode.add_argument("--enable", action="store_true",
-                      help="Enable a disabled task")
-    mode.add_argument("--disable", action="store_true",
-                      help="Disable a task")
-    mode.add_argument("--test", action="store_true",
-                      help="Test a cron pattern (show next fire times)")
-    mode.add_argument("--json", action="store_true",
-                      help="List tasks as JSON")
-    mode.add_argument("--run-now", action="store_true",
-                      help="Immediately inject a task into inbox (requires --id)")
-    mode.add_argument("--forecast", action="store_true",
-                      help="Show timeline of upcoming task fires")
-    mode.add_argument("--history", action="store_true",
-                      help="Show execution history for a task (requires --id)")
-    mode.add_argument("--stats", action="store_true",
-                      help="Show aggregate execution stats for all tasks")
+    mode.add_argument(
+        "--check", action="store_true", help="Evaluate and inject due tasks into inbox"
+    )
+    mode.add_argument("--list", action="store_true", help="List all scheduled tasks")
+    mode.add_argument("--add", action="store_true", help="Add a new scheduled task")
+    mode.add_argument("--remove", action="store_true", help="Remove a task by ID")
+    mode.add_argument("--enable", action="store_true", help="Enable a disabled task")
+    mode.add_argument("--disable", action="store_true", help="Disable a task")
+    mode.add_argument(
+        "--test", action="store_true", help="Test a cron pattern (show next fire times)"
+    )
+    mode.add_argument("--json", action="store_true", help="List tasks as JSON")
+    mode.add_argument(
+        "--run-now",
+        action="store_true",
+        help="Immediately inject a task into inbox (requires --id)",
+    )
+    mode.add_argument(
+        "--forecast", action="store_true", help="Show timeline of upcoming task fires"
+    )
+    mode.add_argument(
+        "--history",
+        action="store_true",
+        help="Show execution history for a task (requires --id)",
+    )
+    mode.add_argument(
+        "--stats",
+        action="store_true",
+        help="Show aggregate execution stats for all tasks",
+    )
 
     # Shared options
-    parser.add_argument("--id", metavar="ID",
-                        help="Task ID (for add/remove/enable/disable)")
-    parser.add_argument("--goal", metavar="TEXT",
-                        help="Goal content for the task (for --add)")
-    parser.add_argument("--message", metavar="TEXT",
-                        help="Message content for the task (for --add, sets type=message)")
+    parser.add_argument(
+        "--id", metavar="ID", help="Task ID (for add/remove/enable/disable)"
+    )
+    parser.add_argument(
+        "--goal", metavar="TEXT", help="Goal content for the task (for --add)"
+    )
+    parser.add_argument(
+        "--message",
+        metavar="TEXT",
+        help="Message content for the task (for --add, sets type=message)",
+    )
 
     # Schedule type (for --add)
     schedule = parser.add_mutually_exclusive_group()
-    schedule.add_argument("--every", metavar="Nm|Nh|Nd",
-                          help="Interval schedule (e.g., 30m, 2h, 1d)")
-    schedule.add_argument("--cron", metavar="PATTERN",
-                          help="Cron pattern (min hour dom mon dow)")
-    schedule.add_argument("--once", metavar="ISO_DATETIME",
-                          help="One-time schedule (ISO 8601 datetime)")
+    schedule.add_argument(
+        "--every", metavar="Nm|Nh|Nd", help="Interval schedule (e.g., 30m, 2h, 1d)"
+    )
+    schedule.add_argument(
+        "--cron", metavar="PATTERN", help="Cron pattern (min hour dom mon dow)"
+    )
+    schedule.add_argument(
+        "--once", metavar="ISO_DATETIME", help="One-time schedule (ISO 8601 datetime)"
+    )
 
-    parser.add_argument("--hours", type=int, default=48, metavar="N",
-                        help="Forecast horizon in hours (default: 48, for --forecast)")
-    parser.add_argument("--priority", type=int, default=3, metavar="N",
-                        help="Priority 1-5 (default: 3)")
-    parser.add_argument("--type", dest="task_type", default=None,
-                        choices=["goal", "message"],
-                        help="Inbox type (default: goal)")
+    parser.add_argument(
+        "--hours",
+        type=int,
+        default=48,
+        metavar="N",
+        help="Forecast horizon in hours (default: 48, for --forecast)",
+    )
+    parser.add_argument(
+        "--priority", type=int, default=3, metavar="N", help="Priority 1-5 (default: 3)"
+    )
+    parser.add_argument(
+        "--type",
+        dest="task_type",
+        default=None,
+        choices=["goal", "message"],
+        help="Inbox type (default: goal)",
+    )
 
     args = parser.parse_args()
 
@@ -1019,22 +1084,42 @@ Examples:
                 if minutes <= 0:
                     parser.error("--every value must be positive")
             except ValueError:
-                parser.error(f"Invalid --every format: {args.every} (use Nm, Nh, or Nd)")
-            add_task(args.id, content, "interval", minutes,
-                     task_type=task_type, priority=args.priority)
+                parser.error(
+                    f"Invalid --every format: {args.every} (use Nm, Nh, or Nd)"
+                )
+            add_task(
+                args.id,
+                content,
+                "interval",
+                minutes,
+                task_type=task_type,
+                priority=args.priority,
+            )
         elif args.cron:
             # Validate cron pattern
             parts = args.cron.strip().split()
             if len(parts) != 5:
                 parser.error(f"Cron pattern must have 5 fields (got {len(parts)})")
-            add_task(args.id, content, "cron", args.cron,
-                     task_type=task_type, priority=args.priority)
+            add_task(
+                args.id,
+                content,
+                "cron",
+                args.cron,
+                task_type=task_type,
+                priority=args.priority,
+            )
         elif args.once:
             # Validate datetime
             try:
                 dt = datetime.fromisoformat(args.once.replace("Z", "+00:00"))
-                add_task(args.id, content, "once", dt.isoformat(),
-                         task_type=task_type, priority=args.priority)
+                add_task(
+                    args.id,
+                    content,
+                    "once",
+                    dt.isoformat(),
+                    task_type=task_type,
+                    priority=args.priority,
+                )
             except ValueError:
                 parser.error(f"Invalid datetime: {args.once}")
         else:

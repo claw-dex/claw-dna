@@ -27,8 +27,10 @@ SCHEDULED_TASKS_PATH = os.path.join(MEMORY_DIR, "scheduled_tasks.json")
 # ── Status / type styling ─────────────────────────────────────
 # See prompts/enum.md for complete enum definitions
 _STATUS_COLORS = {
-    "completed": "#4CAF50", "failed": "#F44336",
-    "in_progress": "#2196F3", "pending": "#FF9800",
+    "completed": "#4CAF50",
+    "failed": "#F44336",
+    "in_progress": "#2196F3",
+    "pending": "#FF9800",
 }
 _TYPE_COLORS = {
     # Inbox types
@@ -49,6 +51,7 @@ def _badge(text, color):
         f'<span style="background:{_html.escape(str(color))};color:#fff;padding:1px 8px;'
         f'border-radius:10px;font-size:11px;font-weight:600">{_html.escape(str(text))}</span>'
     )
+
 
 MAX_HISTORY = 50  # keep last 50 commands
 
@@ -96,14 +99,25 @@ def heartbeat_freshness(hb_str):
     except (ValueError, TypeError):
         return str(hb_str)[:16].replace("T", " "), "⚪"
 
+
 # Critical directories and files with sensible defaults
-_CRITICAL_DIRS = [MEMORY_DIR, LOGS_DIR, MESSAGES_DIR, f"{AGENT_DIR}/web", f"{AGENT_DIR}/workspace"]
+_CRITICAL_DIRS = [
+    MEMORY_DIR,
+    LOGS_DIR,
+    MESSAGES_DIR,
+    f"{AGENT_DIR}/web",
+    f"{AGENT_DIR}/workspace",
+]
 _CRITICAL_FILES = {
     f"{MEMORY_DIR}/state.json": {
-        "cycle_number": 0, "status": "idle", "current_goal": None,
+        "cycle_number": 0,
+        "status": "idle",
+        "current_goal": None,
         "last_cycle_summary": None,
-        "created_at": None, "last_heartbeat": None,
-        "last_cycle_run": None, "last_cycle_end": None,
+        "created_at": None,
+        "last_heartbeat": None,
+        "last_cycle_run": None,
+        "last_cycle_end": None,
         "services": {},
     },
     f"{MEMORY_DIR}/cycles.json": [],
@@ -152,7 +166,6 @@ def _startup_check():
             except OSError:
                 pass
 
-
     if issues:
         print(f"[Agent] Startup check: fixed {len(issues)} issue(s):", flush=True)
         for issue in issues:
@@ -166,6 +179,7 @@ def _write_json_atomic(path, data, indent=None):
     """Write JSON to a file atomically: write to temp, then os.replace().
     Prevents corruption if the process is killed mid-write."""
     import tempfile
+
     tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
     try:
         with os.fdopen(tmp_fd, "w") as f:
@@ -206,8 +220,15 @@ def _truncate_history(history, max_content=500):
     """Return history with content fields truncated for dashboard use."""
     result = []
     for entry in history:
-        if isinstance(entry, dict) and isinstance(entry.get("content"), str) and len(entry["content"]) > max_content:
-            entry = {**entry, "content": entry["content"][:max_content] + "...(truncated)"}
+        if (
+            isinstance(entry, dict)
+            and isinstance(entry.get("content"), str)
+            and len(entry["content"]) > max_content
+        ):
+            entry = {
+                **entry,
+                "content": entry["content"][:max_content] + "...(truncated)",
+            }
         result.append(entry)
     return result
 

@@ -60,6 +60,12 @@
 - Use sudo for: apt-get install, systemctl, editing files outside /agent/
 - Do NOT use sudo for: normal file operations inside /agent/
 
+## Code Formatting
+
+- All Python files MUST be formatted with Black, pinned to version 26.3.1
+- Format command: `uvx black@26.3.1 <file_or_directory>`
+- Run after any Python file modification before committing
+
 ## Safety
 
 - If unsure whether an action is safe, skip it and log the reasoning

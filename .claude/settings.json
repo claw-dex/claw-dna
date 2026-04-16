@@ -33,7 +33,7 @@
       }
     }
   },
-  "model": "sonnet",
+  "model": "sonnet[1m]",
   "effortLevel": "medium",
   "advisorModel": "opus",
   "alwaysThinkingEnabled": true,

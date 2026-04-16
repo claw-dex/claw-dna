@@ -33,7 +33,9 @@ def _time_ago(ts_str):
 
 def _extract_ts(item):
     """Extract the best timestamp string for sorting."""
-    return item.get("updated_at") or item.get("created_at") or item.get("timestamp") or ""
+    return (
+        item.get("updated_at") or item.get("created_at") or item.get("timestamp") or ""
+    )
 
 
 def _build_items(goals, inbox, outbox, filter_cat):
@@ -43,49 +45,59 @@ def _build_items(goals, inbox, outbox, filter_cat):
     if filter_cat in ("All", "Goals"):
         # "All" shows only active goals to save space; "Goals" shows everything
         _active_statuses = ("in_progress", "pending")
-        goal_list = goals if filter_cat == "Goals" else [
-            g for g in goals if g.get("status") in _active_statuses
-        ]
+        goal_list = (
+            goals
+            if filter_cat == "Goals"
+            else [g for g in goals if g.get("status") in _active_statuses]
+        )
         for g in goal_list:
             status = g.get("status", "pending")
-            items.append({
-                "cat": "goal",
-                "icon": "🎯",
-                "badge_text": status.replace("_", " ").replace("-", " "),
-                "badge_color": _STATUS_COLORS.get(status, "#666"),
-                "text": g.get("goal") or g.get("content") or "",
-                "ts": _extract_ts(g),
-                "pinned": False,
-                "raw": g,
-            })
+            items.append(
+                {
+                    "cat": "goal",
+                    "icon": "🎯",
+                    "badge_text": status.replace("_", " ").replace("-", " "),
+                    "badge_color": _STATUS_COLORS.get(status, "#666"),
+                    "text": g.get("goal") or g.get("content") or "",
+                    "ts": _extract_ts(g),
+                    "pinned": False,
+                    "raw": g,
+                }
+            )
 
     if filter_cat in ("All", "Inbox"):
         for item in inbox:
             cmd_t = item.get("type", "?")
-            items.append({
-                "cat": "inbox",
-                "icon": "📥",
-                "badge_text": cmd_t,
-                "badge_color": _TYPE_COLORS.get(cmd_t, "#666"),
-                "text": item.get("content") or "",
-                "ts": item.get("timestamp") or "",
-                "pinned": False,
-                "raw": item,
-            })
+            items.append(
+                {
+                    "cat": "inbox",
+                    "icon": "📥",
+                    "badge_text": cmd_t,
+                    "badge_color": _TYPE_COLORS.get(cmd_t, "#666"),
+                    "text": item.get("content") or "",
+                    "ts": item.get("timestamp") or "",
+                    "pinned": False,
+                    "raw": item,
+                }
+            )
 
     if filter_cat in ("All", "Outbox"):
         for item in outbox:
             is_human = item.get("type") == "needs_human"
-            items.append({
-                "cat": "outbox",
-                "icon": "🔔" if is_human else "📤",
-                "badge_text": "needs human" if is_human else (item.get("type") or "response"),
-                "badge_color": "#F44336" if is_human else "#4CAF50",
-                "text": item.get("subject") or item.get("content") or "",
-                "ts": item.get("timestamp") or "",
-                "pinned": is_human,
-                "raw": item,
-            })
+            items.append(
+                {
+                    "cat": "outbox",
+                    "icon": "🔔" if is_human else "📤",
+                    "badge_text": (
+                        "needs human" if is_human else (item.get("type") or "response")
+                    ),
+                    "badge_color": "#F44336" if is_human else "#4CAF50",
+                    "text": item.get("subject") or item.get("content") or "",
+                    "ts": item.get("timestamp") or "",
+                    "pinned": is_human,
+                    "raw": item,
+                }
+            )
 
     # Sort: pinned items first, then newest-first by timestamp
     items.sort(key=lambda x: (x["pinned"], x["ts"] != "", x["ts"]), reverse=True)
@@ -141,8 +153,6 @@ def _render_detail(item):
         ts = str(raw.get("timestamp", ""))[:19].replace("T", " ")
         if ts:
             st.caption(f"Sent: {ts}")
-
-
 
 
 def _next_trigger(task, now):
@@ -225,14 +235,16 @@ def _render_upcoming_tasks():
         tid = _html.escape(str(t.get("id", "?")))
         content = _html.escape((t.get("content") or "")[:60])
         ttype = _html.escape(str(t.get("schedule_type", "?")))
-        time_color = "#F44336" if "overdue" in nxt_str or "due now" in nxt_str else "#888"
+        time_color = (
+            "#F44336" if "overdue" in nxt_str or "due now" in nxt_str else "#888"
+        )
         rows_html.append(
-            f'<tr>'
+            f"<tr>"
             f'<td style="padding:2px 6px;font-size:12px"><code>{tid}</code></td>'
             f'<td style="padding:2px 6px;font-size:11px;color:#aaa">{content}</td>'
             f'<td style="padding:2px 6px;font-size:11px;color:#888">{ttype}</td>'
             f'<td style="padding:2px 6px;font-size:11px;color:{time_color};text-align:right;white-space:nowrap">{_html.escape(nxt_str)}</td>'
-            f'</tr>'
+            f"</tr>"
         )
     st.markdown(
         f'<table style="width:100%;border-collapse:collapse;margin-bottom:4px">'
@@ -241,9 +253,9 @@ def _render_upcoming_tasks():
         f'<th style="padding:2px 6px;font-size:10px;color:#666;text-align:left">Content</th>'
         f'<th style="padding:2px 6px;font-size:10px;color:#666;text-align:left">Schedule</th>'
         f'<th style="padding:2px 6px;font-size:10px;color:#666;text-align:right">Next</th>'
-        f'</tr></thead>'
+        f"</tr></thead>"
         f'<tbody>{"".join(rows_html)}</tbody>'
-        f'</table>',
+        f"</table>",
         unsafe_allow_html=True,
     )
 
@@ -259,7 +271,9 @@ def render():
     # ── Header row: title + counts | filter ──
     col_title, col_filter = st.columns([2, 3])
     with col_title:
-        parts = [f"**Quick Glance** &nbsp; 🎯 {len(active_goals)} &nbsp; 📥 {len(inbox)} &nbsp; 📤 {len(outbox)}"]
+        parts = [
+            f"**Quick Glance** &nbsp; 🎯 {len(active_goals)} &nbsp; 📥 {len(inbox)} &nbsp; 📤 {len(outbox)}"
+        ]
         if needs_human:
             parts.append(f"&nbsp; 🔔 {len(needs_human)}")
         st.markdown("".join(parts), unsafe_allow_html=True)

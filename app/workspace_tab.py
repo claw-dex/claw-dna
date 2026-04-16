@@ -21,7 +21,9 @@ def _safe_subdir(subdir: str) -> Path | None:
 
 def render():
     st.subheader("Workspace")
-    st.caption("Browse and manage files in /agent/workspace/ via the Caddy file browser.")
+    st.caption(
+        "Browse and manage files in /agent/workspace/ via the Caddy file browser."
+    )
 
     with st.expander("Upload files", icon=":material/upload:"):
         subdir = st.text_input(

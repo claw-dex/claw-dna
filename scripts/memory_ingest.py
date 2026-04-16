@@ -44,12 +44,21 @@ MEMVID_BIN = "memvid"
 EMBED_MODEL = "bge-base"
 
 # Supported extensions for memvid --input ingestion (used by --append-file)
-INGESTIBLE_EXTENSIONS = frozenset({
-    ".pdf", ".docx", ".xlsx", ".pptx",
-    ".txt", ".md", ".html",
-    ".jpg", ".jpeg",
-    ".mp3", ".mp4",
-})
+INGESTIBLE_EXTENSIONS = frozenset(
+    {
+        ".pdf",
+        ".docx",
+        ".xlsx",
+        ".pptx",
+        ".txt",
+        ".md",
+        ".html",
+        ".jpg",
+        ".jpeg",
+        ".mp3",
+        ".mp4",
+    }
+)
 COMPRESSION_THRESHOLD = 1_048_576  # 1 MB
 
 
@@ -95,8 +104,14 @@ def parse_args(argv):
             result["help"] = True
         elif a == "--build":
             result["build"] = True
-        elif a in ("--append-json", "--append-text", "--append-file",
-                    "--mv2", "--memory", "--title") and i + 1 >= len(args):
+        elif a in (
+            "--append-json",
+            "--append-text",
+            "--append-file",
+            "--mv2",
+            "--memory",
+            "--title",
+        ) and i + 1 >= len(args):
             print(f"ERROR: {a} requires a value", file=sys.stderr)
             sys.exit(1)
         elif a == "--append-json":
@@ -136,6 +151,7 @@ def parse_args(argv):
 # ---------------------------------------------------------------------------
 # Chunking — turn memory JSON files into semantically meaningful chunks
 # ---------------------------------------------------------------------------
+
 
 def compose_journal_text(entry: dict) -> str:
     """Compose readable text from a journal entry for semantic embedding."""
@@ -195,20 +211,22 @@ def chunk_journal(journal: list) -> list:
             date_part = timestamp[:10]
             tags.append(f"date:{date_part}")
 
-        chunks.append({
-            "title": f"Cycle {cycle}: {summary[:100]}",
-            "label": ctype or "journal",
-            "text": text,
-            "tags": tags,
-            "metadata": {
-                "source": "journal",
-                "cycle": str(cycle),
-                "type": ctype,
-                "status": status,
-                "category": category,
-                "date": timestamp,
-            },
-        })
+        chunks.append(
+            {
+                "title": f"Cycle {cycle}: {summary[:100]}",
+                "label": ctype or "journal",
+                "text": text,
+                "tags": tags,
+                "metadata": {
+                    "source": "journal",
+                    "cycle": str(cycle),
+                    "type": ctype,
+                    "status": status,
+                    "category": category,
+                    "date": timestamp,
+                },
+            }
+        )
     return chunks
 
 
@@ -259,20 +277,22 @@ def chunk_cycles(cycles: list) -> list:
         if start:
             tags.append(f"date:{start[:10]}")
 
-        chunks.append({
-            "title": f"Cycle {cycle}: {summary[:80] or ctype}",
-            "label": "cycle",
-            "text": text,
-            "tags": tags,
-            "metadata": {
-                "source": "cycle",
-                "cycle": str(cycle),
-                "type": ctype,
-                "status": status,
-                "category": category,
-                "date": start[:10] if start else "",
-            },
-        })
+        chunks.append(
+            {
+                "title": f"Cycle {cycle}: {summary[:80] or ctype}",
+                "label": "cycle",
+                "text": text,
+                "tags": tags,
+                "metadata": {
+                    "source": "cycle",
+                    "cycle": str(cycle),
+                    "type": ctype,
+                    "status": status,
+                    "category": category,
+                    "date": start[:10] if start else "",
+                },
+            }
+        )
     return chunks
 
 
@@ -294,17 +314,19 @@ def chunk_goals(goals: list) -> list:
         if goal_id:
             tags.append(f"id:{goal_id}")
 
-        chunks.append({
-            "title": content[:100],
-            "label": "goal",
-            "text": text,
-            "tags": tags,
-            "metadata": {
-                "source": "goal",
-                "status": status,
-                "id": goal_id,
-            },
-        })
+        chunks.append(
+            {
+                "title": content[:100],
+                "label": "goal",
+                "text": text,
+                "tags": tags,
+                "metadata": {
+                    "source": "goal",
+                    "status": status,
+                    "id": goal_id,
+                },
+            }
+        )
     return chunks
 
 
@@ -338,11 +360,15 @@ def gather_all_chunks(memory_dir: Path) -> list:
 # Build — ingest chunks via memvid CLI
 # ---------------------------------------------------------------------------
 
+
 def _run_memvid(cmd, input_text=None, timeout=60):
     """Run a memvid CLI command. Returns (returncode, stdout, stderr)."""
     result = subprocess.run(
-        cmd, input=input_text,
-        capture_output=True, text=True, timeout=timeout,
+        cmd,
+        input=input_text,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
     )
     return result.returncode, result.stdout, result.stderr
 
@@ -364,20 +390,31 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
 
     if dry_run:
         if json_mode:
-            print(json.dumps({
-                "mode": "dry_run",
-                "total_chunks": len(chunks),
-                "chunks": [
-                    {"title": c["title"], "label": c["label"],
-                     "tags": c["tags"], "text_len": len(c["text"])}
-                    for c in chunks
-                ],
-            }, indent=2))
+            print(
+                json.dumps(
+                    {
+                        "mode": "dry_run",
+                        "total_chunks": len(chunks),
+                        "chunks": [
+                            {
+                                "title": c["title"],
+                                "label": c["label"],
+                                "tags": c["tags"],
+                                "text_len": len(c["text"]),
+                            }
+                            for c in chunks
+                        ],
+                    },
+                    indent=2,
+                )
+            )
         else:
             print(f"\n[DRY RUN] Would ingest {len(chunks)} chunks:")
             for i, ch in enumerate(chunks):
-                print(f"  {i+1:3d}. [{ch['label']}] {ch['title'][:70]} "
-                      f"({len(ch['text'])} chars, {len(ch['tags'])} tags)")
+                print(
+                    f"  {i+1:3d}. [{ch['label']}] {ch['title'][:70]} "
+                    f"({len(ch['text'])} chars, {len(ch['tags'])} tags)"
+                )
         return
 
     # Backup existing .mv2 before full rebuild
@@ -400,10 +437,16 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
     ok, fail = 0, 0
     for i, ch in enumerate(chunks):
         cmd = [
-            MEMVID_BIN, "put", str(mv2),
-            "--title", ch["title"],
-            "--label", ch["label"],
-            "--embedding", "-m", EMBED_MODEL,
+            MEMVID_BIN,
+            "put",
+            str(mv2),
+            "--title",
+            ch["title"],
+            "--label",
+            ch["label"],
+            "--embedding",
+            "-m",
+            EMBED_MODEL,
         ]
         for tag in ch["tags"]:
             cmd.extend(["--tag", f"category={tag}"])
@@ -423,14 +466,19 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
     size_kb = mv2.stat().st_size / 1024 if mv2.exists() else 0
 
     if json_mode:
-        print(json.dumps({
-            "mode": "build",
-            "mv2": str(mv2),
-            "total_chunks": len(chunks),
-            "ingested": ok,
-            "failed": fail,
-            "size_kb": round(size_kb, 1),
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "mode": "build",
+                    "mv2": str(mv2),
+                    "total_chunks": len(chunks),
+                    "ingested": ok,
+                    "failed": fail,
+                    "size_kb": round(size_kb, 1),
+                },
+                indent=2,
+            )
+        )
     elif not quiet:
         print(f"[INGEST] Done — {ok} ingested, {fail} failed ({size_kb:.1f} KB)")
         print(f"[INGEST] Query with:")
@@ -441,6 +489,7 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
 # Append JSON — ingest a single journal/cycle/goal entry via memvid CLI
 # ---------------------------------------------------------------------------
 
+
 def _detect_and_chunk(entry: dict) -> list:
     """Auto-detect entry type and route to the correct chunker.
 
@@ -449,11 +498,17 @@ def _detect_and_chunk(entry: dict) -> list:
       - Has "start" or "end" or "duration_seconds" → cycle record
       - Has "content" and "status" (without cycle fields) → goal record
     """
-    if "actions" in entry or "learnings" in entry or ("goal" in entry and "summary" in entry):
+    if (
+        "actions" in entry
+        or "learnings" in entry
+        or ("goal" in entry and "summary" in entry)
+    ):
         return chunk_journal([entry])
     if "start" in entry or "end" in entry or "duration_seconds" in entry:
         return chunk_cycles([entry])
-    if "content" in entry or ("goal" in entry and "status" in entry and "summary" not in entry):
+    if "content" in entry or (
+        "goal" in entry and "status" in entry and "summary" not in entry
+    ):
         return chunk_goals([entry])
     # Fallback: treat as journal entry
     return chunk_journal([entry])
@@ -493,10 +548,16 @@ def append_json(mv2_path, entry_source, quiet=False, json_mode=False):
 
     ch = chunks[0]
     cmd = [
-        MEMVID_BIN, "put", str(mv2),
-        "--title", ch["title"],
-        "--label", ch["label"],
-        "--embedding", "-m", EMBED_MODEL,
+        MEMVID_BIN,
+        "put",
+        str(mv2),
+        "--title",
+        ch["title"],
+        "--label",
+        ch["label"],
+        "--embedding",
+        "-m",
+        EMBED_MODEL,
     ]
     for tag in ch["tags"]:
         cmd.extend(["--tag", f"category={tag}"])
@@ -510,12 +571,17 @@ def append_json(mv2_path, entry_source, quiet=False, json_mode=False):
 
     cycle = entry.get("cycle", "?")
     if json_mode:
-        print(json.dumps({
-            "mode": "append",
-            "cycle": cycle,
-            "title": ch["title"],
-            "mv2": str(mv2),
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "mode": "append",
+                    "cycle": cycle,
+                    "title": ch["title"],
+                    "mv2": str(mv2),
+                },
+                indent=2,
+            )
+        )
     elif not quiet:
         print(f"[INGEST] Appended cycle {cycle} to {mv2.name}")
 
@@ -524,8 +590,8 @@ def append_json(mv2_path, entry_source, quiet=False, json_mode=False):
 # Append Text — ingest raw text directly
 # ---------------------------------------------------------------------------
 
-def append_text(mv2_path, text, title=None, tags=None, quiet=False,
-                json_mode=False):
+
+def append_text(mv2_path, text, title=None, tags=None, quiet=False, json_mode=False):
     """Ingest raw text directly into the .mv2 index."""
     _check_memvid()
 
@@ -542,10 +608,16 @@ def append_text(mv2_path, text, title=None, tags=None, quiet=False,
     tags = tags or []
 
     cmd = [
-        MEMVID_BIN, "put", str(mv2),
-        "--title", title,
-        "--label", "text",
-        "--embedding", "-m", EMBED_MODEL,
+        MEMVID_BIN,
+        "put",
+        str(mv2),
+        "--title",
+        title,
+        "--label",
+        "text",
+        "--embedding",
+        "-m",
+        EMBED_MODEL,
     ]
     all_tags = ["manual-ingest", "text"] + tags
     for tag in all_tags:
@@ -562,13 +634,18 @@ def append_text(mv2_path, text, title=None, tags=None, quiet=False,
         sys.exit(1)
 
     if json_mode:
-        print(json.dumps({
-            "mode": "append-text",
-            "title": title,
-            "text_len": len(text),
-            "tags": all_tags,
-            "mv2": str(mv2),
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "mode": "append-text",
+                    "title": title,
+                    "text_len": len(text),
+                    "tags": all_tags,
+                    "mv2": str(mv2),
+                },
+                indent=2,
+            )
+        )
     elif not quiet:
         print(f"[INGEST] Appended text ({len(text)} chars) to {mv2.name}")
 
@@ -577,8 +654,10 @@ def append_text(mv2_path, text, title=None, tags=None, quiet=False,
 # Append File — ingest a file directly
 # ---------------------------------------------------------------------------
 
-def append_file(mv2_path, filepath, title=None, tags=None, quiet=False,
-                json_mode=False):
+
+def append_file(
+    mv2_path, filepath, title=None, tags=None, quiet=False, json_mode=False
+):
     """Ingest a file directly into the .mv2 index."""
     _check_memvid()
 
@@ -595,17 +674,25 @@ def append_file(mv2_path, filepath, title=None, tags=None, quiet=False,
     ext = fpath.suffix.lower()
     if ext not in INGESTIBLE_EXTENSIONS:
         print(f"ERROR: Unsupported file type: {ext}", file=sys.stderr)
-        print(f"  Supported: {', '.join(sorted(INGESTIBLE_EXTENSIONS))}", file=sys.stderr)
+        print(
+            f"  Supported: {', '.join(sorted(INGESTIBLE_EXTENSIONS))}", file=sys.stderr
+        )
         sys.exit(1)
 
     title = title or fpath.name
     tags = tags or []
 
     cmd = [
-        MEMVID_BIN, "put", str(mv2),
-        "--input", str(fpath),
-        "--title", title,
-        "--embedding", "-m", EMBED_MODEL,
+        MEMVID_BIN,
+        "put",
+        str(mv2),
+        "--input",
+        str(fpath),
+        "--title",
+        title,
+        "--embedding",
+        "-m",
+        EMBED_MODEL,
     ]
     try:
         if fpath.stat().st_size > COMPRESSION_THRESHOLD:
@@ -633,14 +720,19 @@ def append_file(mv2_path, filepath, title=None, tags=None, quiet=False,
         size_kb = 0
 
     if json_mode:
-        print(json.dumps({
-            "mode": "append-file",
-            "filepath": str(fpath),
-            "title": title,
-            "size_kb": round(size_kb, 1),
-            "tags": all_tags,
-            "mv2": str(mv2),
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "mode": "append-file",
+                    "filepath": str(fpath),
+                    "title": title,
+                    "size_kb": round(size_kb, 1),
+                    "tags": all_tags,
+                    "mv2": str(mv2),
+                },
+                indent=2,
+            )
+        )
     elif not quiet:
         print(f"[INGEST] Ingested {fpath.name} ({size_kb:.1f} KB) into {mv2.name}")
 
@@ -648,6 +740,7 @@ def append_file(mv2_path, filepath, title=None, tags=None, quiet=False,
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main():
     opts = parse_args(sys.argv)
@@ -657,26 +750,56 @@ def main():
         sys.exit(0)
 
     if opts["build"]:
-        build(opts["memory"], opts["mv2"],
-              dry_run=opts["dry_run"], quiet=opts["quiet"],
-              json_mode=opts["json_mode"])
+        build(
+            opts["memory"],
+            opts["mv2"],
+            dry_run=opts["dry_run"],
+            quiet=opts["quiet"],
+            json_mode=opts["json_mode"],
+        )
     elif opts["append_json"]:
-        append_json(opts["mv2"], opts["append_json"],
-                    quiet=opts["quiet"], json_mode=opts["json_mode"])
+        append_json(
+            opts["mv2"],
+            opts["append_json"],
+            quiet=opts["quiet"],
+            json_mode=opts["json_mode"],
+        )
     elif opts["append_text"]:
-        append_text(opts["mv2"], opts["append_text"],
-                    title=opts["title"], tags=opts["tags"],
-                    quiet=opts["quiet"], json_mode=opts["json_mode"])
+        append_text(
+            opts["mv2"],
+            opts["append_text"],
+            title=opts["title"],
+            tags=opts["tags"],
+            quiet=opts["quiet"],
+            json_mode=opts["json_mode"],
+        )
     elif opts["append_file"]:
-        append_file(opts["mv2"], opts["append_file"],
-                    title=opts["title"], tags=opts["tags"],
-                    quiet=opts["quiet"], json_mode=opts["json_mode"])
+        append_file(
+            opts["mv2"],
+            opts["append_file"],
+            title=opts["title"],
+            tags=opts["tags"],
+            quiet=opts["quiet"],
+            json_mode=opts["json_mode"],
+        )
     else:
-        print("ERROR: Provide --build, --append-json, --append-text, or --append-file", file=sys.stderr)
+        print(
+            "ERROR: Provide --build, --append-json, --append-text, or --append-file",
+            file=sys.stderr,
+        )
         print("Usage: uv run python scripts/memory_ingest.py --build", file=sys.stderr)
-        print("       uv run python scripts/memory_ingest.py --append-json '{...}'", file=sys.stderr)
-        print("       uv run python scripts/memory_ingest.py --append-text 'some text'", file=sys.stderr)
-        print("       uv run python scripts/memory_ingest.py --append-file /path/to/file.pdf", file=sys.stderr)
+        print(
+            "       uv run python scripts/memory_ingest.py --append-json '{...}'",
+            file=sys.stderr,
+        )
+        print(
+            "       uv run python scripts/memory_ingest.py --append-text 'some text'",
+            file=sys.stderr,
+        )
+        print(
+            "       uv run python scripts/memory_ingest.py --append-file /path/to/file.pdf",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
 

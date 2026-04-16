@@ -52,16 +52,16 @@ from shared import atomic_write_json, write_to_inbox, append_to_history
 
 # --- Paths ---
 BASE = Path("/agent")
-STATE_FILE          = BASE / "memory" / "whatsapp_state.json"
-INBOX_FILE          = BASE / "messages" / "inbox.json"
-OUTBOX_FILE         = BASE / "messages" / "outbox.json"
-INBOX_HISTORY_FILE  = BASE / "memory" / "whatsapp_inbox_history.json"
+STATE_FILE = BASE / "memory" / "whatsapp_state.json"
+INBOX_FILE = BASE / "messages" / "inbox.json"
+OUTBOX_FILE = BASE / "messages" / "outbox.json"
+INBOX_HISTORY_FILE = BASE / "memory" / "whatsapp_inbox_history.json"
 OUTBOX_HISTORY_FILE = BASE / "memory" / "whatsapp_outbox_history.json"
-CHAT_HISTORY_FILE   = BASE / "memory" / "whatsapp_chat_history.json"
-LOG_DIR             = BASE / "memory" / "logs"
-LOG_FILE            = LOG_DIR / "whatsapp_bridge.log"
-HEARTBEAT_DIR       = BASE / "memory" / "heartbeats"
-HEARTBEAT_FILE      = HEARTBEAT_DIR / "whatsapp_bridge.heartbeat"
+CHAT_HISTORY_FILE = BASE / "memory" / "whatsapp_chat_history.json"
+LOG_DIR = BASE / "memory" / "logs"
+LOG_FILE = LOG_DIR / "whatsapp_bridge.log"
+HEARTBEAT_DIR = BASE / "memory" / "heartbeats"
+HEARTBEAT_FILE = HEARTBEAT_DIR / "whatsapp_bridge.heartbeat"
 
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 HEARTBEAT_DIR.mkdir(parents=True, exist_ok=True)
@@ -87,18 +87,18 @@ def _write_heartbeat():
 
 
 # --- Constants ---
-KEEPASS_WHATSAPP_ACCESS_TOKEN    = "WHATSAPP_ACCESS_TOKEN"
+KEEPASS_WHATSAPP_ACCESS_TOKEN = "WHATSAPP_ACCESS_TOKEN"
 KEEPASS_WHATSAPP_PHONE_NUMBER_ID = "WHATSAPP_PHONE_NUMBER_ID"
-KEEPASS_WHATSAPP_VERIFY_TOKEN    = "WHATSAPP_VERIFY_TOKEN"
-KEEPASS_WHATSAPP_CHAT_ID         = "WHATSAPP_CHAT_ID"
-KEEPASS_WHATSAPP_OWNER_USERNAME  = "WHATSAPP_OWNER_USERNAME"
+KEEPASS_WHATSAPP_VERIFY_TOKEN = "WHATSAPP_VERIFY_TOKEN"
+KEEPASS_WHATSAPP_CHAT_ID = "WHATSAPP_CHAT_ID"
+KEEPASS_WHATSAPP_OWNER_USERNAME = "WHATSAPP_OWNER_USERNAME"
 
 GRAPH_API_BASE = "https://graph.facebook.com/v21.0"
-WEBHOOK_PORT   = 8083
-WEBHOOK_PATH   = "/system/whatsapp-bridge/webhook"
-OUTBOX_INTERVAL = 60   # How often to check outbox (seconds)
+WEBHOOK_PORT = 8083
+WEBHOOK_PATH = "/system/whatsapp-bridge/webhook"
+OUTBOX_INTERVAL = 60  # How often to check outbox (seconds)
 STATE_JSON = BASE / "memory" / "state.json"
-MEDIA_DIR  = BASE / "workspace" / "whatsapp"
+MEDIA_DIR = BASE / "workspace" / "whatsapp"
 
 # Thread lock for shared state
 _lock = threading.RLock()
@@ -110,6 +110,7 @@ _lock = threading.RLock()
 # ---------------------------------------------------------------------------
 # Heartbeat helpers
 # ---------------------------------------------------------------------------
+
 
 def get_last_heartbeat() -> datetime | None:
     """Return the last_heartbeat timestamp from state.json, or None."""
@@ -159,19 +160,26 @@ def build_ack_message() -> str:
 # KeePass helpers
 # ---------------------------------------------------------------------------
 
+
 def keepass_get(title: str) -> str | None:
     try:
         from scripts.keepass import get_credential
+
         return get_credential(title)
     except Exception as e:
         log.warning(f"KeePass get({title!r}) failed: {e}")
     return None
 
 
-def keepass_store(title: str, username: str, value: str, group: str = "API Keys") -> bool:
+def keepass_store(
+    title: str, username: str, value: str, group: str = "API Keys"
+) -> bool:
     try:
         from scripts.keepass import store_credential
-        return store_credential(title=title, username=username, password=value, group=group)
+
+        return store_credential(
+            title=title, username=username, password=value, group=group
+        )
     except Exception as e:
         log.warning(f"KeePass store({title!r}) failed: {e}")
     return False
@@ -180,6 +188,7 @@ def keepass_store(title: str, username: str, value: str, group: str = "API Keys"
 # ---------------------------------------------------------------------------
 # Chat ID helpers
 # ---------------------------------------------------------------------------
+
 
 def parse_chat_ids(csv_string: str | None) -> list[str]:
     """Parse a comma-separated string of phone numbers into a list."""
@@ -195,7 +204,7 @@ def serialize_chat_ids(chat_ids: list[str]) -> str:
 
 def contains_username(text: str, username: str) -> bool:
     """Check if text contains the username as a whole word, case-insensitive."""
-    pattern = r'(?<!\w)@?' + re.escape(username) + r'\b'
+    pattern = r"(?<!\w)@?" + re.escape(username) + r"\b"
     return bool(re.search(pattern, text, re.IGNORECASE))
 
 
@@ -203,26 +212,38 @@ def contains_username(text: str, username: str) -> bool:
 # State management
 # ---------------------------------------------------------------------------
 
+
 def _validate_state(data: dict) -> dict:
     """Ensure state has the expected structure, repairing wrong types."""
     default = {"last_message_ts": "", "sent_hashes": []}
     if not isinstance(data, dict):
-        log.warning("WhatsApp state has unexpected type %s, resetting", type(data).__name__)
+        log.warning(
+            "WhatsApp state has unexpected type %s, resetting", type(data).__name__
+        )
         return dict(default)
     # Validate last_message_ts — must be str
     ts = data.get("last_message_ts")
     if not isinstance(ts, str):
-        log.warning("WhatsApp state last_message_ts has wrong type %s, resetting to ''", type(ts).__name__)
+        log.warning(
+            "WhatsApp state last_message_ts has wrong type %s, resetting to ''",
+            type(ts).__name__,
+        )
         data["last_message_ts"] = ""
     # Validate sent_hashes — must be list of strings
     hashes = data.get("sent_hashes")
     if not isinstance(hashes, list):
-        log.warning("WhatsApp state sent_hashes has wrong type %s, resetting to []", type(hashes).__name__)
+        log.warning(
+            "WhatsApp state sent_hashes has wrong type %s, resetting to []",
+            type(hashes).__name__,
+        )
         data["sent_hashes"] = []
     else:
         cleaned = [h for h in hashes if isinstance(h, str)]
         if len(cleaned) != len(hashes):
-            log.warning("Removed %d non-string entries from sent_hashes", len(hashes) - len(cleaned))
+            log.warning(
+                "Removed %d non-string entries from sent_hashes",
+                len(hashes) - len(cleaned),
+            )
             data["sent_hashes"] = cleaned
     return data
 
@@ -252,18 +273,20 @@ def msg_hash(msg: dict) -> str:
 # WhatsApp formatting helpers
 # ---------------------------------------------------------------------------
 
+
 def _strip_wa_formatting(text: str) -> str:
     """Strip WhatsApp formatting characters as a plain-text fallback."""
     # Remove bold, italic, strikethrough markers
     text = text.replace("*", "").replace("_", "").replace("~", "")
     # Remove monospace triple backticks
-    text = re.sub(r'```', '', text)
+    text = re.sub(r"```", "", text)
     return text
 
 
 # ---------------------------------------------------------------------------
 # Chat history (in-memory + disk-synced)
 # ---------------------------------------------------------------------------
+
 
 def load_chat_history() -> dict:
     """Load per-chat conversation history from disk."""
@@ -287,11 +310,13 @@ def append_chat_message(history: dict, chat_id: str, role: str, text: str):
     """Append a message to a chat's history, keeping last 50 per chat."""
     if chat_id not in history:
         history[chat_id] = []
-    history[chat_id].append({
-        "role": role,
-        "text": text,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    })
+    history[chat_id].append(
+        {
+            "role": role,
+            "text": text,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    )
     history[chat_id] = history[chat_id][-50:]
 
 
@@ -355,7 +380,10 @@ def build_chat_context(history: dict, chat_id: str) -> str:
 # WhatsApp API
 # ---------------------------------------------------------------------------
 
-def wa_send_message(token: str, phone_number_id: str, to: str, text: str) -> dict | None:
+
+def wa_send_message(
+    token: str, phone_number_id: str, to: str, text: str
+) -> dict | None:
     """Send a text message via WhatsApp Cloud API. Returns API response or None."""
     url = f"{GRAPH_API_BASE}/{phone_number_id}/messages"
     headers = {
@@ -373,11 +401,15 @@ def wa_send_message(token: str, phone_number_id: str, to: str, text: str) -> dic
         try:
             data = resp.json()
         except (ValueError, requests.exceptions.JSONDecodeError):
-            log.warning(f"WhatsApp send non-JSON response (HTTP {resp.status_code}): {resp.text[:200]}")
+            log.warning(
+                f"WhatsApp send non-JSON response (HTTP {resp.status_code}): {resp.text[:200]}"
+            )
             return None
         if resp.ok:
             return data
-        log.warning(f"WhatsApp send failed ({resp.status_code}): {data.get('error', {}).get('message', data)}")
+        log.warning(
+            f"WhatsApp send failed ({resp.status_code}): {data.get('error', {}).get('message', data)}"
+        )
     except Exception as e:
         log.error(f"WhatsApp send request failed: {e}")
     return None
@@ -404,6 +436,7 @@ def wa_send_read_receipt(token: str, phone_number_id: str, message_id: str):
 # ---------------------------------------------------------------------------
 # Media download helpers
 # ---------------------------------------------------------------------------
+
 
 def extract_wa_media(msg: dict) -> list[tuple[str, str, str]]:
     """Extract downloadable media from a WhatsApp webhook message.
@@ -447,7 +480,9 @@ def extract_wa_media(msg: dict) -> list[tuple[str, str, str]]:
     return media
 
 
-def download_wa_media(token: str, media_id: str, chat_id: str, filename_hint: str) -> str | None:
+def download_wa_media(
+    token: str, media_id: str, chat_id: str, filename_hint: str
+) -> str | None:
     """Download a file from WhatsApp and save to /agent/workspace/whatsapp/{chat_id}/.
 
     Returns the local file path on success, None on failure.
@@ -462,7 +497,9 @@ def download_wa_media(token: str, media_id: str, chat_id: str, filename_hint: st
         try:
             media_data = resp.json()
         except (ValueError, requests.exceptions.JSONDecodeError):
-            log.warning(f"Non-JSON media response for media_id={media_id[:16]} (HTTP {resp.status_code}): {resp.text[:200]}")
+            log.warning(
+                f"Non-JSON media response for media_id={media_id[:16]} (HTTP {resp.status_code}): {resp.text[:200]}"
+            )
             return None
         media_url = media_data.get("url")
         if not media_url:
@@ -482,12 +519,16 @@ def download_wa_media(token: str, media_id: str, chat_id: str, filename_hint: st
 
     max_size = 50 * 1024 * 1024  # 50 MB safety limit
     try:
-        with requests.get(media_url, headers=headers, timeout=(30, 120), stream=True) as resp:
+        with requests.get(
+            media_url, headers=headers, timeout=(30, 120), stream=True
+        ) as resp:
             resp.raise_for_status()
             # Check Content-Length header if available for early rejection
             content_length = resp.headers.get("Content-Length")
             if content_length and int(content_length) > max_size:
-                log.warning(f"Media {media_id[:16]} too large ({content_length} bytes), skipping")
+                log.warning(
+                    f"Media {media_id[:16]} too large ({content_length} bytes), skipping"
+                )
                 return None
             size = 0
             exceeded = False
@@ -495,7 +536,9 @@ def download_wa_media(token: str, media_id: str, chat_id: str, filename_hint: st
                 for chunk in resp.iter_content(chunk_size=8192):
                     size += len(chunk)
                     if size > max_size:
-                        log.warning(f"Media {media_id[:16]} exceeded {max_size} byte limit at {size} bytes, aborting")
+                        log.warning(
+                            f"Media {media_id[:16]} exceeded {max_size} byte limit at {size} bytes, aborting"
+                        )
                         exceeded = True
                         break
                     f.write(chunk)
@@ -528,10 +571,12 @@ def register_caddy_route():
     route = {
         "@id": CADDY_ROUTE_ID,
         "match": [{"path": ["/system/whatsapp-bridge/webhook*"]}],
-        "handle": [{
-            "handler": "reverse_proxy",
-            "upstreams": [{"dial": f"localhost:{WEBHOOK_PORT}"}],
-        }],
+        "handle": [
+            {
+                "handler": "reverse_proxy",
+                "upstreams": [{"dial": f"localhost:{WEBHOOK_PORT}"}],
+            }
+        ],
     }
     try:
         # First, remove any stale route with the same ID (ignore errors)
@@ -543,9 +588,13 @@ def register_caddy_route():
             timeout=10,
         )
         if resp.ok:
-            log.info(f"Registered Caddy route: {WEBHOOK_PATH}* → localhost:{WEBHOOK_PORT}")
+            log.info(
+                f"Registered Caddy route: {WEBHOOK_PATH}* → localhost:{WEBHOOK_PORT}"
+            )
         else:
-            log.warning(f"Failed to register Caddy route ({resp.status_code}): {resp.text}")
+            log.warning(
+                f"Failed to register Caddy route ({resp.status_code}): {resp.text}"
+            )
     except Exception as e:
         log.warning(f"Could not register Caddy route (Caddy may not be running): {e}")
 
@@ -560,7 +609,9 @@ def deregister_caddy_route():
         if resp.ok:
             log.info("Deregistered Caddy route.")
         else:
-            log.warning(f"Failed to deregister Caddy route ({resp.status_code}): {resp.text}")
+            log.warning(
+                f"Failed to deregister Caddy route ({resp.status_code}): {resp.text}"
+            )
     except Exception as e:
         log.warning(f"Could not deregister Caddy route: {e}")
 
@@ -569,9 +620,14 @@ def deregister_caddy_route():
 # Command handlers
 # ---------------------------------------------------------------------------
 
+
 def handle_heartbeat_command(
-    token: str, phone_number_id: str, from_phone: str, from_name: str,
-    chat_history: dict, extra_args: list[str] = None,
+    token: str,
+    phone_number_id: str,
+    from_phone: str,
+    from_name: str,
+    chat_history: dict,
+    extra_args: list[str] = None,
 ) -> bool:
     """Handle the /heartbeat command by triggering an immediate heartbeat.
 
@@ -597,7 +653,9 @@ def handle_heartbeat_command(
             log.info(f"Heartbeat completed successfully for {from_name}")
         else:
             response = f"⚠️ Heartbeat triggered but returned non-zero exit code: {result.returncode}\n\nCheck logs for details."
-            log.warning(f"Heartbeat failed with code {result.returncode}: {result.stderr}")
+            log.warning(
+                f"Heartbeat failed with code {result.returncode}: {result.stderr}"
+            )
 
         wa_send_message(token, phone_number_id, from_phone, response)
         with _lock:
@@ -605,7 +663,9 @@ def handle_heartbeat_command(
         return True
 
     except subprocess.TimeoutExpired:
-        response = "⏱️ Heartbeat timed out after 5 minutes. The cycle may still be running."
+        response = (
+            "⏱️ Heartbeat timed out after 5 minutes. The cycle may still be running."
+        )
         log.error(f"Heartbeat timeout for {from_name}")
         wa_send_message(token, phone_number_id, from_phone, response)
         with _lock:
@@ -625,10 +685,17 @@ def handle_heartbeat_command(
 # Incoming messages (WhatsApp webhook → inbox.json)
 # ---------------------------------------------------------------------------
 
+
 def _process_authorized_message(
-    token: str, phone_number_id: str, msg: dict, text: str,
-    from_name: str, from_phone: str, message_id: str,
-    chat_history: dict, inbox_items: list,
+    token: str,
+    phone_number_id: str,
+    msg: dict,
+    text: str,
+    from_name: str,
+    from_phone: str,
+    message_id: str,
+    chat_history: dict,
+    inbox_items: list,
 ):
     """Process an authorized incoming message (text and/or media) into an inbox item."""
     # Check for commands first
@@ -639,8 +706,12 @@ def _process_authorized_message(
         if command == "/heartbeat":
             extra_args = parts[1:] if len(parts) > 1 else []
             handle_heartbeat_command(
-                token, phone_number_id, from_phone, from_name,
-                chat_history, extra_args,
+                token,
+                phone_number_id,
+                from_phone,
+                from_name,
+                chat_history,
+                extra_args,
             )
             return
 
@@ -666,20 +737,24 @@ def _process_authorized_message(
     for media_id, media_type, filename_hint in media_list:
         local_path = download_wa_media(token, media_id, from_phone, filename_hint)
         if local_path:
-            attachments.append({
-                "type": media_type,
-                "path": local_path,
-                "filename": Path(local_path).name,
-            })
+            attachments.append(
+                {
+                    "type": media_type,
+                    "path": local_path,
+                    "filename": Path(local_path).name,
+                }
+            )
 
     # Build content string
     context = build_chat_context(chat_history, from_phone)
-    base_content = f"[WhatsApp {from_name}]: {effective_text}" if effective_text else f"[WhatsApp {from_name}]:"
+    base_content = (
+        f"[WhatsApp {from_name}]: {effective_text}"
+        if effective_text
+        else f"[WhatsApp {from_name}]:"
+    )
 
     if attachments:
-        attachment_lines = "\n".join(
-            f"- {a['type']}: {a['path']}" for a in attachments
-        )
+        attachment_lines = "\n".join(f"- {a['type']}: {a['path']}" for a in attachments)
         base_content += f"\n[Attachments]\n{attachment_lines}"
 
     if context:
@@ -701,7 +776,10 @@ def _process_authorized_message(
         inbox_item["attachments"] = attachments
 
     inbox_items.append(inbox_item)
-    log.info(f"Received from {from_name} ({from_phone}): {chat_text[:100]}" + (f" (+{len(attachments)} attachment(s))" if attachments else ""))
+    log.info(
+        f"Received from {from_name} ({from_phone}): {chat_text[:100]}"
+        + (f" (+{len(attachments)} attachment(s))" if attachments else "")
+    )
 
     # Send read receipt
     wa_send_read_receipt(token, phone_number_id, message_id)
@@ -714,8 +792,12 @@ def _process_authorized_message(
 
 
 def process_webhook_messages(
-    token: str, phone_number_id: str, webhook_data: dict,
-    state: dict, owner_username: str | None, chat_ids: list[str],
+    token: str,
+    phone_number_id: str,
+    webhook_data: dict,
+    state: dict,
+    owner_username: str | None,
+    chat_ids: list[str],
     chat_history: dict,
 ) -> tuple[str | None, list[str], list]:
     """Process incoming webhook messages.
@@ -749,43 +831,90 @@ def process_webhook_messages(
 
                 if not chat_ids and from_phone:
                     # First-ever message: auto-accept as owner
-                    log.info(f"Auto-discovered owner: {from_name} (phone: {from_phone})")
+                    log.info(
+                        f"Auto-discovered owner: {from_name} (phone: {from_phone})"
+                    )
                     owner_username = from_name
                     chat_ids.append(from_phone)
-                    keepass_store(KEEPASS_WHATSAPP_OWNER_USERNAME, "whatsapp", from_name, group="System")
-                    keepass_store(KEEPASS_WHATSAPP_CHAT_ID, "whatsapp", serialize_chat_ids(chat_ids), group="System")
+                    keepass_store(
+                        KEEPASS_WHATSAPP_OWNER_USERNAME,
+                        "whatsapp",
+                        from_name,
+                        group="System",
+                    )
+                    keepass_store(
+                        KEEPASS_WHATSAPP_CHAT_ID,
+                        "whatsapp",
+                        serialize_chat_ids(chat_ids),
+                        group="System",
+                    )
                     log.info("Owner name and phone saved to KeePass.")
                     _process_authorized_message(
-                        token, phone_number_id, msg, text, from_name, from_phone,
-                        message_id, chat_history, inbox_items,
+                        token,
+                        phone_number_id,
+                        msg,
+                        text,
+                        from_name,
+                        from_phone,
+                        message_id,
+                        chat_history,
+                        inbox_items,
                     )
 
                 elif from_phone in chat_ids:
                     # Known session — process normally
                     _process_authorized_message(
-                        token, phone_number_id, msg, text, from_name, from_phone,
-                        message_id, chat_history, inbox_items,
+                        token,
+                        phone_number_id,
+                        msg,
+                        text,
+                        from_name,
+                        from_phone,
+                        message_id,
+                        chat_history,
+                        inbox_items,
                     )
 
-                elif from_phone and owner_username and text and contains_username(text, owner_username):
+                elif (
+                    from_phone
+                    and owner_username
+                    and text
+                    and contains_username(text, owner_username)
+                ):
                     # New session authorized — message contains owner's name
-                    log.info(f"Authorized new session: {from_name} (phone: {from_phone})")
+                    log.info(
+                        f"Authorized new session: {from_name} (phone: {from_phone})"
+                    )
                     chat_ids.append(from_phone)
-                    keepass_store(KEEPASS_WHATSAPP_CHAT_ID, "whatsapp", serialize_chat_ids(chat_ids), group="System")
+                    keepass_store(
+                        KEEPASS_WHATSAPP_CHAT_ID,
+                        "whatsapp",
+                        serialize_chat_ids(chat_ids),
+                        group="System",
+                    )
 
                     welcome = "Welcome! You've been authorized. I'll forward messages to you from now on."
                     wa_send_message(token, phone_number_id, from_phone, welcome)
                     append_chat_message(chat_history, from_phone, "bot", welcome)
                     _process_authorized_message(
-                        token, phone_number_id, msg, text, from_name, from_phone,
-                        message_id, chat_history, inbox_items,
+                        token,
+                        phone_number_id,
+                        msg,
+                        text,
+                        from_name,
+                        from_phone,
+                        message_id,
+                        chat_history,
+                        inbox_items,
                     )
 
                 else:
                     # Unauthorized — reject
                     log.info(f"Rejected message from {from_name} (phone: {from_phone})")
                     wa_send_message(
-                        token, phone_number_id, from_phone,
+                        token,
+                        phone_number_id,
+                        from_phone,
                         "Sorry, I don't know you. Please include my owner's name in your message to get access.",
                     )
 
@@ -793,21 +922,32 @@ def process_webhook_messages(
 
 
 def process_webhook_and_persist(
-    token: str, phone_number_id: str, webhook_data: dict,
-    state: dict, owner_username: str | None, chat_ids: list[str],
+    token: str,
+    phone_number_id: str,
+    webhook_data: dict,
+    state: dict,
+    owner_username: str | None,
+    chat_ids: list[str],
     chat_history: dict,
 ) -> tuple[str | None, list[str]]:
     """Process webhook messages, write to inbox AND persist to history."""
     owner_username, chat_ids, items = process_webhook_messages(
-        token, phone_number_id, webhook_data,
-        state, owner_username, chat_ids, chat_history,
+        token,
+        phone_number_id,
+        webhook_data,
+        state,
+        owner_username,
+        chat_ids,
+        chat_history,
     )
     if items:
         if write_to_inbox(items):
             append_to_inbox_history(items)
             save_chat_history(chat_history)
         else:
-            log.error(f"Inbox write failed for {len(items)} item(s) — skipping history/chat save to allow retry")
+            log.error(
+                f"Inbox write failed for {len(items)} item(s) — skipping history/chat save to allow retry"
+            )
     return owner_username, chat_ids
 
 
@@ -824,7 +964,14 @@ def append_to_inbox_history(items: list):
 # Outgoing messages (outbox.json → WhatsApp)
 # ---------------------------------------------------------------------------
 
-def send_outbox_messages(token: str, phone_number_id: str, chat_ids: list[str], state: dict, chat_history: dict):
+
+def send_outbox_messages(
+    token: str,
+    phone_number_id: str,
+    chat_ids: list[str],
+    state: dict,
+    chat_history: dict,
+):
     """Forward unsent outbox messages to all authorized WhatsApp numbers."""
     from services.shared import read_outbox_locked
 
@@ -859,7 +1006,9 @@ def send_outbox_messages(token: str, phone_number_id: str, chat_ids: list[str], 
         if succeeded_phones:
             state["sent_hashes"].append(h)
             sent_count += 1
-            log.info(f"Sent to WhatsApp ({len(succeeded_phones)} chat(s)): {msg.get('subject', text[:60])!r}")
+            log.info(
+                f"Sent to WhatsApp ({len(succeeded_phones)} chat(s)): {msg.get('subject', text[:60])!r}"
+            )
             _append_outbox_history(msg)
             for phone in succeeded_phones:
                 append_chat_message(chat_history, phone, "bot", text)
@@ -869,7 +1018,9 @@ def send_outbox_messages(token: str, phone_number_id: str, chat_ids: list[str], 
 
     if sent_count:
         save_chat_history(chat_history)
-        log.info(f"Forwarded {sent_count} outbox message(s) to {len(chat_ids)} WhatsApp chat(s).")
+        log.info(
+            f"Forwarded {sent_count} outbox message(s) to {len(chat_ids)} WhatsApp chat(s)."
+        )
 
 
 def _append_outbox_history(msg: dict):
@@ -892,8 +1043,8 @@ def _append_outbox_history(msg: dict):
 def _format_outbox_msg(msg: dict) -> str:
     """Convert an outbox dict to a readable WhatsApp message."""
     msg_type = msg.get("type", "")
-    subject  = msg.get("subject", "")
-    content  = msg.get("content", "")
+    subject = msg.get("subject", "")
+    content = msg.get("content", "")
 
     lines = []
 
@@ -920,6 +1071,7 @@ def _format_outbox_msg(msg: dict) -> str:
 # Webhook HTTP server
 # ---------------------------------------------------------------------------
 
+
 class WhatsAppWebhookHandler(BaseHTTPRequestHandler):
     """HTTP handler for WhatsApp webhook verification and incoming messages."""
 
@@ -940,14 +1092,20 @@ class WhatsAppWebhookHandler(BaseHTTPRequestHandler):
         verify_token = params.get("hub.verify_token", [None])[0]
         challenge = params.get("hub.challenge", [None])[0]
 
-        if mode == "subscribe" and verify_token == self.server.wa_verify_token and challenge is not None:
+        if (
+            mode == "subscribe"
+            and verify_token == self.server.wa_verify_token
+            and challenge is not None
+        ):
             log.info("Webhook verification successful.")
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
             self.wfile.write(challenge.encode())
         else:
-            log.warning(f"Webhook verification failed. mode={mode}, challenge_present={challenge is not None}, token_match={verify_token == self.server.wa_verify_token}")
+            log.warning(
+                f"Webhook verification failed. mode={mode}, challenge_present={challenge is not None}, token_match={verify_token == self.server.wa_verify_token}"
+            )
             self.send_response(403)
             self.end_headers()
 
@@ -991,19 +1149,29 @@ class WhatsAppWebhookHandler(BaseHTTPRequestHandler):
         srv = self.server
         with _lock:
             srv.wa_owner_username, srv.wa_chat_ids = process_webhook_and_persist(
-                srv.wa_token, srv.wa_phone_number_id, data,
-                srv.wa_state, srv.wa_owner_username, srv.wa_chat_ids,
+                srv.wa_token,
+                srv.wa_phone_number_id,
+                data,
+                srv.wa_state,
+                srv.wa_owner_username,
+                srv.wa_chat_ids,
                 srv.wa_chat_history,
             )
             try:
                 save_state(srv.wa_state)
             except Exception as e:
-                log.error(f"Failed to save state after webhook processing: {e}", exc_info=True)
+                log.error(
+                    f"Failed to save state after webhook processing: {e}", exc_info=True
+                )
 
 
 def start_webhook_server(
-    verify_token: str, token: str, phone_number_id: str,
-    state: dict, owner_username: str | None, chat_ids: list[str],
+    verify_token: str,
+    token: str,
+    phone_number_id: str,
+    state: dict,
+    owner_username: str | None,
+    chat_ids: list[str],
     chat_history: dict,
 ) -> HTTPServer:
     """Start the webhook HTTP server in a daemon thread.
@@ -1031,6 +1199,7 @@ def start_webhook_server(
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
+
 
 def main():
     log.info("=" * 60)
@@ -1103,8 +1272,13 @@ def main():
 
     # Start webhook server
     server = start_webhook_server(
-        verify_token, token, phone_number_id,
-        state, owner_username, chat_ids, chat_history,
+        verify_token,
+        token,
+        phone_number_id,
+        state,
+        owner_username,
+        chat_ids,
+        chat_history,
     )
 
     # Register Caddy route
@@ -1135,11 +1309,16 @@ def main():
                         chat_ids = server.wa_chat_ids
                         owner_username = server.wa_owner_username
                         if chat_ids:
-                            send_outbox_messages(token, phone_number_id, chat_ids, state, chat_history)
+                            send_outbox_messages(
+                                token, phone_number_id, chat_ids, state, chat_history
+                            )
                             try:
                                 save_state(state)
                             except Exception as e:
-                                log.error(f"Failed to save state after outbox send: {e}", exc_info=True)
+                                log.error(
+                                    f"Failed to save state after outbox send: {e}",
+                                    exc_info=True,
+                                )
                     last_outbox_check = now
 
                 _write_heartbeat()

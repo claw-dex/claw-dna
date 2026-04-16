@@ -66,7 +66,11 @@ def main():
     cycles = load_json(MEMORY_DIR / "cycles.json") or []
     goals = load_json(MEMORY_DIR / "goal.json") or []
     journal = load_json(MEMORY_DIR / "journal.json") or []
-    failures = {"failures": [e for e in journal if isinstance(e, dict) and e.get("status") == "failed"]}
+    failures = {
+        "failures": [
+            e for e in journal if isinstance(e, dict) and e.get("status") == "failed"
+        ]
+    }
 
     if last_n:
         cycles = cycles[-last_n:]
@@ -86,10 +90,16 @@ def main():
         "session_duration": format_duration(session_elapsed),
         "total_cycles": len(cycles),
         "completed_cycles": len(completed),
-        "avg_cycle_duration": format_duration(sum(durations) / len(durations)) if durations else "N/A",
+        "avg_cycle_duration": (
+            format_duration(sum(durations) / len(durations)) if durations else "N/A"
+        ),
         "min_cycle_duration": format_duration(min(durations)) if durations else "N/A",
         "max_cycle_duration": format_duration(max(durations)) if durations else "N/A",
-        "utilization": f"{(total_active / session_elapsed * 100):.1f}%" if session_elapsed > 0 else "N/A",
+        "utilization": (
+            f"{(total_active / session_elapsed * 100):.1f}%"
+            if session_elapsed > 0
+            else "N/A"
+        ),
         "capabilities_count": 0,
         "tools_count": 0,
         "total_goals": len(goals) if isinstance(goals, list) else 0,
@@ -118,10 +128,18 @@ def main():
     print(f"- **Status:** {report['agent_status']}")
     print(f"- **Session duration:** {report['session_duration']}")
     print(f"- **Utilization:** {report['utilization']}")
-    print(f"- **Cycles:** {report['completed_cycles']} completed / {report['total_cycles']} total")
-    print(f"- **Avg cycle:** {report['avg_cycle_duration']} (min: {report['min_cycle_duration']}, max: {report['max_cycle_duration']})")
-    print(f"- **Capabilities:** {report['capabilities_count']} | Tools: {report['tools_count']}")
-    print(f"- **Goals tracked:** {report['total_goals']} | Failures: {report['failure_count']}")
+    print(
+        f"- **Cycles:** {report['completed_cycles']} completed / {report['total_cycles']} total"
+    )
+    print(
+        f"- **Avg cycle:** {report['avg_cycle_duration']} (min: {report['min_cycle_duration']}, max: {report['max_cycle_duration']})"
+    )
+    print(
+        f"- **Capabilities:** {report['capabilities_count']} | Tools: {report['tools_count']}"
+    )
+    print(
+        f"- **Goals tracked:** {report['total_goals']} | Failures: {report['failure_count']}"
+    )
     print()
     print(f"## Cycle History")
     print(f"| # | Duration | Status | Goal |")

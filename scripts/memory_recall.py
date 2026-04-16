@@ -42,7 +42,10 @@ def _check_memvid():
     """Ensure the memvid CLI is available."""
     if not shutil.which(MEMVID_BIN):
         print("ERROR: memvid CLI not found. Install with:", file=sys.stderr)
-        print("  curl -fsSL https://raw.githubusercontent.com/memvid/preflight-installer/main/install.sh | bash", file=sys.stderr)
+        print(
+            "  curl -fsSL https://raw.githubusercontent.com/memvid/preflight-installer/main/install.sh | bash",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
 
@@ -68,7 +71,9 @@ def parse_args(argv):
             try:
                 result["k"] = int(args[i])
             except ValueError:
-                print(f"ERROR: --k must be an integer, got: {args[i]!r}", file=sys.stderr)
+                print(
+                    f"ERROR: --k must be an integer, got: {args[i]!r}", file=sys.stderr
+                )
                 sys.exit(1)
         elif a == "--mv2" and i + 1 < len(args):
             i += 1
@@ -93,7 +98,10 @@ def _run_cmd(cmd):
     """Run a memvid CLI command, return parsed JSON output."""
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     if result.returncode != 0:
-        print(f"ERROR: {' '.join(cmd[:3])} failed: {result.stderr.strip()}", file=sys.stderr)
+        print(
+            f"ERROR: {' '.join(cmd[:3])} failed: {result.stderr.strip()}",
+            file=sys.stderr,
+        )
         sys.exit(1)
     return json.loads(result.stdout)
 
@@ -113,7 +121,10 @@ def _parse_date_to_unix(value):
             dt = dt.replace(tzinfo=timezone.utc)
         return str(int(dt.timestamp()))
     except ValueError:
-        print(f"ERROR: Invalid date format: {value!r}. Use ISO format (2026-03-25) or unix timestamp.", file=sys.stderr)
+        print(
+            f"ERROR: Invalid date format: {value!r}. Use ISO format (2026-03-25) or unix timestamp.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
 
@@ -121,9 +132,17 @@ def _clean_snippet(text):
     """Strip internal memvid metadata lines from snippet text."""
     lines = []
     for line in text.splitlines():
-        if line.startswith(("uri: mv2://", "tags: ", "labels: ",
-                            "category: ", "extractous_metadata:", "memvid.",
-                            "metadata: {")):
+        if line.startswith(
+            (
+                "uri: mv2://",
+                "tags: ",
+                "labels: ",
+                "category: ",
+                "extractous_metadata:",
+                "memvid.",
+                "metadata: {",
+            )
+        ):
             continue
         lines.append(line)
     return "\n".join(lines).strip()
@@ -137,13 +156,21 @@ def main():
         sys.exit(0)
 
     if not opts["timeline"] and not opts["question"]:
-        print("ERROR: QUESTION is required (first positional argument)", file=sys.stderr)
-        print("Usage: uv run python scripts/memory_recall.py \"your question here\"", file=sys.stderr)
+        print(
+            "ERROR: QUESTION is required (first positional argument)", file=sys.stderr
+        )
+        print(
+            'Usage: uv run python scripts/memory_recall.py "your question here"',
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     mv2 = Path(opts["mv2"]) if opts["mv2"] else MV2_PATH
     if not mv2.exists():
-        print(f"ERROR: {mv2} not found. Run at least one cycle-close to create it.", file=sys.stderr)
+        print(
+            f"ERROR: {mv2} not found. Run at least one cycle-close to create it.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     _check_memvid()
@@ -160,9 +187,13 @@ def _run_query(opts, mv2):
     k = opts["k"]
 
     cmd = [
-        MEMVID_BIN, "find", str(mv2),
-        "--query", question,
-        "--top-k", str(k),
+        MEMVID_BIN,
+        "find",
+        str(mv2),
+        "--query",
+        question,
+        "--top-k",
+        str(k),
         "--json",
     ]
     if opts.get("since"):
@@ -179,20 +210,27 @@ def _run_query(opts, mv2):
     if opts["json_mode"]:
         items = []
         for i, h in enumerate(hits, 1):
-            items.append({
-                "rank": i,
-                "score": h.get("score"),
-                "title": h.get("title", ""),
-                "snippet": _clean_snippet(h.get("text", "")),
-                "tags": h.get("metadata", {}).get("tags", []),
-                "frame_id": h.get("frame_id"),
-            })
-        print(json.dumps({
-            "query": question,
-            "k": k,
-            "total_hits": total,
-            "results": items,
-        }, indent=2))
+            items.append(
+                {
+                    "rank": i,
+                    "score": h.get("score"),
+                    "title": h.get("title", ""),
+                    "snippet": _clean_snippet(h.get("text", "")),
+                    "tags": h.get("metadata", {}).get("tags", []),
+                    "frame_id": h.get("frame_id"),
+                }
+            )
+        print(
+            json.dumps(
+                {
+                    "query": question,
+                    "k": k,
+                    "total_hits": total,
+                    "results": items,
+                },
+                indent=2,
+            )
+        )
     else:
         print(f'[MEMORY RECALL] "{question}" (k={k})\n')
         if not hits:
@@ -221,7 +259,9 @@ def _run_query(opts, mv2):
                     if len(lines) > 4:
                         print(f"    ... ({len(lines) - 4} more lines)")
                 print()
-        print(f"[MEMORY RECALL] {len(hits)} result(s) returned (total matches: {total}).")
+        print(
+            f"[MEMORY RECALL] {len(hits)} result(s) returned (total matches: {total})."
+        )
 
 
 def _run_timeline(opts, mv2):
@@ -241,15 +281,23 @@ def _run_timeline(opts, mv2):
         items = items.get("entries", [])
 
     if opts["json_mode"]:
-        print(json.dumps({
-            "mode": "timeline",
-            "count": len(items),
-            "since": since,
-            "entries": items,
-        }, indent=2, default=str))
+        print(
+            json.dumps(
+                {
+                    "mode": "timeline",
+                    "count": len(items),
+                    "since": since,
+                    "entries": items,
+                },
+                indent=2,
+                default=str,
+            )
+        )
     else:
-        print(f"[MEMORY TIMELINE] {len(items)} entries" +
-              (f" (since {since})" if since else ""))
+        print(
+            f"[MEMORY TIMELINE] {len(items)} entries"
+            + (f" (since {since})" if since else "")
+        )
         print()
         for entry in items:
             ts = entry.get("timestamp", "")
@@ -272,9 +320,13 @@ def recall(query: str, k: int = 5, until=None, json_mode: bool = False) -> list:
     if not shutil.which(MEMVID_BIN):
         return []
     cmd = [
-        MEMVID_BIN, "find", str(MV2_PATH),
-        "--query", query,
-        "--top-k", str(k),
+        MEMVID_BIN,
+        "find",
+        str(MV2_PATH),
+        "--query",
+        query,
+        "--top-k",
+        str(k),
         "--json",
     ]
     if until:

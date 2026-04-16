@@ -43,7 +43,7 @@ DEFAULTS = {
         "last_heartbeat": _now(),
         "last_cycle_run": _now(),
         "last_cycle_end": None,
-        "services": {}
+        "services": {},
     },
     "cycles.json": [],
     "goal.json": [],
@@ -53,13 +53,14 @@ DEFAULTS = {
 
 # ── Status constants ───────────────────────────────────────────────────────────
 
-STATUS_OK       = "ok"
+STATUS_OK = "ok"
 STATUS_REPAIRED = "repaired"
-STATUS_FAILED   = "failed"
-STATUS_BACKUP   = "backed-up"
+STATUS_FAILED = "failed"
+STATUS_BACKUP = "backed-up"
 
 
 # ── Core helpers (stateless) ───────────────────────────────────────────────────
+
 
 def _is_valid_json(path: Path) -> tuple[bool, object]:
     """Returns (valid, parsed_value). parsed_value is error string on failure."""
@@ -118,8 +119,8 @@ def _salvage_json_array(text: str) -> list | None:
         return None
 
     for candidate in [
-        stripped[:last_close + 1] + "]",
-        stripped[:last_close + 1].rstrip().rstrip(",") + "]",
+        stripped[: last_close + 1] + "]",
+        stripped[: last_close + 1].rstrip().rstrip(",") + "]",
     ]:
         try:
             data = json.loads(candidate)
@@ -133,6 +134,7 @@ def _salvage_json_array(text: str) -> list | None:
 
 # ── Per-file processing ────────────────────────────────────────────────────────
 
+
 def _process_file(filename: str, results: list, dry_run: bool, backup_only: bool):
     path = MEMORY_DIR / filename
     default = DEFAULTS.get(filename)
@@ -140,15 +142,43 @@ def _process_file(filename: str, results: list, dry_run: bool, backup_only: bool
     # Missing file
     if not path.exists():
         if dry_run or backup_only:
-            results.append({"file": filename, "status": STATUS_FAILED, "action": "would-create", "detail": "file missing"})
+            results.append(
+                {
+                    "file": filename,
+                    "status": STATUS_FAILED,
+                    "action": "would-create",
+                    "detail": "file missing",
+                }
+            )
             return
         if default is not None:
             if _write_safe(path, default):
-                results.append({"file": filename, "status": STATUS_REPAIRED, "action": "created-default", "detail": "file was missing"})
+                results.append(
+                    {
+                        "file": filename,
+                        "status": STATUS_REPAIRED,
+                        "action": "created-default",
+                        "detail": "file was missing",
+                    }
+                )
             else:
-                results.append({"file": filename, "status": STATUS_FAILED, "action": "create-failed", "detail": "could not write default"})
+                results.append(
+                    {
+                        "file": filename,
+                        "status": STATUS_FAILED,
+                        "action": "create-failed",
+                        "detail": "could not write default",
+                    }
+                )
         else:
-            results.append({"file": filename, "status": STATUS_FAILED, "action": "no-default", "detail": "file missing, no default known"})
+            results.append(
+                {
+                    "file": filename,
+                    "status": STATUS_FAILED,
+                    "action": "no-default",
+                    "detail": "file missing, no default known",
+                }
+            )
         return
 
     # BACKUP_ONLY mode
@@ -156,9 +186,23 @@ def _process_file(filename: str, results: list, dry_run: bool, backup_only: bool
         valid, _ = _is_valid_json(path)
         if valid:
             _backup(path)
-            results.append({"file": filename, "status": STATUS_BACKUP, "action": "backup-created", "detail": ""})
+            results.append(
+                {
+                    "file": filename,
+                    "status": STATUS_BACKUP,
+                    "action": "backup-created",
+                    "detail": "",
+                }
+            )
         else:
-            results.append({"file": filename, "status": STATUS_FAILED, "action": "skip-backup", "detail": "invalid JSON, backup skipped"})
+            results.append(
+                {
+                    "file": filename,
+                    "status": STATUS_FAILED,
+                    "action": "skip-backup",
+                    "detail": "invalid JSON, backup skipped",
+                }
+            )
         return
 
     # Validate JSON
@@ -166,21 +210,49 @@ def _process_file(filename: str, results: list, dry_run: bool, backup_only: bool
     if valid:
         if not dry_run:
             _backup(path)
-        results.append({"file": filename, "status": STATUS_OK, "action": "backup-updated" if not dry_run else "valid", "detail": ""})
+        results.append(
+            {
+                "file": filename,
+                "status": STATUS_OK,
+                "action": "backup-updated" if not dry_run else "valid",
+                "detail": "",
+            }
+        )
         return
 
     # Invalid JSON — attempt repair
     if dry_run:
-        results.append({"file": filename, "status": STATUS_FAILED, "action": "would-repair", "detail": f"invalid JSON: {data}"})
+        results.append(
+            {
+                "file": filename,
+                "status": STATUS_FAILED,
+                "action": "would-repair",
+                "detail": f"invalid JSON: {data}",
+            }
+        )
         return
 
     # Step 1: try .backup
     restored, bak_data = _restore_from_backup(path)
     if restored:
         if _write_safe(path, bak_data):
-            results.append({"file": filename, "status": STATUS_REPAIRED, "action": "restored-from-backup", "detail": f"original error: {data}"})
+            results.append(
+                {
+                    "file": filename,
+                    "status": STATUS_REPAIRED,
+                    "action": "restored-from-backup",
+                    "detail": f"original error: {data}",
+                }
+            )
             return
-        results.append({"file": filename, "status": STATUS_FAILED, "action": "backup-write-failed", "detail": f"backup read ok but write failed: {data}"})
+        results.append(
+            {
+                "file": filename,
+                "status": STATUS_FAILED,
+                "action": "backup-write-failed",
+                "detail": f"backup read ok but write failed: {data}",
+            }
+        )
         return
 
     # Step 2: try default
@@ -192,10 +264,24 @@ def _process_file(filename: str, results: list, dry_run: bool, backup_only: bool
             pass
 
         if _write_safe(path, default):
-            results.append({"file": filename, "status": STATUS_REPAIRED, "action": "reconstructed-default", "detail": f"original error: {data}; corrupt saved to {corrupt_path.name}"})
+            results.append(
+                {
+                    "file": filename,
+                    "status": STATUS_REPAIRED,
+                    "action": "reconstructed-default",
+                    "detail": f"original error: {data}; corrupt saved to {corrupt_path.name}",
+                }
+            )
             return
 
-    results.append({"file": filename, "status": STATUS_FAILED, "action": "unrecoverable", "detail": f"no backup, no default, error: {data}"})
+    results.append(
+        {
+            "file": filename,
+            "status": STATUS_FAILED,
+            "action": "unrecoverable",
+            "detail": f"no backup, no default, error: {data}",
+        }
+    )
 
 
 def _check_journal(results: list, dry_run: bool):
@@ -204,15 +290,28 @@ def _check_journal(results: list, dry_run: bool):
     filename = "journal.json"
 
     if not path.exists():
-        results.append({"file": filename, "status": STATUS_FAILED, "action": "missing", "detail": "journal.json not found"})
+        results.append(
+            {
+                "file": filename,
+                "status": STATUS_FAILED,
+                "action": "missing",
+                "detail": "journal.json not found",
+            }
+        )
         return
 
     text = path.read_text()
     if not text.strip():
         if not dry_run:
             _write_safe(path, [])
-        results.append({"file": filename, "status": STATUS_REPAIRED if not dry_run else STATUS_FAILED,
-                        "action": "empty-reset" if not dry_run else "would-reset", "detail": "journal was empty"})
+        results.append(
+            {
+                "file": filename,
+                "status": STATUS_REPAIRED if not dry_run else STATUS_FAILED,
+                "action": "empty-reset" if not dry_run else "would-reset",
+                "detail": "journal was empty",
+            }
+        )
         return
 
     try:
@@ -221,11 +320,24 @@ def _check_journal(results: list, dry_run: bool):
             raise ValueError("journal must be a list")
         if not dry_run:
             _backup(path)
-        results.append({"file": filename, "status": STATUS_OK, "action": "backup-updated" if not dry_run else "valid",
-                        "detail": f"{len(data)} entries"})
+        results.append(
+            {
+                "file": filename,
+                "status": STATUS_OK,
+                "action": "backup-updated" if not dry_run else "valid",
+                "detail": f"{len(data)} entries",
+            }
+        )
     except Exception as e:
         if dry_run:
-            results.append({"file": filename, "status": STATUS_FAILED, "action": "would-repair", "detail": f"invalid: {e}"})
+            results.append(
+                {
+                    "file": filename,
+                    "status": STATUS_FAILED,
+                    "action": "would-repair",
+                    "detail": f"invalid: {e}",
+                }
+            )
             return
 
         salvaged = _salvage_json_array(text)
@@ -236,8 +348,14 @@ def _check_journal(results: list, dry_run: bool):
             except Exception:
                 pass
             if _write_safe(path, salvaged):
-                results.append({"file": filename, "status": STATUS_REPAIRED, "action": "truncation-salvaged",
-                                "detail": f"kept {len(salvaged)} entries; corrupt saved"})
+                results.append(
+                    {
+                        "file": filename,
+                        "status": STATUS_REPAIRED,
+                        "action": "truncation-salvaged",
+                        "detail": f"kept {len(salvaged)} entries; corrupt saved",
+                    }
+                )
                 return
 
         bak = path.with_suffix(".json.backup")
@@ -246,8 +364,14 @@ def _check_journal(results: list, dry_run: bool):
         except Exception:
             pass
         _write_safe(path, [])
-        results.append({"file": filename, "status": STATUS_REPAIRED, "action": "reset-to-empty",
-                        "detail": f"corrupt saved to journal.json.backup; error: {e}"})
+        results.append(
+            {
+                "file": filename,
+                "status": STATUS_REPAIRED,
+                "action": "reset-to-empty",
+                "detail": f"corrupt saved to journal.json.backup; error: {e}",
+            }
+        )
 
 
 def _normalize_statuses(results: list, dry_run: bool):
@@ -269,11 +393,18 @@ def _normalize_statuses(results: list, dry_run: bool):
             updated.append(entry)
         if changed and not dry_run:
             _write_safe(path, updated)
-            results.append({"file": filename, "status": STATUS_REPAIRED, "action": "status-normalized",
-                            "detail": "migrated 'in-progress' → 'in_progress'"})
+            results.append(
+                {
+                    "file": filename,
+                    "status": STATUS_REPAIRED,
+                    "action": "status-normalized",
+                    "detail": "migrated 'in-progress' → 'in_progress'",
+                }
+            )
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
+
 
 def run_repair(dry_run: bool = False, backup_only: bool = False) -> dict:
     """Run memory repair and return a summary dict.
@@ -290,41 +421,53 @@ def run_repair(dry_run: bool = False, backup_only: bool = False) -> dict:
         _process_file(filename, results, dry_run, backup_only)
     _check_journal(results, dry_run)
 
-    ok_count      = sum(1 for r in results if r["status"] in (STATUS_OK, STATUS_BACKUP))
+    ok_count = sum(1 for r in results if r["status"] in (STATUS_OK, STATUS_BACKUP))
     repaired_count = sum(1 for r in results if r["status"] == STATUS_REPAIRED)
-    failed_count  = sum(1 for r in results if r["status"] == STATUS_FAILED)
+    failed_count = sum(1 for r in results if r["status"] == STATUS_FAILED)
     issues = [
         f"{r['action']}: {r['file']}" + (f" ({r['detail']})" if r.get("detail") else "")
-        for r in results if r["status"] not in (STATUS_OK, STATUS_BACKUP)
+        for r in results
+        if r["status"] not in (STATUS_OK, STATUS_BACKUP)
     ]
-    return {"ok": ok_count, "repaired": repaired_count, "failed": failed_count,
-            "issues": issues, "_results": results}
+    return {
+        "ok": ok_count,
+        "repaired": repaired_count,
+        "failed": failed_count,
+        "issues": issues,
+        "_results": results,
+    }
 
 
 # ── CLI entry point ────────────────────────────────────────────────────────────
 
+
 def main():
-    dry_run     = "--dry-run" in sys.argv
-    backup_only = "--backup"  in sys.argv
-    quiet       = "--quiet"   in sys.argv
-    json_output = "--json"    in sys.argv
+    dry_run = "--dry-run" in sys.argv
+    backup_only = "--backup" in sys.argv
+    quiet = "--quiet" in sys.argv
+    json_output = "--json" in sys.argv
 
     summary = run_repair(dry_run=dry_run, backup_only=backup_only)
-    results     = summary["_results"]
-    ok_count    = summary["ok"]
+    results = summary["_results"]
+    ok_count = summary["ok"]
     repaired_count = summary["repaired"]
-    failed_count   = summary["failed"]
+    failed_count = summary["failed"]
 
     if json_output:
-        print(json.dumps({
-            "timestamp": _now(),
-            "dry_run": dry_run,
-            "backup_only": backup_only,
-            "ok": ok_count,
-            "repaired": repaired_count,
-            "failed": failed_count,
-            "results": results,
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "timestamp": _now(),
+                    "dry_run": dry_run,
+                    "backup_only": backup_only,
+                    "ok": ok_count,
+                    "repaired": repaired_count,
+                    "failed": failed_count,
+                    "results": results,
+                },
+                indent=2,
+            )
+        )
         sys.exit(1 if failed_count > 0 else 0)
 
     if quiet:
@@ -350,7 +493,9 @@ def main():
     print(f"  {'FILE':<{col_w}} {'STATUS':<12} {'ACTION':<25} DETAIL")
     print(f"  {'-'*col_w} {'-'*12} {'-'*25} ------")
     for r in results:
-        print(f"  {r['file']:<{col_w}} {r['status'].upper():<12} {r['action']:<25} {r['detail']}")
+        print(
+            f"  {r['file']:<{col_w}} {r['status'].upper():<12} {r['action']:<25} {r['detail']}"
+        )
 
     print()
     print(f"  OK: {ok_count}  |  Repaired: {repaired_count}  |  Failed: {failed_count}")
@@ -358,7 +503,9 @@ def main():
     if failed_count == 0:
         print("Result: ALL FILES HEALTHY")
     else:
-        print(f"Result: {failed_count} FILE(S) UNRECOVERABLE — manual intervention needed")
+        print(
+            f"Result: {failed_count} FILE(S) UNRECOVERABLE — manual intervention needed"
+        )
 
     sys.exit(1 if failed_count > 0 else 0)
 

@@ -73,6 +73,7 @@ SCRIPTS = Path("/agent/scripts")
 
 # ── Inlined: normalize_cycles logic ─────────────────────────────────────────
 
+
 def _normalize_cycle_entry(entry: dict) -> tuple:
     """Normalize a single cycles.json entry. Returns (normalized_entry, changes_count).
 
@@ -86,29 +87,43 @@ def _normalize_cycle_entry(entry: dict) -> tuple:
     n = 0
 
     if "timestamp" in c and "start" not in c:
-        c["start"] = c.pop("timestamp"); n += 1
+        c["start"] = c.pop("timestamp")
+        n += 1
     elif "timestamp" in c:
-        del c["timestamp"]; n += 1
+        del c["timestamp"]
+        n += 1
 
     if "goal" in c and "summary" not in c:
-        c["summary"] = c.pop("goal"); n += 1
+        c["summary"] = c.pop("goal")
+        n += 1
     elif "goal" in c and "summary" in c:
-        del c["goal"]; n += 1
+        del c["goal"]
+        n += 1
 
     if "start" in c and "end" in c and "duration_seconds" not in c:
         try:
-            dur = round((datetime.fromisoformat(c["end"]) - datetime.fromisoformat(c["start"])).total_seconds(), 1)
-            c["duration_seconds"] = dur; n += 1
+            dur = round(
+                (
+                    datetime.fromisoformat(c["end"])
+                    - datetime.fromisoformat(c["start"])
+                ).total_seconds(),
+                1,
+            )
+            c["duration_seconds"] = dur
+            n += 1
         except (ValueError, TypeError):
             pass
 
     if "status" not in c:
-        c["status"] = "completed"; n += 1
+        c["status"] = "completed"
+        n += 1
     if "type" not in c:
-        c["type"] = "evolve"; n += 1
+        c["type"] = "evolve"
+        n += 1
     if "cycle" in c and not isinstance(c["cycle"], int):
         try:
-            c["cycle"] = int(c["cycle"]); n += 1
+            c["cycle"] = int(c["cycle"])
+            n += 1
         except (ValueError, TypeError):
             pass
 
@@ -141,6 +156,7 @@ def _run_normalize_inlined(cycles_path: Path, verbose: bool = True) -> int:
 
 
 # ── Argument parsing (no external deps) ─────────────────────────────────────
+
 
 def parse_args(argv):
     args = argv[1:]
@@ -224,6 +240,7 @@ def now_iso():
 
 # ── Stale-count check ────────────────────────────────────────────────────────
 
+
 def check_stale_counts():
     """Auto-detect mismatched counts in AGENTS.md and prompts.
 
@@ -302,13 +319,18 @@ def check_stale_counts():
                 # Cache miss — run self_test and cache result
                 try:
                     import importlib.util
-                    spec = importlib.util.spec_from_file_location("self_test", str(self_test))
+
+                    spec = importlib.util.spec_from_file_location(
+                        "self_test", str(self_test)
+                    )
                     self_test_mod = importlib.util.module_from_spec(spec)
                     spec.loader.exec_module(self_test_mod)
                     self_test_mod.run_all()
                     actual_tests = len(self_test_mod.results)
                     if actual_tests:
-                        _count_cache.write_text(json.dumps({"mtime": current_mtime, "count": actual_tests}))
+                        _count_cache.write_text(
+                            json.dumps({"mtime": current_mtime, "count": actual_tests})
+                        )
                 except Exception:
                     pass
         except Exception:
@@ -331,8 +353,8 @@ def check_stale_counts():
     scripts_dir = Path("/agent/scripts")
     if scripts_dir.exists():
         actual_scripts = len(
-            glob_mod.glob(str(scripts_dir / "*.py")) +
-            glob_mod.glob(str(scripts_dir / "*.sh"))
+            glob_mod.glob(str(scripts_dir / "*.py"))
+            + glob_mod.glob(str(scripts_dir / "*.sh"))
         )
         agents_md = Path("/agent/AGENTS.md")
         if agents_md.exists():
@@ -360,8 +382,12 @@ def check_stale_counts():
 
 # Files to backup (mirrors BACKUP_FILES + OPTIONAL_FILES in memory_backup.py)
 _BACKUP_FILES = [
-    "state.json", "cycles.json",
-    "goal.json", "journal.json", "server_errors.json", "command_history.json",
+    "state.json",
+    "cycles.json",
+    "goal.json",
+    "journal.json",
+    "server_errors.json",
+    "command_history.json",
     "bootstrap.json",
 ]
 _BACKUP_OPTIONAL = []
@@ -389,8 +415,12 @@ def _auto_backup_if_stale(dry_run: bool = False) -> None:
     if existing:
         latest = existing[-1]
         try:
-            latest_dt = datetime.strptime(latest.name, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
-            last_backup_age_secs = (datetime.now(timezone.utc) - latest_dt).total_seconds()
+            latest_dt = datetime.strptime(latest.name, "%Y%m%dT%H%M%SZ").replace(
+                tzinfo=timezone.utc
+            )
+            last_backup_age_secs = (
+                datetime.now(timezone.utc) - latest_dt
+            ).total_seconds()
         except ValueError:
             pass
 
@@ -401,9 +431,12 @@ def _auto_backup_if_stale(dry_run: bool = False) -> None:
         return
 
     if dry_run:
-        print(f"  [dry-run] backup — would create snapshot (last backup "
-              f"{int(last_backup_age_secs/60)}m ago)" if last_backup_age_secs else
-              f"  [dry-run] backup — would create snapshot (no prior backup)")
+        print(
+            f"  [dry-run] backup — would create snapshot (last backup "
+            f"{int(last_backup_age_secs/60)}m ago)"
+            if last_backup_age_secs
+            else f"  [dry-run] backup — would create snapshot (no prior backup)"
+        )
         return
 
     # Create timestamped snapshot directory
@@ -430,12 +463,17 @@ def _auto_backup_if_stale(dry_run: bool = False) -> None:
         shutil.rmtree(str(old), ignore_errors=True)
         pruned += 1
 
-    age_str = f"{int(last_backup_age_secs/60)}m ago" if last_backup_age_secs else "first backup"
+    age_str = (
+        f"{int(last_backup_age_secs/60)}m ago"
+        if last_backup_age_secs
+        else "first backup"
+    )
     prune_str = f", pruned {pruned}" if pruned else ""
     print(f"  ✓ backup — created {ts} ({copied} files{prune_str}; last was {age_str})")
 
 
 # ── Auto Memory Sync ──────────────────────────────────────────────────────
+
 
 def _sync_auto_memory() -> None:
     """Sync JSON memory → .md files via memory_sync.py.
@@ -444,6 +482,7 @@ def _sync_auto_memory() -> None:
     """
     try:
         from scripts.memory_sync import sync_all
+
         sync_all()
         print(f"  ✓ auto memory — synced via memory_sync.py")
     except Exception as e:
@@ -451,6 +490,7 @@ def _sync_auto_memory() -> None:
 
 
 # ── Long-term memory (memvid via memory_ingest.py) ───────────────────────────
+
 
 def _store_to_memvid(journal_entry: dict) -> None:
     """Store a journal entry into long-term semantic memory via memory_ingest.py.
@@ -465,6 +505,7 @@ def _store_to_memvid(journal_entry: dict) -> None:
 
     try:
         from scripts.memory_ingest import append_json, DEFAULT_MV2
+
         append_json(DEFAULT_MV2, entry_json, quiet=True)
         print(f"  ✓ memvid — stored cycle {cycle} to long_term_memory.mv2")
     except SystemExit as e:
@@ -474,6 +515,7 @@ def _store_to_memvid(journal_entry: dict) -> None:
 
 
 # ── Main ────────────────────────────────────────────────────────────────────
+
 
 def main():
     opts = parse_args(sys.argv)
@@ -494,7 +536,13 @@ def main():
     if opts["type"] not in valid_types:
         die(f"--type must be one of: {', '.join(sorted(valid_types))}")
 
-    valid_cats = {"reliability", "observability", "capability", "efficiency", "prompt_evolution"}
+    valid_cats = {
+        "reliability",
+        "observability",
+        "capability",
+        "efficiency",
+        "prompt_evolution",
+    }
     if opts["category"] and opts["category"] not in valid_cats:
         die(f"--category must be one of: {', '.join(sorted(valid_cats))}")
 
@@ -507,11 +555,11 @@ def main():
 
     # ── Load existing data ───────────────────────────────────────────────────
     cycles_path = MEMORY / "cycles.json"
-    state_path  = MEMORY / "state.json"
+    state_path = MEMORY / "state.json"
     journal_path = MEMORY / "journal.json"
 
-    cycles  = load_json(cycles_path)
-    state   = load_json(state_path)
+    cycles = load_json(cycles_path)
+    state = load_json(state_path)
     journal = load_json(journal_path)
 
     if not isinstance(cycles, list):
@@ -525,10 +573,14 @@ def main():
     if opts["cycle"] is None:
         # Prefer the most recent in_progress entry — cycle_start.py always writes one.
         # This is immune to state.cycle_number being pre-updated by the agent.
-        ip_entries = [c for c in cycles if c.get("status") == "in_progress" and c.get("cycle")]
+        ip_entries = [
+            c for c in cycles if c.get("status") == "in_progress" and c.get("cycle")
+        ]
         if ip_entries:
             detected = max(c["cycle"] for c in ip_entries)
-            print(f"  ℹ  --cycle not specified — auto-detected from in_progress entry: {detected}")
+            print(
+                f"  ℹ  --cycle not specified — auto-detected from in_progress entry: {detected}"
+            )
         else:
             # Fallback: state.cycle_number + 1 (no in_progress entry means cycle_start.py didn't run)
             state_cycle = state.get("cycle_number")
@@ -538,8 +590,10 @@ def main():
                 detected = max(c.get("cycle", 0) for c in cycles) + 1
             else:
                 detected = 1
-            print(f"  ℹ  --cycle not specified — auto-detected from state: {detected} "
-                  f"(no in_progress entry found)")
+            print(
+                f"  ℹ  --cycle not specified — auto-detected from state: {detected} "
+                f"(no in_progress entry found)"
+            )
         opts["cycle"] = detected
 
     cycle_n = opts["cycle"]
@@ -563,7 +617,9 @@ def main():
             "status": "in_progress",
         }
         cycles.append(cycle_entry)
-        print(f"  ⚠  No existing entry for cycle {cycle_n} — created stub (start={stub_start[:19]})")
+        print(
+            f"  ⚠  No existing entry for cycle {cycle_n} — created stub (start={stub_start[:19]})"
+        )
 
     start_ts = cycle_entry.get("start")
     duration = None
@@ -610,9 +666,11 @@ def main():
         journal_entry["category"] = opts["category"]
 
     # ── Print plan ───────────────────────────────────────────────────────────
-    print(f"\n[cycle-close] Cycle {cycle_n} — {opts['type']}" +
-          (f" / {opts['category']}" if opts['category'] else "") +
-          f" — {opts['status']}")
+    print(
+        f"\n[cycle-close] Cycle {cycle_n} — {opts['type']}"
+        + (f" / {opts['category']}" if opts["category"] else "")
+        + f" — {opts['status']}"
+    )
     if duration is not None:
         m, s = divmod(duration, 60)
         print(f"  Duration:  {m}m {s}s ({duration}s)")
@@ -643,7 +701,9 @@ def main():
     # 3. Append journal entry
     already_in_journal = any(e.get("cycle") == cycle_n for e in journal)
     if already_in_journal:
-        print(f"  ⚠ journal.json — entry for cycle {cycle_n} already exists, skipping duplicate write")
+        print(
+            f"  ⚠ journal.json — entry for cycle {cycle_n} already exists, skipping duplicate write"
+        )
     else:
         journal.append(journal_entry)
         write_atomic(journal_path, journal)

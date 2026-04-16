@@ -21,7 +21,9 @@ def render():
         cred_result = run_script("keepass.py", ["--json", "get", KEEPASS_ENTRY_TITLE])
         if cred_result.get("ok") and cred_result.get("exit_code") == 0:
             try:
-                st.session_state["imap_cred_data"] = json.loads(cred_result.get("stdout", "{}"))
+                st.session_state["imap_cred_data"] = json.loads(
+                    cred_result.get("stdout", "{}")
+                )
             except json.JSONDecodeError:
                 st.session_state["imap_cred_data"] = None
         else:
@@ -38,27 +40,41 @@ def render():
             "For Gmail, use an App Password (https://myaccount.google.com/apppasswords)."
         )
         input_server = st.text_input(
-            "IMAP server", key="imap_input_server", placeholder="imap.gmail.com",
+            "IMAP server",
+            key="imap_input_server",
+            placeholder="imap.gmail.com",
         )
         input_email = st.text_input(
-            "Email address", key="imap_input_email", placeholder="you@example.com",
+            "Email address",
+            key="imap_input_email",
+            placeholder="you@example.com",
         )
         input_password = st.text_input(
-            "Password", key="imap_input_password",
+            "Password",
+            key="imap_input_password",
             type="password",
         )
         if st.button("Save Credentials", key="imap_save_cred"):
             if not input_email or not input_password or not input_server:
                 st.error("IMAP server, email, and password are all required.")
             else:
-                result = run_script("keepass.py", [
-                    "--json", "store",
-                    "--title", KEEPASS_ENTRY_TITLE,
-                    "--username", input_email.strip(),
-                    "--password", input_password.strip(),
-                    "--url", input_server.strip(),
-                    "--group", KEEPASS_GROUP,
-                ])
+                result = run_script(
+                    "keepass.py",
+                    [
+                        "--json",
+                        "store",
+                        "--title",
+                        KEEPASS_ENTRY_TITLE,
+                        "--username",
+                        input_email.strip(),
+                        "--password",
+                        input_password.strip(),
+                        "--url",
+                        input_server.strip(),
+                        "--group",
+                        KEEPASS_GROUP,
+                    ],
+                )
                 if result.get("ok") and result.get("exit_code") == 0:
                     st.success("Credentials saved to KeePass.")
                     # Clear caches so they re-verify
@@ -68,7 +84,9 @@ def render():
                     st.session_state.pop("imap_cred_check_ts", None)
                     st.rerun()
                 else:
-                    st.error(f"Failed to save: {result.get('stderr', result.get('error', 'Unknown error'))}")
+                    st.error(
+                        f"Failed to save: {result.get('stderr', result.get('error', 'Unknown error'))}"
+                    )
     else:
         # ── Credentials exist — verify auth (cached 600s) ────────
         user_email = cred_data.get("username", "")
@@ -91,7 +109,11 @@ def render():
         auth_info = st.session_state.get("imap_auth")
         token_valid = False
 
-        if auth_info and isinstance(auth_info, dict) and auth_info.get("status") == "ok":
+        if (
+            auth_info
+            and isinstance(auth_info, dict)
+            and auth_info.get("status") == "ok"
+        ):
             token_valid = True
             st.success(f"Connected — {auth_info.get('email', user_email)}")
         elif auth_info and auth_info.get("error"):
@@ -100,7 +122,9 @@ def render():
             st.info("Credentials present. Could not verify connection.")
 
         if st.button("Remove Credentials", key="imap_remove_cred"):
-            del_result = run_script("keepass.py", ["--json", "delete", KEEPASS_ENTRY_TITLE])
+            del_result = run_script(
+                "keepass.py", ["--json", "delete", KEEPASS_ENTRY_TITLE]
+            )
             if del_result.get("ok") and del_result.get("exit_code") == 0:
                 st.session_state.pop("imap_auth", None)
                 st.session_state.pop("imap_auth_ts", None)
@@ -112,7 +136,9 @@ def render():
                 st.success("Credentials removed.")
                 st.rerun()
             else:
-                st.error(f"Failed to remove: {del_result.get('stderr', 'Unknown error')}")
+                st.error(
+                    f"Failed to remove: {del_result.get('stderr', 'Unknown error')}"
+                )
 
         # ── Inbox (only when auth is valid) ──────────────────────
         if token_valid:
@@ -122,13 +148,16 @@ def render():
             col_filter, col_archive, col_refresh = st.columns([2, 2, 1])
             with col_filter:
                 status_filter = st.selectbox(
-                    "Status", ["Unread", "Read", "All"],
+                    "Status",
+                    ["Unread", "Read", "All"],
                     key="imap_gmail_status",
                 )
             with col_archive:
                 if is_gmail:
                     hide_archived = st.checkbox(
-                        "Hide archived", value=True, key="imap_gmail_hide_archived",
+                        "Hide archived",
+                        value=True,
+                        key="imap_gmail_hide_archived",
                     )
                 else:
                     hide_archived = True  # non-Gmail: always INBOX
@@ -150,7 +179,9 @@ def render():
 
             if refresh:
                 for k in list(st.session_state.keys()):
-                    if k.startswith("imap_gmail_cache") or k.startswith("imap_read_cache_"):
+                    if k.startswith("imap_gmail_cache") or k.startswith(
+                        "imap_read_cache_"
+                    ):
                         st.session_state.pop(k, None)
                 for k in list(st.session_state.keys()):
                     if k.startswith("imap_email_select_"):
@@ -158,12 +189,18 @@ def render():
 
             gmail_now = time.time()
             if gmail_now - st.session_state.get(cache_ts_key, 0) > 60:
-                fetch_result = run_script("email_imap.py", [
-                    "fetch",
-                    "--mailbox", mailbox,
-                    "--filter", imap_filter,
-                    "--max", "20",
-                ])
+                fetch_result = run_script(
+                    "email_imap.py",
+                    [
+                        "fetch",
+                        "--mailbox",
+                        mailbox,
+                        "--filter",
+                        imap_filter,
+                        "--max",
+                        "20",
+                    ],
+                )
                 if fetch_result.get("ok") and fetch_result.get("exit_code") == 0:
                     stdout = fetch_result.get("stdout", "").strip()
                     if stdout:
@@ -178,9 +215,13 @@ def render():
                     # Try parsing JSON error from stdout
                     try:
                         err_data = json.loads(fetch_result.get("stdout", "{}"))
-                        st.session_state[cache_key] = {"error": err_data.get("error", stderr or "Fetch failed")}
+                        st.session_state[cache_key] = {
+                            "error": err_data.get("error", stderr or "Fetch failed")
+                        }
                     except json.JSONDecodeError:
-                        st.session_state[cache_key] = {"error": stderr or "Fetch failed"}
+                        st.session_state[cache_key] = {
+                            "error": stderr or "Fetch failed"
+                        }
                 st.session_state[cache_ts_key] = gmail_now
 
             gmail_data = st.session_state.get(cache_key, {})
@@ -198,19 +239,25 @@ def render():
 
                     rows = []
                     for msg in messages:
-                        rows.append({
-                            "Subject": msg.get("subject", "(no subject)"),
-                            "From": msg.get("from", "unknown"),
-                            "Date": msg.get("date", ""),
-                            "_uid": msg.get("uid", ""),
-                        })
+                        rows.append(
+                            {
+                                "Subject": msg.get("subject", "(no subject)"),
+                                "From": msg.get("from", "unknown"),
+                                "Date": msg.get("date", ""),
+                                "_uid": msg.get("uid", ""),
+                            }
+                        )
                     df = pd.DataFrame(rows)
 
                     df["_date_parsed"] = pd.to_datetime(df["Date"], errors="coerce")
                     df = df.sort_values("_date_parsed", ascending=False)
                     sorted_uids = df["_uid"].tolist()
-                    df = df.drop(columns=["_date_parsed", "_uid"]).reset_index(drop=True)
-                    sorted_messages = [uid_to_msg[u] for u in sorted_uids if u in uid_to_msg]
+                    df = df.drop(columns=["_date_parsed", "_uid"]).reset_index(
+                        drop=True
+                    )
+                    sorted_messages = [
+                        uid_to_msg[u] for u in sorted_uids if u in uid_to_msg
+                    ]
 
                     st.caption(f"Showing {len(df)} emails")
                     st.dataframe(
@@ -240,13 +287,20 @@ def render():
                         read_cache_key = f"imap_read_cache_{selected_uid}"
                         if read_cache_key not in st.session_state:
                             with st.spinner("Loading email..."):
-                                read_result = run_script("email_imap.py", [
-                                    "read",
-                                    "--mailbox", mailbox,
-                                    "--uid", selected_uid,
-                                ])
-                                if (read_result.get("ok")
-                                        and read_result.get("exit_code") == 0):
+                                read_result = run_script(
+                                    "email_imap.py",
+                                    [
+                                        "read",
+                                        "--mailbox",
+                                        mailbox,
+                                        "--uid",
+                                        selected_uid,
+                                    ],
+                                )
+                                if (
+                                    read_result.get("ok")
+                                    and read_result.get("exit_code") == 0
+                                ):
                                     try:
                                         st.session_state[read_cache_key] = json.loads(
                                             read_result.get("stdout", "{}")
@@ -257,7 +311,9 @@ def render():
                                         }
                                 else:
                                     st.session_state[read_cache_key] = {
-                                        "error": read_result.get("stderr", "Read failed")
+                                        "error": read_result.get(
+                                            "stderr", "Read failed"
+                                        )
                                     }
 
                         email_data = st.session_state.get(read_cache_key, {})

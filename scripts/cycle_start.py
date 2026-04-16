@@ -41,17 +41,23 @@ from scripts.memory_repair import run_repair as _run_memory_repair  # noqa: E402
 
 # ── Flags ───────────────────────────────────────────────────────────────────────
 args = sys.argv[1:]
-SHORT            = "--short"           in args
-JSON_MODE        = "--json"            in args
-NO_REPAIR        = "--no-repair"       in args
+SHORT = "--short" in args
+JSON_MODE = "--json" in args
+NO_REPAIR = "--no-repair" in args
 CLEAR_OLD_ERRORS = "--clear-old-errors" in args
-CLEAR_ALL_ERRORS = "--clear-all-errors" in args   # purge ALL errors (use when fix is confirmed)
-EVOLVE_MODE      = "--mode" in args and args[args.index("--mode") + 1:args.index("--mode") + 2] == ["evolve"]
+CLEAR_ALL_ERRORS = (
+    "--clear-all-errors" in args
+)  # purge ALL errors (use when fix is confirmed)
+EVOLVE_MODE = "--mode" in args and args[
+    args.index("--mode") + 1 : args.index("--mode") + 2
+] == ["evolve"]
 
 # ── Helpers ─────────────────────────────────────────────────────────────────────
 
+
 def now_iso():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
 
 def load_json(path: Path):
     try:
@@ -59,27 +65,36 @@ def load_json(path: Path):
     except Exception:
         return None
 
+
 def ago(ts_str: str) -> str:
     try:
         ts = datetime.datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
         delta = datetime.datetime.now(datetime.timezone.utc) - ts
         s = int(delta.total_seconds())
-        if s < 60:   return f"{s}s ago"
-        if s < 3600: return f"{s//60}m ago"
-        if s < 86400: return f"{s//3600}h ago"
+        if s < 60:
+            return f"{s}s ago"
+        if s < 3600:
+            return f"{s//60}m ago"
+        if s < 86400:
+            return f"{s//3600}h ago"
         return f"{s//86400}d ago"
     except Exception:
         return ts_str
 
+
 def fmt_dur(seconds: float) -> str:
     s = int(seconds)
-    if s < 60:   return f"{s}s"
-    if s < 3600: return f"{s//60}m {s%60}s"
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s//60}m {s%60}s"
     return f"{s//3600}h {(s%3600)//60}m"
+
 
 def portal_health() -> str:
     try:
         import urllib.request
+
         with urllib.request.urlopen(
             "http://localhost:8081/app/_stcore/health", timeout=3
         ) as resp:
@@ -130,6 +145,7 @@ def _auto_archive_journal_inlined(journal: list, keep: int = 20) -> tuple:
 
 # ── Orphaned Cycle Recovery ─────────────────────────────────────────────────────
 
+
 def check_orphaned_cycles(cycles: list, max_age_minutes: int = 30) -> tuple:
     """Detect in-progress cycles older than max_age_minutes and mark as interrupted.
 
@@ -160,14 +176,18 @@ def check_orphaned_cycles(cycles: list, max_age_minutes: int = 30) -> tuple:
 
 # ── Data Loading & Summarization ────────────────────────────────────────────────
 
+
 def load_all():
-    state       = load_json(MEMORY / "state.json") or {}
-    goals_raw   = load_json(MEMORY / "goal.json")
-    goals       = goals_raw if isinstance(goals_raw, list) else \
-                  (goals_raw.get("goals", []) if isinstance(goals_raw, dict) else [])
-    cycles      = load_json(MEMORY / "cycles.json") or []
-    journal     = load_json(MEMORY / "journal.json") or []
-    inbox       = load_json(MESSAGES / "inbox.json")
+    state = load_json(MEMORY / "state.json") or {}
+    goals_raw = load_json(MEMORY / "goal.json")
+    goals = (
+        goals_raw
+        if isinstance(goals_raw, list)
+        else (goals_raw.get("goals", []) if isinstance(goals_raw, dict) else [])
+    )
+    cycles = load_json(MEMORY / "cycles.json") or []
+    journal = load_json(MEMORY / "journal.json") or []
+    inbox = load_json(MESSAGES / "inbox.json")
     server_errors_raw = load_json(MEMORY / "server_errors.json")
     server_errors = server_errors_raw if isinstance(server_errors_raw, list) else []
 
@@ -180,8 +200,12 @@ def load_all():
     capabilities = {
         "capabilities": capabilities_list,
         "total": len(capabilities_list),
-        "by_category": dict(Counter(c.get("category", "unknown") for c in capabilities_list)),
-        "portal_modules": sum(1 for c in capabilities_list if c.get("category") == "portal"),
+        "by_category": dict(
+            Counter(c.get("category", "unknown") for c in capabilities_list)
+        ),
+        "portal_modules": sum(
+            1 for c in capabilities_list if c.get("category") == "portal"
+        ),
     }
 
     return state, goals, cycles, failures, journal, capabilities, inbox, server_errors
@@ -202,7 +226,9 @@ def _error_age_hours(error: dict) -> float:
         return 9999.0
 
 
-def auto_archive_old_errors(server_errors: list, max_age_hours: float = 48.0) -> tuple[list, int]:
+def auto_archive_old_errors(
+    server_errors: list, max_age_hours: float = 48.0
+) -> tuple[list, int]:
     """Remove errors older than max_age_hours from server_errors list.
     Returns (kept_errors, removed_count). Writes back to disk if any removed.
     """
@@ -214,6 +240,7 @@ def auto_archive_old_errors(server_errors: list, max_age_hours: float = 48.0) ->
         errors_path = MEMORY / "server_errors.json"
         try:
             import tempfile
+
             tmp_fd, tmp_path = tempfile.mkstemp(dir=str(MEMORY), suffix=".tmp")
             try:
                 with os.fdopen(tmp_fd, "w") as f:
@@ -234,20 +261,72 @@ def auto_archive_old_errors(server_errors: list, max_age_hours: float = 48.0) ->
 
 def summarize_cycles(cycles):
     by_type = Counter(c.get("type", "unknown") for c in cycles)
-    evolve  = [c for c in cycles if c.get("type") == "evolve"]
-    by_cat  = Counter(c.get("category", "unknown") for c in evolve)
-    completed = [c for c in cycles if c.get("status") == "completed" and "duration_seconds" in c]
-    avg_dur = sum(c["duration_seconds"] for c in completed) / len(completed) if completed else 0
-    return {"total": len(cycles), "by_type": dict(by_type), "by_cat": dict(by_cat), "avg_dur": avg_dur}
+    evolve = [c for c in cycles if c.get("type") == "evolve"]
+    by_cat = Counter(c.get("category", "unknown") for c in evolve)
+    completed = [
+        c for c in cycles if c.get("status") == "completed" and "duration_seconds" in c
+    ]
+    avg_dur = (
+        sum(c["duration_seconds"] for c in completed) / len(completed)
+        if completed
+        else 0
+    )
+    return {
+        "total": len(cycles),
+        "by_type": dict(by_type),
+        "by_cat": dict(by_cat),
+        "avg_dur": avg_dur,
+    }
 
 
-ALL_CATS = ["capability", "observability", "reliability", "efficiency", "prompt_evolution"]
+ALL_CATS = [
+    "capability",
+    "observability",
+    "reliability",
+    "efficiency",
+    "prompt_evolution",
+]
 
 GOAL_CATEGORY_KEYWORDS = {
-    "reliability": ["fix", "error", "crash", "broken", "bug", "fail", "repair", "restore"],
-    "observability": ["portal", "dashboard", "tab", "ui", "display", "monitor", "metric", "view"],
-    "capability": ["build", "create", "add", "implement", "integrate", "script", "tool", "support"],
-    "efficiency": ["speed", "fast", "optimize", "reduce", "cache", "slow", "performance"],
+    "reliability": [
+        "fix",
+        "error",
+        "crash",
+        "broken",
+        "bug",
+        "fail",
+        "repair",
+        "restore",
+    ],
+    "observability": [
+        "portal",
+        "dashboard",
+        "tab",
+        "ui",
+        "display",
+        "monitor",
+        "metric",
+        "view",
+    ],
+    "capability": [
+        "build",
+        "create",
+        "add",
+        "implement",
+        "integrate",
+        "script",
+        "tool",
+        "support",
+    ],
+    "efficiency": [
+        "speed",
+        "fast",
+        "optimize",
+        "reduce",
+        "cache",
+        "slow",
+        "performance",
+    ],
     "prompt_evolution": ["prompt", "instruction", "wording", "template", "guide"],
 }
 
@@ -265,7 +344,9 @@ def _compute_recency_boost(cat: str, cycles: list) -> int:
     """0-25: how many evolve cycles since this category was last picked."""
     if not cycles:
         return 25
-    evolve_cycles = [c for c in cycles if c.get("type") == "evolve" and c.get("category")]
+    evolve_cycles = [
+        c for c in cycles if c.get("type") == "evolve" and c.get("category")
+    ]
     # Walk backwards to find last occurrence
     for i, c in enumerate(reversed(evolve_cycles)):
         if c.get("category") == cat:
@@ -289,7 +370,9 @@ def _compute_goal_alignment(cat: str, goals: list) -> int:
 
 def _compute_roi_bonus(cat: str, cycles: list) -> int:
     """0-10: historical success rate for this category."""
-    cat_cycles = [c for c in cycles if c.get("type") == "evolve" and c.get("category") == cat]
+    cat_cycles = [
+        c for c in cycles if c.get("type") == "evolve" and c.get("category") == cat
+    ]
     completed = sum(1 for c in cat_cycles if c.get("status") == "completed")
     failed = sum(1 for c in cat_cycles if c.get("status") == "failed")
     total = completed + failed
@@ -342,14 +425,18 @@ def _goal_signals(goals: list) -> list:
             if any(kw in text for kw in keywords):
                 aligned.append(cat)
         if aligned:
-            signals.append({
-                "goal": (g.get("content") or g.get("goal") or "")[:80],
-                "aligned_categories": aligned,
-            })
+            signals.append(
+                {
+                    "goal": (g.get("content") or g.get("goal") or "")[:80],
+                    "aligned_categories": aligned,
+                }
+            )
     return signals
 
 
-def evolve_recommendation(by_cat: dict, capabilities: dict = None, cycles: list = None, goals: list = None) -> tuple[str, str, list]:
+def evolve_recommendation(
+    by_cat: dict, capabilities: dict = None, cycles: list = None, goals: list = None
+) -> tuple[str, str, list]:
     """Returns (recommendation_text, suggested_category, skip_reasons).
 
     Uses a 5-signal dynamic scoring system:
@@ -381,7 +468,13 @@ def evolve_recommendation(by_cat: dict, capabilities: dict = None, cycles: list 
             roi_bonus = _compute_roi_bonus(cat, cycle_list)
             maturity_penalty, maturity_reason = _compute_maturity_penalty(cat, caps)
 
-            score = base_need + recency_boost + goal_alignment + roi_bonus - maturity_penalty
+            score = (
+                base_need
+                + recency_boost
+                + goal_alignment
+                + roi_bonus
+                - maturity_penalty
+            )
 
             weights[cat] = {
                 "score": score,
@@ -438,10 +531,15 @@ def evolve_recommendation(by_cat: dict, capabilities: dict = None, cycles: list 
         pool = ALL_CATS
         min_count = min(by_cat.get(c, 0) for c in pool)
         min_cats = [c for c in pool if by_cat.get(c, 0) == min_count]
-        return f"Fallback least-done: {', '.join(min_cats)} ({min_count})", min_cats[0], []
+        return (
+            f"Fallback least-done: {', '.join(min_cats)} ({min_count})",
+            min_cats[0],
+            [],
+        )
 
 
 # ── Constitution Runtime Checks ─────────────────────────────────────────────────
+
 
 def _check_constitution() -> list:
     """Verify key constitution invariants at runtime.
@@ -456,12 +554,15 @@ def _check_constitution() -> list:
     if constitution.exists():
         mode = oct(constitution.stat().st_mode)[-3:]
         if mode != "444":
-            issues.append(f"CRITICAL: constitution.md permissions are {mode} (expected 444)")
+            issues.append(
+                f"CRITICAL: constitution.md permissions are {mode} (expected 444)"
+            )
     else:
         issues.append("CRITICAL: constitution.md is missing")
 
     # 2. Key ports should be listening
     import socket
+
     for port, name in [(8080, "Caddy"), (8081, "Streamlit")]:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(2)
@@ -489,6 +590,7 @@ def _check_constitution() -> list:
 
 
 # ── Long-Term Memory (memvid) ──────────────────────────────────────────────────
+
 
 def _build_recall_query(inbox, goals) -> str:
     """Build a search query from inbox messages or the latest non-completed goal."""
@@ -526,6 +628,7 @@ def _fetch_old_memories(limit: int = 50, inbox=None, goals=None) -> list:
     until_ts = str(int(cutoff.timestamp()))
     try:
         from scripts.memory_recall import recall
+
         return recall(query, k=limit, until=until_ts)
     except Exception:
         return []
@@ -533,8 +636,24 @@ def _fetch_old_memories(limit: int = 50, inbox=None, goals=None) -> list:
 
 # ── Output Modes ────────────────────────────────────────────────────────────────
 
-def print_full(repair, state, goals, cycles_info, failures, journal, capabilities, inbox, portal, server_errors=None, cycles=None, old_memories=None):
-    now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+def print_full(
+    repair,
+    state,
+    goals,
+    cycles_info,
+    failures,
+    journal,
+    capabilities,
+    inbox,
+    portal,
+    server_errors=None,
+    cycles=None,
+    old_memories=None,
+):
+    now_str = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%d %H:%M UTC"
+    )
     print(f"{'='*62}")
     print(f"  CYCLE BRIEFING  —  {now_str}")
     print(f"{'='*62}")
@@ -546,7 +665,9 @@ def print_full(repair, state, goals, cycles_info, failures, journal, capabilitie
         print(f"\n[MEMORY REPAIR]  ✓ all {repair['ok']} files healthy")
     else:
         icon = "✗" if repair["failed"] else "⚠"
-        print(f"\n[MEMORY REPAIR]  {icon}  ok={repair['ok']}  repaired={repair['repaired']}  failed={repair['failed']}")
+        print(
+            f"\n[MEMORY REPAIR]  {icon}  ok={repair['ok']}  repaired={repair['repaired']}  failed={repair['failed']}"
+        )
         for issue in repair["issues"]:
             print(f"  • {issue}")
 
@@ -564,11 +685,16 @@ def print_full(repair, state, goals, cycles_info, failures, journal, capabilitie
             lock_started = lock_data.get("started", "")
             # Check if the PID is still alive
             import signal
+
             try:
                 os.kill(lock_pid, 0)  # signal 0 = test if process exists
-                print(f"\n[CYCLE LOCK]  ⚠ Cycle {lock_cycle} (PID {lock_pid}) still running (started {ago(lock_started)})")
+                print(
+                    f"\n[CYCLE LOCK]  ⚠ Cycle {lock_cycle} (PID {lock_pid}) still running (started {ago(lock_started)})"
+                )
             except (OSError, TypeError):
-                print(f"\n[CYCLE LOCK]  ✗ STALE — Cycle {lock_cycle} (PID {lock_pid}) crashed (started {ago(lock_started)})")
+                print(
+                    f"\n[CYCLE LOCK]  ✗ STALE — Cycle {lock_cycle} (PID {lock_pid}) crashed (started {ago(lock_started)})"
+                )
                 print(f"  → Previous heartbeat died without cleanup. Lock removed.")
                 cycle_lock.unlink(missing_ok=True)
         except Exception:
@@ -585,9 +711,11 @@ def print_full(repair, state, goals, cycles_info, failures, journal, capabilitie
 
     # ── Goals ────────────────────────────────────────────────────
     by_status = Counter(g.get("status", "?") for g in goals)
-    print(f"\n[GOALS]  total={len(goals)}  pending={by_status.get('pending',0)}  "
-          f"in_progress={by_status.get('in_progress',0)}  "
-          f"completed={by_status.get('completed',0)}  failed={by_status.get('failed',0)}")
+    print(
+        f"\n[GOALS]  total={len(goals)}  pending={by_status.get('pending',0)}  "
+        f"in_progress={by_status.get('in_progress',0)}  "
+        f"completed={by_status.get('completed',0)}  failed={by_status.get('failed',0)}"
+    )
     if goals:
         lg = goals[-1]
         text = str(lg.get("content") or lg.get("goal", ""))[:85]
@@ -606,9 +734,17 @@ def print_full(repair, state, goals, cycles_info, failures, journal, capabilitie
         print(f"\n[INBOX]  empty")
 
     # ── Cycles ───────────────────────────────────────────────────
-    all_cats = ["capability", "observability", "reliability", "efficiency", "prompt_evolution"]
-    by_cat   = cycles_info.get("by_cat", {})
-    print(f"\n[CYCLES]  total={cycles_info['total']}  avg={fmt_dur(cycles_info['avg_dur'])}")
+    all_cats = [
+        "capability",
+        "observability",
+        "reliability",
+        "efficiency",
+        "prompt_evolution",
+    ]
+    by_cat = cycles_info.get("by_cat", {})
+    print(
+        f"\n[CYCLES]  total={cycles_info['total']}  avg={fmt_dur(cycles_info['avg_dur'])}"
+    )
     for k, v in sorted(cycles_info["by_type"].items()):
         print(f"  {k}: {v}")
     if by_cat:
@@ -617,8 +753,8 @@ def print_full(repair, state, goals, cycles_info, failures, journal, capabilitie
         max_cnt = max(cat_counts, default=1) or 1
         min_cnt = min(cat_counts, default=0)
         for cat in all_cats:
-            cnt  = by_cat.get(cat, 0)
-            bar  = "█" * cnt + "░" * max(0, max_cnt - cnt)
+            cnt = by_cat.get(cat, 0)
+            bar = "█" * cnt + "░" * max(0, max_cnt - cnt)
             if cnt == 0:
                 note = " ← underserved"
             elif max_cnt > 0 and cnt >= max_cnt and cnt > 2 * max(1, min_cnt):
@@ -630,39 +766,51 @@ def print_full(repair, state, goals, cycles_info, failures, journal, capabilitie
     # ── Portal Tab Errors ─────────────────────────────────────────
     if server_errors:
         # Classify errors by recency
-        RECENT_THRESHOLD_H = 6.0   # errors within 6h are "active"
-        OLD_THRESHOLD_H    = 48.0  # errors >48h are "stale" (auto-archived at cycle start)
+        RECENT_THRESHOLD_H = 6.0  # errors within 6h are "active"
+        OLD_THRESHOLD_H = 48.0  # errors >48h are "stale" (auto-archived at cycle start)
 
         def _age_label(e):
             h = _error_age_hours(e)
-            if h < 1:    return f"{int(h*60)}m ago"
-            if h < 24:   return f"{h:.0f}h ago"
+            if h < 1:
+                return f"{int(h*60)}m ago"
+            if h < 24:
+                return f"{h:.0f}h ago"
             return f"{h/24:.1f}d ago"
 
-        recent_errs = [e for e in server_errors if _error_age_hours(e) <= RECENT_THRESHOLD_H]
-        old_errs    = [e for e in server_errors if _error_age_hours(e) >  RECENT_THRESHOLD_H]
-        last3       = server_errors[-3:]
+        recent_errs = [
+            e for e in server_errors if _error_age_hours(e) <= RECENT_THRESHOLD_H
+        ]
+        old_errs = [
+            e for e in server_errors if _error_age_hours(e) > RECENT_THRESHOLD_H
+        ]
+        last3 = server_errors[-3:]
 
         if recent_errs:
-            print(f"\n[TAB ERRORS]  {len(server_errors)} logged  ({len(recent_errs)} RECENT ≤{RECENT_THRESHOLD_H:.0f}h, "
-                  f"{len(old_errs)} old)")
+            print(
+                f"\n[TAB ERRORS]  {len(server_errors)} logged  ({len(recent_errs)} RECENT ≤{RECENT_THRESHOLD_H:.0f}h, "
+                f"{len(old_errs)} old)"
+            )
             for e in last3:
-                ts    = e.get("timestamp", "")[:16]
-                tab   = e.get("tab", "?")
-                err   = str(e.get("error", ""))[:60]
-                age   = _age_label(e)
-                flag  = " ⚠ ACTIVE" if _error_age_hours(e) <= RECENT_THRESHOLD_H else ""
+                ts = e.get("timestamp", "")[:16]
+                tab = e.get("tab", "?")
+                err = str(e.get("error", ""))[:60]
+                age = _age_label(e)
+                flag = " ⚠ ACTIVE" if _error_age_hours(e) <= RECENT_THRESHOLD_H else ""
                 print(f"  {ts} [{tab}] {err}  ({age}){flag}")
             print("  → Fix the affected module before the next goal cycle.")
         else:
             # All errors are old — downgrade severity
-            print(f"\n[TAB ERRORS]  {len(server_errors)} logged  (✓ all >{RECENT_THRESHOLD_H:.0f}h old — likely resolved)")
+            print(
+                f"\n[TAB ERRORS]  {len(server_errors)} logged  (✓ all >{RECENT_THRESHOLD_H:.0f}h old — likely resolved)"
+            )
             for e in last3:
-                ts  = e.get("timestamp", "")[:16]
+                ts = e.get("timestamp", "")[:16]
                 tab = e.get("tab", "?")
                 age = _age_label(e)
                 print(f"  {ts} [{tab}]  ({age})")
-            print(f"  → Run with --clear-old-errors to purge errors >{OLD_THRESHOLD_H:.0f}h old.")
+            print(
+                f"  → Run with --clear-old-errors to purge errors >{OLD_THRESHOLD_H:.0f}h old."
+            )
 
     # ── Journal Auto-Archive ────────────────────────────────────────
     # Auto-archive when journal exceeds 25 entries (keep last 20, archive the rest).
@@ -670,33 +818,49 @@ def print_full(repair, state, goals, cycles_info, failures, journal, capabilitie
     AUTO_ARCHIVE_THRESHOLD = 25
     if len(journal) > AUTO_ARCHIVE_THRESHOLD:
         try:
-            journal_reloaded, n_archived, archived_after = _auto_archive_journal_inlined(journal)
+            journal_reloaded, n_archived, archived_after = (
+                _auto_archive_journal_inlined(journal)
+            )
             if n_archived > 0 or len(journal_reloaded) < len(journal):
-                print(f"  ✓  auto-archived {len(journal) - len(journal_reloaded)} old entries → {len(journal_reloaded)} active / {archived_after} archived")
+                print(
+                    f"  ✓  auto-archived {len(journal) - len(journal_reloaded)} old entries → {len(journal_reloaded)} active / {archived_after} archived"
+                )
             else:
-                print(f"  ⚠  journal.json has {len(journal)} entries — auto-archive had no effect; run: uv run python scripts/journal_archive.py")
+                print(
+                    f"  ⚠  journal.json has {len(journal)} entries — auto-archive had no effect; run: uv run python scripts/journal_archive.py"
+                )
         except Exception as e:
-            print(f"  ⚠  journal.json has {len(journal)} entries — auto-archive error: {e}")
+            print(
+                f"  ⚠  journal.json has {len(journal)} entries — auto-archive error: {e}"
+            )
     elif len(journal) > 30:
-        print(f"  ⚠  journal.json has {len(journal)} entries — run: uv run python scripts/journal_archive.py")
+        print(
+            f"  ⚠  journal.json has {len(journal)} entries — run: uv run python scripts/journal_archive.py"
+        )
 
     # ── Backup Status ─────────────────────────────────────────────
     backup_root = MEMORY / "backups"
     if backup_root.exists():
         backup_dirs = sorted(
             [d for d in backup_root.iterdir() if d.is_dir()],
-            key=lambda d: d.name, reverse=True
+            key=lambda d: d.name,
+            reverse=True,
         )
         if backup_dirs:
             latest_name = backup_dirs[0].name
             try:
                 ts = datetime.datetime.strptime(latest_name, "%Y%m%dT%H%M%SZ").replace(
-                    tzinfo=datetime.timezone.utc)
-                age_s = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds()
+                    tzinfo=datetime.timezone.utc
+                )
+                age_s = (
+                    datetime.datetime.now(datetime.timezone.utc) - ts
+                ).total_seconds()
                 age_str = ago(ts.isoformat())
                 stale = age_s > 3600
                 icon = "⚠ STALE" if stale else "✓"
-                print(f"\n[BACKUP]  {icon}  latest={latest_name}  ({age_str})  total={len(backup_dirs)}")
+                print(
+                    f"\n[BACKUP]  {icon}  latest={latest_name}  ({age_str})  total={len(backup_dirs)}"
+                )
                 if stale:
                     print(f"  → Run: python3 /agent/scripts/memory_backup.py")
             except Exception:
@@ -728,11 +892,14 @@ def print_full(repair, state, goals, cycles_info, failures, journal, capabilitie
         server_py = Path("/agent/server.py")
         try:
             ttl_decorators = sum(
-                1 for py_file in data_dir.glob("*.py")
+                1
+                for py_file in data_dir.glob("*.py")
                 for ln in py_file.read_text().splitlines()
                 if ln.strip().startswith("@_cache(ttl=")
             )
-            server_lines = len(server_py.read_text().splitlines()) if server_py.exists() else 9999
+            server_lines = (
+                len(server_py.read_text().splitlines()) if server_py.exists() else 9999
+            )
             if ttl_decorators <= 1 and server_lines < 500:
                 reason = f"mtime conversion complete ({ttl_decorators} TTL decorator remaining), server.py={server_lines} lines (<500)"
                 caps_with_signals["_efficiency_mature"] = reason
@@ -755,7 +922,9 @@ def print_full(repair, state, goals, cycles_info, failures, journal, capabilitie
 
 
 def print_short(repair, state, goals, cycles_info, failures, inbox, portal):
-    hb = ago(state.get("last_heartbeat", "")) if state.get("last_heartbeat") else "never"
+    hb = (
+        ago(state.get("last_heartbeat", "")) if state.get("last_heartbeat") else "never"
+    )
     issues = []
     if not NO_REPAIR and (repair["failed"] or repair["repaired"]):
         issues.append(f"repair={repair['repaired']}fixed/{repair['failed']}fail")
@@ -770,10 +939,24 @@ def print_short(repair, state, goals, cycles_info, failures, inbox, portal):
         issues.append(f"inbox:{len(inbox)}")
 
     status = " | ".join(issues) if issues else "all clear"
-    print(f"Cycle {state.get('cycle_number')} | {state.get('status')} | Portal: {portal} | HB: {hb} | {status}")
+    print(
+        f"Cycle {state.get('cycle_number')} | {state.get('status')} | Portal: {portal} | HB: {hb} | {status}"
+    )
 
 
-def print_json_output(repair, state, goals, cycles_info, failures, journal, capabilities, inbox, portal, cycles=None, old_memories=None):
+def print_json_output(
+    repair,
+    state,
+    goals,
+    cycles_info,
+    failures,
+    journal,
+    capabilities,
+    inbox,
+    portal,
+    cycles=None,
+    old_memories=None,
+):
     suggested = None
     if EVOLVE_MODE:
         by_cat = cycles_info.get("by_cat", {})
@@ -785,58 +968,77 @@ def print_json_output(repair, state, goals, cycles_info, failures, journal, capa
         server_py = Path("/agent/server.py")
         try:
             ttl_decorators = sum(
-                1 for py_file in data_dir.glob("*.py")
+                1
+                for py_file in data_dir.glob("*.py")
                 for ln in py_file.read_text().splitlines()
                 if ln.strip().startswith("@_cache(ttl=")
             )
-            server_lines = len(server_py.read_text().splitlines()) if server_py.exists() else 9999
+            server_lines = (
+                len(server_py.read_text().splitlines()) if server_py.exists() else 9999
+            )
             if ttl_decorators <= 1 and server_lines < 500:
                 caps_with_signals["_efficiency_mature"] = (
                     f"mtime conversion complete ({ttl_decorators} TTL decorator remaining), server.py={server_lines} lines (<500)"
                 )
         except Exception:
             pass
-        _, suggested, _ = evolve_recommendation(by_cat, caps_with_signals, cycles=cycles, goals=goals)
+        _, suggested, _ = evolve_recommendation(
+            by_cat, caps_with_signals, cycles=cycles, goals=goals
+        )
     by_status = Counter(g.get("status", "?") for g in goals)
-    print(json.dumps({
-        "generated_at": now_iso(),
-        "repair": repair,
-        "state": {
-            "cycle": state.get("cycle_number"),
-            "status": state.get("status"),
-            "last_heartbeat": state.get("last_heartbeat"),
-            "last_cycle_summary": state.get("last_cycle_summary", "")[:120],
-        },
-        "portal": portal,
-        "goals": {
-            "total": len(goals),
-            "by_status": dict(by_status),
-            "latest": goals[-1] if goals else None,
-        },
-        "inbox": {
-            "count": len(inbox) if isinstance(inbox, list) else 0,
-            "messages": inbox[:3] if isinstance(inbox, list) else [],
-        },
-        "cycles": cycles_info,
-        "failures_count": len(failures),
-        "recent_failures": [str(f.get("summary", f))[:80] for f in failures[-3:]],
-        "recent_journal": [
-            {"ts": e.get("timestamp", "")[:16], "cycle": e.get("cycle"), "summary": e.get("summary", "")[:90]}
-            for e in (journal[-5:] if len(journal) >= 5 else journal)
-        ],
-        "capabilities_count": capabilities.get("total", 0),
-        "evolve_suggestion": suggested,
-        "old_memories": [
-            {"rank": m.get("rank"),
-             "score": m.get("score"),
-             "title": m.get("title", "")[:100],
-             "snippet": m.get("snippet", "")[:200]}
-            for m in (old_memories or [])
-        ],
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "generated_at": now_iso(),
+                "repair": repair,
+                "state": {
+                    "cycle": state.get("cycle_number"),
+                    "status": state.get("status"),
+                    "last_heartbeat": state.get("last_heartbeat"),
+                    "last_cycle_summary": state.get("last_cycle_summary", "")[:120],
+                },
+                "portal": portal,
+                "goals": {
+                    "total": len(goals),
+                    "by_status": dict(by_status),
+                    "latest": goals[-1] if goals else None,
+                },
+                "inbox": {
+                    "count": len(inbox) if isinstance(inbox, list) else 0,
+                    "messages": inbox[:3] if isinstance(inbox, list) else [],
+                },
+                "cycles": cycles_info,
+                "failures_count": len(failures),
+                "recent_failures": [
+                    str(f.get("summary", f))[:80] for f in failures[-3:]
+                ],
+                "recent_journal": [
+                    {
+                        "ts": e.get("timestamp", "")[:16],
+                        "cycle": e.get("cycle"),
+                        "summary": e.get("summary", "")[:90],
+                    }
+                    for e in (journal[-5:] if len(journal) >= 5 else journal)
+                ],
+                "capabilities_count": capabilities.get("total", 0),
+                "evolve_suggestion": suggested,
+                "old_memories": [
+                    {
+                        "rank": m.get("rank"),
+                        "score": m.get("score"),
+                        "title": m.get("title", "")[:100],
+                        "snippet": m.get("snippet", "")[:200],
+                    }
+                    for m in (old_memories or [])
+                ],
+            },
+            indent=2,
+        )
+    )
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────────
+
 
 def main():
     # Step 1: Repair (unless skipped)
@@ -846,33 +1048,44 @@ def main():
         repair = _run_memory_repair()
 
     # Step 2: Load data
-    state, goals, cycles, failures, journal, capabilities, inbox, server_errors = load_all()
+    state, goals, cycles, failures, journal, capabilities, inbox, server_errors = (
+        load_all()
+    )
 
     # Step 2a: Detect orphaned in-progress cycles (crashed/killed heartbeats)
     cycles, n_interrupted = check_orphaned_cycles(cycles)
     if n_interrupted > 0 and not JSON_MODE:
-        print(f"[CRASH RECOVERY]  marked {n_interrupted} orphaned in-progress cycle(s) as 'interrupted'")
+        print(
+            f"[CRASH RECOVERY]  marked {n_interrupted} orphaned in-progress cycle(s) as 'interrupted'"
+        )
 
     # Step 2b: Register current cycle as in-progress
     # Guard: refuse to create a new cycle if there's already a recent in-progress cycle.
     # This prevents the agent from creating overlapping cycles within a single heartbeat.
     active_in_progress = [
-        c for c in cycles
-        if c.get("status") == "in_progress" and c.get("start")
+        c for c in cycles if c.get("status") == "in_progress" and c.get("start")
     ]
     if active_in_progress:
         latest_ip = active_in_progress[-1]
         try:
-            ip_start = datetime.datetime.fromisoformat(latest_ip["start"].replace("Z", "+00:00"))
-            age_min = (datetime.datetime.now(datetime.timezone.utc) - ip_start).total_seconds() / 60
+            ip_start = datetime.datetime.fromisoformat(
+                latest_ip["start"].replace("Z", "+00:00")
+            )
+            age_min = (
+                datetime.datetime.now(datetime.timezone.utc) - ip_start
+            ).total_seconds() / 60
         except Exception:
             age_min = 999
         if age_min < 30:
             # There's a recent in-progress cycle — this is a duplicate cycle-start call
             if not JSON_MODE:
-                print(f"[CYCLE START]  ⚠ Cycle {latest_ip.get('cycle')} already in-progress "
-                      f"({age_min:.0f}m ago). Skipping duplicate registration.")
-                print(f"               ONE cycle per heartbeat — do not run cycle_start.py again.")
+                print(
+                    f"[CYCLE START]  ⚠ Cycle {latest_ip.get('cycle')} already in-progress "
+                    f"({age_min:.0f}m ago). Skipping duplicate registration."
+                )
+                print(
+                    f"               ONE cycle per heartbeat — do not run cycle_start.py again."
+                )
             # Still continue with briefing output, just don't create a new entry
             cycle_number = latest_ip.get("cycle", 1)
         else:
@@ -894,7 +1107,9 @@ def main():
                 cycles.append(cycle_record)
                 _write_safe(MEMORY / "cycles.json", cycles)
                 if not JSON_MODE:
-                    print(f"[CYCLE START]  Registered cycle {cycle_number} as in-progress")
+                    print(
+                        f"[CYCLE START]  Registered cycle {cycle_number} as in-progress"
+                    )
     else:
         # Must match cycle_close.py auto-detect logic: state.cycle_number+1 → max(cycles)+1 → 1
         state_cycle = state.get("cycle_number")
@@ -924,15 +1139,21 @@ def main():
 
     # Step 2c: Auto-archive stale tab errors (>48h) or force-clear if flag set
     if CLEAR_ALL_ERRORS:
-        archive_age = -1.0  # purge everything — age is always >= 0, so age < -1 is never true
+        archive_age = (
+            -1.0
+        )  # purge everything — age is always >= 0, so age < -1 is never true
         # Use -1 not 0: age < 0.0 would fail for errors with age=0 (just-written errors)
     elif CLEAR_OLD_ERRORS:
-        archive_age = 1.0   # purge errors >1h old
+        archive_age = 1.0  # purge errors >1h old
     else:
         archive_age = 48.0  # default: only auto-archive >48h
-    server_errors, archived_count = auto_archive_old_errors(server_errors, max_age_hours=archive_age)
+    server_errors, archived_count = auto_archive_old_errors(
+        server_errors, max_age_hours=archive_age
+    )
     if archived_count and not JSON_MODE:
-        print(f"[ERROR CLEANUP]  archived {archived_count} old tab error(s) from server_errors.json")
+        print(
+            f"[ERROR CLEANUP]  archived {archived_count} old tab error(s) from server_errors.json"
+        )
 
     # Step 3: Portal health check
     portal = portal_health()
@@ -942,11 +1163,36 @@ def main():
 
     # Step 4: Output
     if JSON_MODE:
-        print_json_output(repair, state, goals, cycles_info, failures, journal, capabilities, inbox, portal, cycles=cycles, old_memories=old_memories)
+        print_json_output(
+            repair,
+            state,
+            goals,
+            cycles_info,
+            failures,
+            journal,
+            capabilities,
+            inbox,
+            portal,
+            cycles=cycles,
+            old_memories=old_memories,
+        )
     elif SHORT:
         print_short(repair, state, goals, cycles_info, failures, inbox, portal)
     else:
-        print_full(repair, state, goals, cycles_info, failures, journal, capabilities, inbox, portal, server_errors, cycles=cycles, old_memories=old_memories)
+        print_full(
+            repair,
+            state,
+            goals,
+            cycles_info,
+            failures,
+            journal,
+            capabilities,
+            inbox,
+            portal,
+            server_errors,
+            cycles=cycles,
+            old_memories=old_memories,
+        )
 
     sys.exit(1 if repair["failed"] > 0 else 0)
 

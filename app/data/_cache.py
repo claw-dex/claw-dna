@@ -9,7 +9,6 @@ import streamlit as st
 
 from app.data._helpers import _read_json_safe
 
-
 # ── Custom TTL cache (replaces @st.cache_data to avoid cachetools TOCTOU race) ─
 # The cachetools TTLCache has a race: `key in cache` passes, then TTL expires
 # before `cache[key]`, causing an uncaught KeyError that crashes Streamlit tabs.
@@ -17,11 +16,12 @@ from app.data._helpers import _read_json_safe
 
 _MISSING = object()
 
+
 class _TTLCache:
     """Thread-safe TTL cache using atomic dict.get() to avoid TOCTOU race."""
 
     def __init__(self):
-        self._store: dict = {}   # key -> (value, expiry_float)
+        self._store: dict = {}  # key -> (value, expiry_float)
         self._lock = threading.Lock()
 
     def get(self, key):
@@ -113,7 +113,9 @@ def _mfile_cache(path_fn, default_fn):
             result = fn(data)
             _store["data"] = (result, mtime)
             return result
+
         return wrapper
+
     return decorator
 
 
@@ -160,7 +162,9 @@ def _mmfile_cache(path_fns):
             result = fn()
             _store["data"] = (result, key)
             return result
+
         return wrapper
+
     return decorator
 
 
@@ -173,6 +177,7 @@ def _cache(ttl=10):
       tuples hash faster than their str() equivalent and avoid a string alloc.
     - clear() matches on k[0] == fn.__name__ instead of str.startswith().
     """
+
     def decorator(fn):
         _fn_name = fn.__name__  # capture once at decoration time
 
@@ -197,14 +202,17 @@ def _cache(ttl=10):
             """Clear all cached entries for this function."""
             with _GLOBAL_CACHE._lock:
                 keys_to_del = [
-                    k for k in _GLOBAL_CACHE._store
-                    if k == _fn_name or (isinstance(k, tuple) and k and k[0] == _fn_name)
+                    k
+                    for k in _GLOBAL_CACHE._store
+                    if k == _fn_name
+                    or (isinstance(k, tuple) and k and k[0] == _fn_name)
                 ]
                 for k in keys_to_del:
                     del _GLOBAL_CACHE._store[k]
 
         wrapper.clear = clear
         return wrapper
+
     return decorator
 
 

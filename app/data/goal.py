@@ -50,7 +50,8 @@ def load_goal_stats():
     # Goal cycle durations from cycles.json
     cycles = load_cycles() or []
     goal_cycles = [
-        c for c in cycles
+        c
+        for c in cycles
         if c.get("type") == "goal" and c.get("duration_seconds") is not None
     ]
     goal_cycle_durations = [

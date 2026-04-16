@@ -13,8 +13,10 @@ from app.shared import _badge, _STATUS_COLORS, _TYPE_COLORS
 # ── Status / type icons (tab-specific, not in shared) ────────
 # See prompts/enum.md for complete enum definitions
 _STATUS_ICONS = {
-    "completed": "✅", "failed": "❌",
-    "in_progress": "🔄", "pending": "⏳",
+    "completed": "✅",
+    "failed": "❌",
+    "in_progress": "🔄",
+    "pending": "⏳",
 }
 _TYPE_ICONS = {
     # Inbox types
@@ -31,17 +33,27 @@ _TYPE_ICONS = {
 
 def render():
     from app.data import (
-        load_goals, load_inbox, load_outbox, load_outbox_history,
-        load_history, queue_to_inbox,
-        update_goal_status, delete_inbox_item, clear_outbox,
+        load_goals,
+        load_inbox,
+        load_outbox,
+        load_outbox_history,
+        load_history,
+        queue_to_inbox,
+        update_goal_status,
+        delete_inbox_item,
+        clear_outbox,
     )
 
     # ── Command form ──────────────────────────────────────────
     st.subheader("Queue Command For Next Cycle")
     with st.form("command_form", clear_on_submit=True):
         cmd_type = st.selectbox("Type", ["goal", "message"])
-        content = st.text_area("Content", placeholder="Enter your command or goal here...")
-        priority = st.slider("Priority", 1, 5, 3, help="1 = highest priority, 5 = lowest")
+        content = st.text_area(
+            "Content", placeholder="Enter your command or goal here..."
+        )
+        priority = st.slider(
+            "Priority", 1, 5, 3, help="1 = highest priority, 5 = lowest"
+        )
         submitted = st.form_submit_button("Send")
 
     if submitted:
@@ -59,7 +71,13 @@ def render():
     with col_title:
         st.subheader("Cycle Command History")
     with col_limit:
-        show_n = st.selectbox("Show", [1, 5, 25, 100], index=0, key="cmd_hist_limit", label_visibility="collapsed")
+        show_n = st.selectbox(
+            "Show",
+            [1, 5, 25, 100],
+            index=0,
+            key="cmd_hist_limit",
+            label_visibility="collapsed",
+        )
     cmd_history = load_history() or []
     outbox_hist = load_outbox_history() or []
 
@@ -67,23 +85,27 @@ def render():
     events = []
     for cmd in cmd_history:
         ts = cmd.get("timestamp", "")
-        events.append({
-            "ts": ts,
-            "role": "user",
-            "type": cmd.get("type", "?"),
-            "content": cmd.get("content", ""),
-        })
+        events.append(
+            {
+                "ts": ts,
+                "role": "user",
+                "type": cmd.get("type", "?"),
+                "content": cmd.get("content", ""),
+            }
+        )
     for msg in outbox_hist:
         ts = msg.get("timestamp", "")
         subject = msg.get("subject", "")
         content = msg.get("content", "")
-        events.append({
-            "ts": ts,
-            "role": "agent",
-            "type": msg.get("type", "response"),
-            "subject": subject,
-            "content": content,
-        })
+        events.append(
+            {
+                "ts": ts,
+                "role": "agent",
+                "type": msg.get("type", "response"),
+                "subject": subject,
+                "content": content,
+            }
+        )
     events.sort(key=lambda e: e.get("ts", ""))
 
     if not events:
@@ -96,7 +118,10 @@ def render():
                 label = f"**You** [{ev['type']}]  ·  {ts_str}"
                 with st.chat_message("user"):
                     st.caption(label)
-                    st.write(ev["content"][:500] + ("..." if len(ev["content"]) > 500 else ""))
+                    st.write(
+                        ev["content"][:500]
+                        + ("..." if len(ev["content"]) > 500 else "")
+                    )
             else:
                 subj = ev.get("subject", "")
                 is_needs_human = ev.get("type") == "needs_human"
@@ -128,18 +153,24 @@ def render():
     # Summary metrics strip
     m1, m2, m3 = st.columns(3)
     with m1:
-        st.metric("Active Goals", len(active_goals), help=f"{len(goals)} total goals" if goals else None)
+        st.metric(
+            "Active Goals",
+            len(active_goals),
+            help=f"{len(goals)} total goals" if goals else None,
+        )
     with m2:
         st.metric("Inbox", len(inbox))
     with m3:
         st.metric("Outbox", len(outbox))
 
     # Tabbed layout
-    tab_goals, tab_inbox, tab_outbox = st.tabs([
-        f"Goals ({len(goals)})",
-        f"Inbox ({len(inbox)})",
-        f"Outbox ({len(outbox)})",
-    ])
+    tab_goals, tab_inbox, tab_outbox = st.tabs(
+        [
+            f"Goals ({len(goals)})",
+            f"Inbox ({len(inbox)})",
+            f"Outbox ({len(outbox)})",
+        ]
+    )
 
     with tab_goals:
         if not goals:
@@ -153,7 +184,9 @@ def render():
                 icon = _STATUS_ICONS.get(status, "•")
                 created = (g.get("created_at") or "")[:10]
 
-                with st.expander(f"{icon} {goal_id} — {preview}", expanded=(status == "in_progress")):
+                with st.expander(
+                    f"{icon} {goal_id} — {preview}", expanded=(status == "in_progress")
+                ):
                     # Status + source badges
                     s_color = _STATUS_COLORS.get(status, "#666")
                     source = g.get("source", "")
@@ -173,8 +206,14 @@ def render():
                     # Status change control
                     status_options = ["pending", "in_progress", "completed", "failed"]
                     # Normalize legacy "in-progress" to "in_progress"
-                    status_normalized = status.replace("-", "_") if status else "pending"
-                    current_idx = status_options.index(status_normalized) if status_normalized in status_options else 0
+                    status_normalized = (
+                        status.replace("-", "_") if status else "pending"
+                    )
+                    current_idx = (
+                        status_options.index(status_normalized)
+                        if status_normalized in status_options
+                        else 0
+                    )
                     new_status = st.selectbox(
                         "Change status",
                         status_options,
@@ -209,7 +248,11 @@ def render():
         if not outbox:
             st.caption("Empty outbox.")
         else:
-            if st.button("Archive & Clear All", key="clear_outbox", help="Archives messages to history before clearing"):
+            if st.button(
+                "Archive & Clear All",
+                key="clear_outbox",
+                help="Archives messages to history before clearing",
+            ):
                 clear_outbox()
                 st.rerun()
             for i, item in enumerate(outbox):
@@ -232,4 +275,3 @@ def render():
                             st.markdown(f"**{subject}**")
                         st.markdown(content)
                     st.caption(f"Sent: {ts}")
-

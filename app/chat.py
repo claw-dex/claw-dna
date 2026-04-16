@@ -28,6 +28,7 @@ SYSTEM_MD = Path("/agent/system.md")
 CONSTITUTION_MD = Path("/agent/constitution.md")
 PORTAL_CONFIG = Path("/agent/memory/portal_config.json")
 
+
 def _build_system_prompt(chat_history: list[dict] | None = None) -> str:
     """Build system prompt from system.md + constitution.md + public URL + optional chat history."""
     parts: list[str] = []
@@ -61,7 +62,9 @@ def _build_system_prompt(chat_history: list[dict] | None = None) -> str:
             pass
     if chat_history:
         parts.append("\n## Previous Chat History\n")
-        parts.append("Below is the conversation history from the previous session. Use it for context.\n")
+        parts.append(
+            "Below is the conversation history from the previous session. Use it for context.\n"
+        )
         # Cap injected history to avoid exceeding context window limits
         max_chars = 8000
         recent = chat_history[-20:]
@@ -114,8 +117,11 @@ class ClaudeChat:
     - close()        — disconnect and stop
     """
 
-    def __init__(self, resume_session_id: str | None = None,
-                 chat_history: list[dict] | None = None) -> None:
+    def __init__(
+        self,
+        resume_session_id: str | None = None,
+        chat_history: list[dict] | None = None,
+    ) -> None:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._sdk: ClaudeSDKClient | None = None
         self._ready = threading.Event()
@@ -166,8 +172,24 @@ class ClaudeChat:
             permission_mode="bypassPermissions",
             include_partial_messages=True,
             cwd="/agent",
+            add_dirs=["/home/agent", "/home/agent/.claude", "/agent/.claude"],
             setting_sources=["user", "project"],  # Load Skills from filesystem
-            allowed_tools=["Skill", "Bash", "Glob", "Grep", "Read", "Edit", "Write", "TodoWrite", "WebFetch", "WebSearch", "BashOutput", "KillShell", "ListMcpResourcesTool", "ReadMcpResourceTool"],  # Enable Skill tool
+            allowed_tools=[
+                "Skill",
+                "Bash",
+                "Glob",
+                "Grep",
+                "Read",
+                "Edit",
+                "Write",
+                "TodoWrite",
+                "WebFetch",
+                "WebSearch",
+                "BashOutput",
+                "KillShell",
+                "ListMcpResourcesTool",
+                "ReadMcpResourceTool",
+            ],  # Enable Skill tool
             disallowed_tools=["AskUserQuestion"],
             resume=self._resume_session_id,
         )
@@ -196,8 +218,9 @@ class ClaudeChat:
                 break
         return "\n".join(parts)
 
-    async def _async_stream(self, prompt: str, chunk_q: queue.Queue,
-                            done_event: threading.Event) -> None:
+    async def _async_stream(
+        self, prompt: str, chunk_q: queue.Queue, done_event: threading.Event
+    ) -> None:
         """Send prompt, push typed event dicts to *chunk_q*, set done_event when complete."""
         try:
             await self._sdk.query(prompt)
@@ -220,37 +243,45 @@ class ClaudeChat:
                             if not streamed_any:
                                 chunk_q.put({"type": "text", "text": block.text})
                         elif isinstance(block, ToolUseBlock):
-                            chunk_q.put({
-                                "type": "tool_use",
-                                "name": block.name,
-                                "tool_id": block.id,
-                                "input": block.input,
-                            })
+                            chunk_q.put(
+                                {
+                                    "type": "tool_use",
+                                    "name": block.name,
+                                    "tool_id": block.id,
+                                    "input": block.input,
+                                }
+                            )
                         elif isinstance(block, ThinkingBlock):
-                            chunk_q.put({
-                                "type": "thinking",
-                                "text": block.thinking,
-                            })
+                            chunk_q.put(
+                                {
+                                    "type": "thinking",
+                                    "text": block.thinking,
+                                }
+                            )
                     streamed_any = False  # reset for next AssistantMessage round
                 elif isinstance(msg, SystemMessage):
-                    chunk_q.put({
-                        "type": "system",
-                        "subtype": msg.subtype,
-                        "data": msg.data,
-                    })
+                    chunk_q.put(
+                        {
+                            "type": "system",
+                            "subtype": msg.subtype,
+                            "data": msg.data,
+                        }
+                    )
                 elif isinstance(msg, ResultMessage):
                     sid = getattr(msg, "session_id", None)
                     if sid:
                         with self._lock:
                             self._session_id = sid
-                    chunk_q.put({
-                        "type": "result",
-                        "cost": msg.total_cost_usd,
-                        "duration_ms": msg.duration_ms,
-                        "is_error": msg.is_error,
-                        "num_turns": msg.num_turns,
-                        "session_id": self._session_id,
-                    })
+                    chunk_q.put(
+                        {
+                            "type": "result",
+                            "cost": msg.total_cost_usd,
+                            "duration_ms": msg.duration_ms,
+                            "is_error": msg.is_error,
+                            "num_turns": msg.num_turns,
+                            "session_id": self._session_id,
+                        }
+                    )
                     break
         except Exception as exc:
             chunk_q.put({"type": "error", "error": str(exc)})
@@ -263,7 +294,8 @@ class ClaudeChat:
         """Blocking send. Returns full response text."""
         with self._lock:
             future = asyncio.run_coroutine_threadsafe(
-                self._async_send(prompt), self._loop,
+                self._async_send(prompt),
+                self._loop,
             )
             return future.result(timeout=timeout)
 
@@ -335,10 +367,12 @@ class ClaudeChat:
         if self._stream_future is not None and not self._stream_future.done():
             self._stream_future.cancel()
         if self._loop is not None and self._loop.is_running():
+
             async def _shutdown():
                 if self._sdk is not None:
                     await self._sdk.disconnect()
                 self._loop.stop()
+
             fut = asyncio.run_coroutine_threadsafe(_shutdown(), self._loop)
             try:
                 fut.result(timeout=10)
@@ -349,10 +383,13 @@ class ClaudeChat:
 
 # ── Streamlit chat UI ─────────────────────────────────────────
 
+
 def render():
     """Render the Claude Code Chat UI component (always visible at top of page)."""
     st.subheader("Claude Code Chat")
-    st.caption("Interactive chat with Claude Code (native, powered by Claude Agent SDK).")
+    st.caption(
+        "Interactive chat with Claude Code (native, powered by Claude Agent SDK)."
+    )
 
     # Initialize chat history (load from disk on first session)
     if "chat_messages" not in st.session_state:
@@ -424,7 +461,9 @@ def render():
             # Stream complete — save to history and persist to disk
             full_text = st.session_state.chat_stream_text
             if full_text:
-                st.session_state.chat_messages.append({"role": "assistant", "content": full_text})
+                st.session_state.chat_messages.append(
+                    {"role": "assistant", "content": full_text}
+                )
                 _save_chat_history(st.session_state.chat_messages)
             # Capture session_id for resumption
             if session.session_id:
@@ -486,7 +525,9 @@ def render():
         session is None or not session.is_alive() or session.is_closed
     ):
         dropped = st.session_state.pop("chat_pending_prompt")
-        st.warning(f"Chat session is not available. Could not send prompt:\n\n{dropped[:200]}")
+        st.warning(
+            f"Chat session is not available. Could not send prompt:\n\n{dropped[:200]}"
+        )
 
     # Chat input (disabled during active streaming to prevent overlap)
     if prompt := st.chat_input(
@@ -496,7 +537,9 @@ def render():
     ):
         session = st.session_state.chat_session  # re-read in case it was recreated
         if session is None or not session.is_alive() or session.is_closed:
-            st.error("Chat session is not available. Please check Claude Code CLI authentication.")
+            st.error(
+                "Chat session is not available. Please check Claude Code CLI authentication."
+            )
         else:
             st.session_state.chat_messages.append({"role": "user", "content": prompt})
             _save_chat_history(st.session_state.chat_messages)

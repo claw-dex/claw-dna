@@ -197,7 +197,9 @@ def cmd_list(json_mode: bool = False) -> int:
         for s in summaries:
             cycle_str = str(s["cycle"]) if s["cycle"] is not None else "?"
             label = s["label"] or ""
-            print(f"  {s['name']:<20}  {s['age']:<12}  {s['files']:>5}  {cycle_str:>5}  {label}")
+            print(
+                f"  {s['name']:<20}  {s['age']:<12}  {s['files']:>5}  {cycle_str:>5}  {label}"
+            )
         print()
 
     return 0
@@ -358,7 +360,9 @@ def cmd_check(json_mode: bool = False) -> int:
         color = "\033[33m" if stale else "\033[32m"
         reset = "\033[0m"
         print(f"  Latest backup: {latest.name}  ({s['age']})")
-        print(f"  Status:        {color}{status_str}{reset}  ({len(backups)} total backups)")
+        print(
+            f"  Status:        {color}{status_str}{reset}  ({len(backups)} total backups)"
+        )
         if stale:
             print(f"  Consider running: python3 /agent/scripts/memory_backup.py")
 
@@ -367,20 +371,34 @@ def cmd_check(json_mode: bool = False) -> int:
 
 # ── Entry point ─────────────────────────────────────────────────────────────────
 
+
 def main():
     import argparse
+
     parser = argparse.ArgumentParser(
         description="Memory backup and restore utility",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--list", action="store_true", help="List all backups")
-    parser.add_argument("--restore", metavar="TS", help="Restore a backup (name or 'latest')")
-    parser.add_argument("--dry-run", action="store_true", help="Show what --restore would do without doing it")
-    parser.add_argument("--prune", metavar="N", type=int, help="Keep only N most recent backups")
-    parser.add_argument("--check", action="store_true", help="Show age of most recent backup")
+    parser.add_argument(
+        "--restore", metavar="TS", help="Restore a backup (name or 'latest')"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what --restore would do without doing it",
+    )
+    parser.add_argument(
+        "--prune", metavar="N", type=int, help="Keep only N most recent backups"
+    )
+    parser.add_argument(
+        "--check", action="store_true", help="Show age of most recent backup"
+    )
     parser.add_argument("--label", default="", help="Label for this backup (optional)")
     parser.add_argument("--quiet", action="store_true", help="Suppress output")
-    parser.add_argument("--json", action="store_true", dest="json_mode", help="Output JSON")
+    parser.add_argument(
+        "--json", action="store_true", dest="json_mode", help="Output JSON"
+    )
 
     args = parser.parse_args()
 

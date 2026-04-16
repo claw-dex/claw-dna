@@ -36,13 +36,13 @@ from shared import surface_error, write_to_inbox
 
 # --- Paths ---
 BASE = Path("/agent")
-LOG_DIR        = BASE / "memory" / "logs"
-LOG_FILE       = LOG_DIR / "webhook_receiver.log"
-HEARTBEAT_DIR  = BASE / "memory" / "heartbeats"
+LOG_DIR = BASE / "memory" / "logs"
+LOG_FILE = LOG_DIR / "webhook_receiver.log"
+HEARTBEAT_DIR = BASE / "memory" / "heartbeats"
 HEARTBEAT_FILE = HEARTBEAT_DIR / "webhook_receiver.heartbeat"
 
 # --- Config ---
-WEBHOOK_PORT  = 8082
+WEBHOOK_PORT = 8082
 MAX_BODY_SIZE = 1_048_576  # 1 MB
 
 # --- Logging ---
@@ -71,6 +71,7 @@ def _write_heartbeat():
 # HTTP handler
 # ---------------------------------------------------------------------------
 
+
 class WebhookHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         log.debug(f"HTTP: {format % args}")
@@ -87,7 +88,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
     def _handle_read_request(self):
         """Handle GET/HEAD/OPTIONS: respond 200 without recording."""
         parsed = urlparse(self.path)
-        log.debug(f"{self.command} {parsed.path} from {self.client_address[0]} (not recorded)")
+        log.debug(
+            f"{self.command} {parsed.path} from {self.client_address[0]} (not recorded)"
+        )
         self._send_json(200, {"status": "ok"})
 
     def _handle_write_request(self):
@@ -138,26 +141,37 @@ class WebhookHandler(BaseHTTPRequestHandler):
             # or that carry sensitive credentials — these are irrelevant/unsafe in inbox
             _SKIP_HEADERS = {
                 # Caddy-injected
-                "via", "x-forwarded-for", "x-forwarded-proto", "x-forwarded-host",
+                "via",
+                "x-forwarded-for",
+                "x-forwarded-proto",
+                "x-forwarded-host",
                 "x-real-ip",
                 # Infrastructure noise
                 "host",
                 # Sensitive credentials
-                "authorization", "cookie", "x-api-key",
-                "x-webhook-secret", "x-hub-signature", "x-hub-signature-256",
+                "authorization",
+                "cookie",
+                "x-api-key",
+                "x-webhook-secret",
+                "x-hub-signature",
+                "x-hub-signature-256",
                 "x-auth-token",
             }
             header_pairs = ", ".join(
-                f"{k}: {v}" for k, v in self.headers.items()
+                f"{k}: {v}"
+                for k, v in self.headers.items()
                 if k.lower() not in _SKIP_HEADERS
             )
 
-            body_str = (
-                json.dumps(body_parsed) if body_parsed is not None else body_text
+            body_str = json.dumps(body_parsed) if body_parsed is not None else body_text
+            _INBOX_BODY_MAX = (
+                4096  # 4 KB — full payload already in webhook_receiver.log
             )
-            _INBOX_BODY_MAX = 4096  # 4 KB — full payload already in webhook_receiver.log
             if len(body_str) > _INBOX_BODY_MAX:
-                body_str = body_str[:_INBOX_BODY_MAX] + f"\n[truncated {len(body_str) - _INBOX_BODY_MAX} bytes — full payload in webhook_receiver.log]"
+                body_str = (
+                    body_str[:_INBOX_BODY_MAX]
+                    + f"\n[truncated {len(body_str) - _INBOX_BODY_MAX} bytes — full payload in webhook_receiver.log]"
+                )
 
             content_parts = [f"{self.command} {parsed.path}{query_str}"]
             if header_pairs:
@@ -181,7 +195,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
             if success:
                 self._send_json(200, {"status": "received"})
             else:
-                log.error(f"Failed to write inbox item for {self.command} {parsed.path}")
+                log.error(
+                    f"Failed to write inbox item for {self.command} {parsed.path}"
+                )
                 self._send_json(500, {"status": "error", "detail": "failed to persist"})
 
         except Exception as e:
@@ -193,18 +209,19 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 pass
 
     # Route methods to handlers
-    do_GET     = _handle_read_request
-    do_HEAD    = _handle_read_request
+    do_GET = _handle_read_request
+    do_HEAD = _handle_read_request
     do_OPTIONS = _handle_read_request
-    do_POST    = _handle_write_request
-    do_PUT     = _handle_write_request
-    do_DELETE  = _handle_write_request
-    do_PATCH   = _handle_write_request
+    do_POST = _handle_write_request
+    do_PUT = _handle_write_request
+    do_DELETE = _handle_write_request
+    do_PATCH = _handle_write_request
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main():
     log.info("=" * 60)

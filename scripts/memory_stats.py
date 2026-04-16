@@ -87,8 +87,14 @@ def summarize_cycles(cycles: list) -> dict:
     evolve_cycles = [c for c in cycles if c.get("type") == "evolve"]
     by_category = Counter(c.get("category", "unknown") for c in evolve_cycles)
 
-    completed = [c for c in cycles if c.get("status") == "completed" and "duration_seconds" in c]
-    avg_dur = sum(c["duration_seconds"] for c in completed) / len(completed) if completed else 0
+    completed = [
+        c for c in cycles if c.get("status") == "completed" and "duration_seconds" in c
+    ]
+    avg_dur = (
+        sum(c["duration_seconds"] for c in completed) / len(completed)
+        if completed
+        else 0
+    )
 
     return {
         "total": len(cycles),
@@ -100,7 +106,9 @@ def summarize_cycles(cycles: list) -> dict:
 
 
 def summarize_failures(failures_data: dict) -> dict:
-    failures = failures_data.get("failures", []) if isinstance(failures_data, dict) else []
+    failures = (
+        failures_data.get("failures", []) if isinstance(failures_data, dict) else []
+    )
     recent = failures[-3:] if failures else []
     return {
         "total": len(failures),
@@ -119,10 +127,19 @@ def summarize_inbox(inbox_path: Path) -> dict:
 
 def check_portal_health() -> str:
     import subprocess
+
     try:
         r = subprocess.run(
-            ["curl", "-s", "--max-time", "3", "http://localhost:8081/app/_stcore/health"],
-            capture_output=True, text=True, timeout=5
+            [
+                "curl",
+                "-s",
+                "--max-time",
+                "3",
+                "http://localhost:8081/app/_stcore/health",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         return "ok" if "ok" in r.stdout.lower() else f"UNHEALTHY: {r.stdout[:50]}"
     except Exception as e:
@@ -137,10 +154,18 @@ def main():
     # Load all memory files
     state = load_json(MEMORY / "state.json") or {}
     goals_raw = load_json(MEMORY / "goal.json")
-    goals_list = goals_raw if isinstance(goals_raw, list) else (goals_raw.get("goals", []) if isinstance(goals_raw, dict) else [])
+    goals_list = (
+        goals_raw
+        if isinstance(goals_raw, list)
+        else (goals_raw.get("goals", []) if isinstance(goals_raw, dict) else [])
+    )
     cycles = load_json(MEMORY / "cycles.json") or []
     journal = load_json(MEMORY / "journal.json") or []
-    failures_raw = {"failures": [e for e in journal if isinstance(e, dict) and e.get("status") == "failed"]}
+    failures_raw = {
+        "failures": [
+            e for e in journal if isinstance(e, dict) and e.get("status") == "failed"
+        ]
+    }
     capabilities_raw = load_json(MEMORY / "capabilities.json")
     capabilities = capabilities_raw if isinstance(capabilities_raw, list) else []
 
@@ -152,20 +177,29 @@ def main():
     portal = check_portal_health()
 
     if json_mode:
-        print(json.dumps({
-            "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "state": s,
-            "goals": g,
-            "cycles": c,
-            "failures": f,
-            "portal": portal,
-            "capabilities_count": len(capabilities),
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "generated_at": datetime.datetime.now(
+                        datetime.timezone.utc
+                    ).isoformat(),
+                    "state": s,
+                    "goals": g,
+                    "cycles": c,
+                    "failures": f,
+                    "portal": portal,
+                    "capabilities_count": len(capabilities),
+                },
+                indent=2,
+            )
+        )
         return
 
     if short_mode:
         hb = ago(s.get("last_heartbeat", "")) if s.get("last_heartbeat") else "never"
-        print(f"Cycle {s.get('cycle')} | {s.get('status')} | Portal: {portal} | Last HB: {hb}")
+        print(
+            f"Cycle {s.get('cycle')} | {s.get('status')} | Portal: {portal} | Last HB: {hb}"
+        )
         if g.get("in_progress"):
             print(f"  Active goals: {g['in_progress']}")
         if f.get("total"):
@@ -173,7 +207,9 @@ def main():
         return
 
     # Full human-readable report
-    now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    now_str = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%d %H:%M UTC"
+    )
     print(f"{'='*60}")
     print(f"  AGENT MEMORY STATS  —  {now_str}")
     print(f"{'='*60}")
@@ -192,19 +228,31 @@ def main():
     print(f"\n[PORTAL]  {portal_icon} {portal}")
 
     # Goals
-    print(f"\n[GOALS]  total={g['total']}  pending={g['pending']}  in-progress={g['in_progress']}  completed={g['completed']}  failed={g['failed']}")
+    print(
+        f"\n[GOALS]  total={g['total']}  pending={g['pending']}  in-progress={g['in_progress']}  completed={g['completed']}  failed={g['failed']}"
+    )
     if g.get("latest"):
         lg = g["latest"]
-        print(f"  Latest: [{lg.get('status')}] {str(lg.get('content') or lg.get('goal', ''))[:80]}")
+        print(
+            f"  Latest: [{lg.get('status')}] {str(lg.get('content') or lg.get('goal', ''))[:80]}"
+        )
 
     # Cycles
-    print(f"\n[CYCLES]  total={c.get('total', 0)}  avg_dur={fmt_duration(c.get('avg_duration_seconds', 0))}")
+    print(
+        f"\n[CYCLES]  total={c.get('total', 0)}  avg_dur={fmt_duration(c.get('avg_duration_seconds', 0))}"
+    )
     if c.get("by_type"):
         for k, v in sorted(c["by_type"].items()):
             print(f"  {k}: {v}")
     if c.get("evolve_by_category"):
         cats = c["evolve_by_category"]
-        all_cats = ["capability", "observability", "reliability", "efficiency", "prompt_evolution"]
+        all_cats = [
+            "capability",
+            "observability",
+            "reliability",
+            "efficiency",
+            "prompt_evolution",
+        ]
         print(f"  Evolve breakdown:")
         for cat in all_cats:
             count = cats.get(cat, 0)
@@ -230,7 +278,13 @@ def main():
 
     # Evolve recommendation
     cats = c.get("evolve_by_category", {})
-    all_cats = ["capability", "observability", "reliability", "efficiency", "prompt_evolution"]
+    all_cats = [
+        "capability",
+        "observability",
+        "reliability",
+        "efficiency",
+        "prompt_evolution",
+    ]
     zero_cats = [cat for cat in all_cats if cats.get(cat, 0) == 0]
     min_count = min((cats.get(cat, 0) for cat in all_cats), default=0)
     min_cats = [cat for cat in all_cats if cats.get(cat, 0) == min_count]
@@ -240,7 +294,9 @@ def main():
         print(f"  Unstarted categories: {', '.join(zero_cats)}")
         print(f"  → Suggest: {zero_cats[0]}")
     else:
-        print(f"  All categories started. Least-done: {', '.join(min_cats)} ({min_count})")
+        print(
+            f"  All categories started. Least-done: {', '.join(min_cats)} ({min_count})"
+        )
         print(f"  → Suggest: {min_cats[0]}")
 
     print(f"\n{'='*60}\n")

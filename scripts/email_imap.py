@@ -45,6 +45,7 @@ def _get_credentials():
     """
     try:
         from scripts.keepass import get_credential_entry
+
         data = get_credential_entry(KEEPASS_ENTRY)
     except Exception as exc:
         print(json.dumps({"error": f"Failed to load KeePass credentials: {exc}"}))
@@ -204,8 +205,10 @@ def _extract_body(msg):
     if text_body is None and html_body is not None:
         unescaped = html_module.unescape(html_body)
         no_scripts = re.sub(
-            r"<(script|style)[^>]*>.*?</(script|style)>", "",
-            unescaped, flags=re.DOTALL | re.IGNORECASE,
+            r"<(script|style)[^>]*>.*?</(script|style)>",
+            "",
+            unescaped,
+            flags=re.DOTALL | re.IGNORECASE,
         )
         stripped = re.sub(r"<[^>]+>", "", no_scripts)
         text_body = re.sub(r"\n{3,}", "\n\n", stripped).strip()
@@ -310,12 +313,14 @@ def cmd_read(args):
         headers = _parse_message_headers(raw)
         text_body, html_body = _extract_body(msg)
 
-        _print_json({
-            "uid": uid_str,
-            **headers,
-            "body_text": text_body[:15000],
-            "has_html": bool(html_body),
-        })
+        _print_json(
+            {
+                "uid": uid_str,
+                **headers,
+                "body_text": text_body[:15000],
+                "has_html": bool(html_body),
+            }
+        )
         return 0
 
     except imaplib.IMAP4.error as exc:
@@ -341,17 +346,21 @@ def cmd_search(args):
         if not _select_mailbox(conn, args.mailbox, readonly=True):
             return 1
 
-        uids = _search_uids(conn, filter_name=args.filter, field=args.field, query=args.query)
+        uids = _search_uids(
+            conn, filter_name=args.filter, field=args.field, query=args.query
+        )
         if uids is None:
             return 1
 
         messages = _fetch_messages(conn, uids, args.max)
-        _print_json({
-            "messages": messages,
-            "count": len(messages),
-            "query": args.query,
-            "field": args.field,
-        })
+        _print_json(
+            {
+                "messages": messages,
+                "count": len(messages),
+                "query": args.query,
+                "field": args.field,
+            }
+        )
         return 0
 
     except imaplib.IMAP4.error as exc:
@@ -394,14 +403,21 @@ def cmd_delete(args):
         if deleted:
             expunge_status, _ = conn.expunge()
             if expunge_status != "OK":
-                _print_json({"error": "Failed to expunge deleted messages", "deleted_uids": deleted})
+                _print_json(
+                    {
+                        "error": "Failed to expunge deleted messages",
+                        "deleted_uids": deleted,
+                    }
+                )
                 return 1
 
-        _print_json({
-            "deleted_uids": deleted,
-            "deleted_count": len(deleted),
-            "errors": errors,
-        })
+        _print_json(
+            {
+                "deleted_uids": deleted,
+                "deleted_count": len(deleted),
+                "errors": errors,
+            }
+        )
         return 0 if not errors else 1
 
     except imaplib.IMAP4.error as exc:
@@ -425,8 +441,9 @@ def main():
         description="IMAP email client for the agent.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--json", action="store_true", default=True,
-                        help="Output as JSON (always on)")
+    parser.add_argument(
+        "--json", action="store_true", default=True, help="Output as JSON (always on)"
+    )
     sub = parser.add_subparsers(dest="command", help="Available commands")
 
     # auth
@@ -434,42 +451,56 @@ def main():
 
     # fetch
     p_fetch = sub.add_parser("fetch", help="Fetch emails")
-    p_fetch.add_argument("--mailbox", default="INBOX",
-                         help="IMAP mailbox (default: INBOX)")
-    p_fetch.add_argument("--filter", default="all",
-                         choices=["unseen", "seen", "all"],
-                         help="Email filter (default: all)")
-    p_fetch.add_argument("--max", type=int, default=20,
-                         help="Max emails to fetch (default: 20)")
+    p_fetch.add_argument(
+        "--mailbox", default="INBOX", help="IMAP mailbox (default: INBOX)"
+    )
+    p_fetch.add_argument(
+        "--filter",
+        default="all",
+        choices=["unseen", "seen", "all"],
+        help="Email filter (default: all)",
+    )
+    p_fetch.add_argument(
+        "--max", type=int, default=20, help="Max emails to fetch (default: 20)"
+    )
 
     # search
     p_search = sub.add_parser("search", help="Search emails")
-    p_search.add_argument("--query", required=True,
-                          help="Search query text")
-    p_search.add_argument("--field", default="text",
-                          choices=["subject", "from", "text"],
-                          help="Field to search (default: text)")
-    p_search.add_argument("--mailbox", default="INBOX",
-                          help="IMAP mailbox (default: INBOX)")
-    p_search.add_argument("--filter", default="all",
-                          choices=["unseen", "seen", "all"],
-                          help="Email filter (default: all)")
-    p_search.add_argument("--max", type=int, default=20,
-                          help="Max emails to fetch (default: 20)")
+    p_search.add_argument("--query", required=True, help="Search query text")
+    p_search.add_argument(
+        "--field",
+        default="text",
+        choices=["subject", "from", "text"],
+        help="Field to search (default: text)",
+    )
+    p_search.add_argument(
+        "--mailbox", default="INBOX", help="IMAP mailbox (default: INBOX)"
+    )
+    p_search.add_argument(
+        "--filter",
+        default="all",
+        choices=["unseen", "seen", "all"],
+        help="Email filter (default: all)",
+    )
+    p_search.add_argument(
+        "--max", type=int, default=20, help="Max emails to fetch (default: 20)"
+    )
 
     # delete
     p_delete = sub.add_parser("delete", help="Delete emails by UID")
-    p_delete.add_argument("--mailbox", default="INBOX",
-                          help="IMAP mailbox (default: INBOX)")
-    p_delete.add_argument("--uid", required=True, nargs="+",
-                          help="One or more IMAP UIDs to delete")
+    p_delete.add_argument(
+        "--mailbox", default="INBOX", help="IMAP mailbox (default: INBOX)"
+    )
+    p_delete.add_argument(
+        "--uid", required=True, nargs="+", help="One or more IMAP UIDs to delete"
+    )
 
     # read
     p_read = sub.add_parser("read", help="Read full email body by UID")
-    p_read.add_argument("--mailbox", default="INBOX",
-                        help="IMAP mailbox (default: INBOX)")
-    p_read.add_argument("--uid", required=True,
-                        help="IMAP UID of the message to read")
+    p_read.add_argument(
+        "--mailbox", default="INBOX", help="IMAP mailbox (default: INBOX)"
+    )
+    p_read.add_argument("--uid", required=True, help="IMAP UID of the message to read")
 
     args = parser.parse_args()
 

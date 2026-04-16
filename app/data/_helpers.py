@@ -3,7 +3,6 @@
 import json
 import os
 
-
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 
 

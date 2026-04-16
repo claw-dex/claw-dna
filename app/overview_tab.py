@@ -6,21 +6,19 @@ from datetime import datetime, timezone, timedelta
 from app.shared import heartbeat_freshness, parse_dt as _safe_fromisoformat
 
 _CATEGORY_COLORS = {
-    "capability":       "#2196F3",
-    "observability":    "#9C27B0",
-    "reliability":      "#4CAF50",
-    "efficiency":       "#FF9800",
+    "capability": "#2196F3",
+    "observability": "#9C27B0",
+    "reliability": "#4CAF50",
+    "efficiency": "#FF9800",
     "prompt_evolution": "#E91E63",
 }
 _CATEGORY_ICONS = {
-    "capability":       "⚡",
-    "observability":    "👁️",
-    "reliability":      "🛡️",
-    "efficiency":       "⏩",
+    "capability": "⚡",
+    "observability": "👁️",
+    "reliability": "🛡️",
+    "efficiency": "⏩",
     "prompt_evolution": "✏️",
 }
-
-
 
 
 def _render_today_glance(now_utc):
@@ -35,11 +33,15 @@ def _render_today_glance(now_utc):
 
     # Partition cycles by day
     today_cycles = [c for c in all_cycles if str(c.get("start", ""))[:10] == today_str]
-    yesterday_cycles = [c for c in all_cycles if str(c.get("start", ""))[:10] == yesterday_str]
+    yesterday_cycles = [
+        c for c in all_cycles if str(c.get("start", ""))[:10] == yesterday_str
+    ]
 
     today_secs = sum(c.get("duration_seconds") or 0 for c in today_cycles)
     today_completed = sum(1 for c in today_cycles if c.get("status") == "completed")
-    yesterday_completed = len([c for c in yesterday_cycles if c.get("status") == "completed"])
+    yesterday_completed = len(
+        [c for c in yesterday_cycles if c.get("status") == "completed"]
+    )
 
     # Category breakdown for today
     today_cats: dict[str, int] = {}
@@ -53,13 +55,17 @@ def _render_today_glance(now_utc):
 
     # Load journal entries for cycle summaries (journals have richer text than cycles.json)
     journal_data = load_journal(limit=100, offset=0)
-    journal_entries = journal_data.get("entries", []) if isinstance(journal_data, dict) else []
+    journal_entries = (
+        journal_data.get("entries", []) if isinstance(journal_data, dict) else []
+    )
 
     st.subheader("Today at a Glance")
     st.caption(f"Activity summary for {today_str} (UTC)")
 
     # Metrics row
-    delta_cycles = today_completed - yesterday_completed if yesterday_completed else None
+    delta_cycles = (
+        today_completed - yesterday_completed if yesterday_completed else None
+    )
     delta_str = f"{delta_cycles:+d} vs yesterday" if delta_cycles is not None else None
 
     m1, m2, m3, m4 = st.columns(4)
@@ -83,14 +89,22 @@ def _render_today_glance(now_utc):
     with m3:
         goal_today = today_types.get("goal", 0)
         evolve_today = today_types.get("evolve", 0)
-        st.metric("Goals Run", goal_today, delta=f"{evolve_today} evolve" if evolve_today else None)
+        st.metric(
+            "Goals Run",
+            goal_today,
+            delta=f"{evolve_today} evolve" if evolve_today else None,
+        )
     with m4:
         cats_today = len(today_cats)
         cat_list = ", ".join(
             f"{_CATEGORY_ICONS.get(c,'•')} {c.replace('_',' ')}"
             for c in sorted(today_cats, key=lambda k: -today_cats[k])
         )
-        st.metric("Categories", cats_today, help=cat_list if cat_list else "No categories today")
+        st.metric(
+            "Categories",
+            cats_today,
+            help=cat_list if cat_list else "No categories today",
+        )
 
     if not today_cycles:
         st.info("No cycles yet today — agent starts fresh each heartbeat.")
@@ -100,7 +114,11 @@ def _render_today_glance(now_utc):
     today_sorted = sorted(today_cycles, key=lambda c: c.get("start", ""))
 
     # Build journal lookup by cycle number
-    journal_by_cycle = {int(je.get("cycle", -1)): je for je in journal_entries if je.get("cycle") is not None}
+    journal_by_cycle = {
+        int(je.get("cycle", -1)): je
+        for je in journal_entries
+        if je.get("cycle") is not None
+    }
 
     items_html = []
     for c in today_sorted:
@@ -113,25 +131,37 @@ def _render_today_glance(now_utc):
 
         # Prefer journal summary (richer)
         je = journal_by_cycle.get(int(cn) if str(cn).isdigit() else -1, {})
-        summary = (
-            je.get("summary") or je.get("outcome") or
-            c.get("summary") or ""
-        )[:90]
+        summary = (je.get("summary") or je.get("outcome") or c.get("summary") or "")[
+            :90
+        ]
 
-        type_icon = {"bootstrap": "🌱", "evolve": "🧬", "goal": "🎯", "self-heal": "🔧"}.get(ctype, "•")
+        type_icon = {
+            "bootstrap": "🌱",
+            "evolve": "🧬",
+            "goal": "🎯",
+            "self-heal": "🔧",
+        }.get(ctype, "•")
         cat_icon = _CATEGORY_ICONS.get(cat, "") if cat else ""
-        status_icon = {"completed": "✅", "failed": "❌", "in_progress": "🔄"}.get(status, "⏳")
+        status_icon = {"completed": "✅", "failed": "❌", "in_progress": "🔄"}.get(
+            status, "⏳"
+        )
         cat_color = _CATEGORY_COLORS.get(cat, "#666")
 
         dur_str = ""
         if dur:
-            dur_str = f"{int(dur)}s" if dur < 60 else f"{int(dur)//60}m{int(dur)%60:02d}s"
+            dur_str = (
+                f"{int(dur)}s" if dur < 60 else f"{int(dur)//60}m{int(dur)%60:02d}s"
+            )
 
         cat_badge = (
-            f'<span style="background:{cat_color};color:#fff;padding:0 5px;'
-            f'border-radius:8px;font-size:10px;font-weight:600;margin:0 3px">'
-            f'{cat_icon} {cat.replace("_"," ")}</span>'
-        ) if cat else ""
+            (
+                f'<span style="background:{cat_color};color:#fff;padding:0 5px;'
+                f'border-radius:8px;font-size:10px;font-weight:600;margin:0 3px">'
+                f'{cat_icon} {cat.replace("_"," ")}</span>'
+            )
+            if cat
+            else ""
+        )
 
         items_html.append(
             f'<div style="display:flex;align-items:flex-start;gap:6px;padding:5px 0;'
@@ -140,19 +170,19 @@ def _render_today_glance(now_utc):
             f'<span style="font-size:14px">{status_icon}{type_icon}</span>'
             f'<div style="flex:1;min-width:0">'
             f'<span style="font-size:12px;font-weight:600">#{cn} {ctype}</span>'
-            f'{cat_badge}'
+            f"{cat_badge}"
             f'<span style="color:#888;font-size:11px;margin-left:4px">{dur_str}</span>'
             f'<div style="color:#bbb;font-size:11px;margin-top:1px;white-space:nowrap;'
             f'overflow:hidden;text-overflow:ellipsis">{summary}</div>'
-            f'</div>'
-            f'</div>'
+            f"</div>"
+            f"</div>"
         )
 
     st.markdown(
         f'<div style="max-height:280px;overflow-y:auto;border:1px solid #333;'
         f'border-radius:6px;padding:6px 10px;font-family:monospace">'
         f'{"".join(items_html)}'
-        f'</div>',
+        f"</div>",
         unsafe_allow_html=True,
     )
 
@@ -164,7 +194,7 @@ def _render_today_glance(now_utc):
             icon = _CATEGORY_ICONS.get(cat, "•")
             cat_parts.append(
                 f'<span style="display:inline-flex;align-items:center;gap:3px;'
-                f'background:{color}22;border:1px solid {color}55;'
+                f"background:{color}22;border:1px solid {color}55;"
                 f'border-radius:10px;padding:1px 8px;font-size:11px;margin:2px">'
                 f'{icon} {cat.replace("_", " ")} <strong>{count}</strong></span>'
             )
@@ -176,8 +206,15 @@ def _render_today_glance(now_utc):
 
 def render():
     from app.data import (
-        load_state, load_goals, load_inbox, load_suggest, load_balance,
-        load_errors, load_goal_stats, load_cycles, load_journal,
+        load_state,
+        load_goals,
+        load_inbox,
+        load_suggest,
+        load_balance,
+        load_errors,
+        load_goal_stats,
+        load_cycles,
+        load_journal,
     )
 
     state = load_state() or {}
@@ -186,12 +223,15 @@ def render():
     errors = load_errors() or []
 
     st.markdown("## Agent Overview")
-    st.caption("Suggestions, goal performance, evolution balance, and health — all in one place.")
+    st.caption(
+        "Suggestions, goal performance, evolution balance, and health — all in one place."
+    )
 
     # ── Live health strip ──────────────────────────────────────
     now_utc = datetime.now(timezone.utc)
     recent_errors = [
-        e for e in errors
+        e
+        for e in errors
         if (lambda ts: ts and (now_utc - ts) < timedelta(hours=24))(
             _safe_fromisoformat(e.get("timestamp", ""))
         )
@@ -203,7 +243,10 @@ def render():
 
     col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
-        st.metric("Agent Status", f"{_status_icon(state.get('status', 'unknown'))} {state.get('status', 'unknown')}")
+        st.metric(
+            "Agent Status",
+            f"{_status_icon(state.get('status', 'unknown'))} {state.get('status', 'unknown')}",
+        )
     with col2:
         st.metric("Heartbeat", f"{hb_icon} {hb_age}")
     with col3:
@@ -217,10 +260,14 @@ def render():
     # Alert banners
     if recent_errors:
         affected = sorted(set(e.get("tab", "?") for e in recent_errors))
-        st.warning(f"**{len(recent_errors)} tab error(s)** in last 24h — affected: {', '.join(affected)}. See ⚙️ System tab.")
+        st.warning(
+            f"**{len(recent_errors)} tab error(s)** in last 24h — affected: {', '.join(affected)}. See ⚙️ System tab."
+        )
 
     if len(inbox) > 0:
-        st.info(f"**{len(inbox)} message(s)** in inbox — agent will process on next heartbeat.")
+        st.info(
+            f"**{len(inbox)} message(s)** in inbox — agent will process on next heartbeat."
+        )
 
     st.divider()
 
@@ -242,7 +289,9 @@ def render():
             priority = s.get("priority", "low")
             icon = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(priority, "⚪")
             with st.expander(f"{icon} {s.get('action', '')[:70]}"):
-                st.caption(f"**Priority:** {priority} | **Category:** {s.get('category', '')}")
+                st.caption(
+                    f"**Priority:** {priority} | **Category:** {s.get('category', '')}"
+                )
                 st.write(s.get("reason", ""))
 
     with right:
@@ -271,7 +320,9 @@ def render():
                 count = all_time.get(cat, 0)
                 suffix = " ★" if is_suggested else ""
                 pct = max(0.0, min(1.0, score / max_score)) if max_score > 0 else 0
-                st.progress(pct, text=f"{icon} {label}{suffix}: score {score} ({count} cycles)")
+                st.progress(
+                    pct, text=f"{icon} {label}{suffix}: score {score} ({count} cycles)"
+                )
                 # Show signal breakdown in small text
                 parts = []
                 if w.get("base_need", 0) > 0:
@@ -341,7 +392,9 @@ def render():
         n = len(durations)
         bar_w, gap, svg_h = 18, 3, 60
         svg_w = n * (bar_w + gap) + 20
-        parts = [f'<svg width="{svg_w}" height="{svg_h}" xmlns="http://www.w3.org/2000/svg">']
+        parts = [
+            f'<svg width="{svg_w}" height="{svg_h}" xmlns="http://www.w3.org/2000/svg">'
+        ]
         for i, (cn, dur) in enumerate(durations):
             x = 10 + i * (bar_w + gap)
             bar_h = max(4, int(dur / max_dur * 38))
@@ -349,7 +402,7 @@ def render():
             parts.append(
                 f'<rect x="{x}" y="{y}" width="{bar_w}" height="{bar_h}" '
                 f'fill="#2196F3" rx="2" opacity="0.8">'
-                f'<title>Cycle {cn}: {int(dur)}s</title></rect>'
+                f"<title>Cycle {cn}: {int(dur)}s</title></rect>"
             )
             parts.append(
                 f'<text x="{x + bar_w//2}" y="{svg_h - 2}" text-anchor="middle" '
@@ -360,7 +413,7 @@ def render():
             f'<div style="overflow-x:auto;margin-top:4px">'
             f'{"".join(parts)}'
             f'<div><small style="color:#888">Goal cycle durations (seconds) by cycle number</small></div>'
-            f'</div>',
+            f"</div>",
             unsafe_allow_html=True,
         )
 
@@ -368,7 +421,12 @@ def render():
     recent = goal_stats.get("recent_goals", [])
     if recent:
         with st.expander("Recent Goals", expanded=False):
-            status_icons = {"completed": "✅", "failed": "❌", "in_progress": "🔄", "pending": "⏳"}
+            status_icons = {
+                "completed": "✅",
+                "failed": "❌",
+                "in_progress": "🔄",
+                "pending": "⏳",
+            }
             for g in recent:
                 gstatus = g.get("status", "")
                 icon = status_icons.get(gstatus, "•")
@@ -381,11 +439,19 @@ def render():
     # ── Cycle velocity chart ───────────────────────────────────
     st.subheader("Cycle Velocity")
     cycles_data = load_cycles() or []
-    completed_cycles = [c for c in cycles_data if c.get("status") == "completed" and c.get("start") and c.get("duration_seconds")]
+    completed_cycles = [
+        c
+        for c in cycles_data
+        if c.get("status") == "completed"
+        and c.get("start")
+        and c.get("duration_seconds")
+    ]
 
     if len(completed_cycles) >= 3:
         # Last 20 completed cycles
-        recent_cycles = sorted(completed_cycles, key=lambda c: c.get("start", ""), reverse=True)[:20]
+        recent_cycles = sorted(
+            completed_cycles, key=lambda c: c.get("start", ""), reverse=True
+        )[:20]
         recent_cycles = list(reversed(recent_cycles))  # chronological
 
         # Rolling 5-cycle avg duration
@@ -405,7 +471,9 @@ def render():
             "self-heal": "#F44336",
         }
 
-        parts = [f'<svg width="{svg_w}" height="{svg_h + 20}" xmlns="http://www.w3.org/2000/svg">']
+        parts = [
+            f'<svg width="{svg_w}" height="{svg_h + 20}" xmlns="http://www.w3.org/2000/svg">'
+        ]
         for i, (dur, cn, c) in enumerate(zip(durs, cycle_nums, recent_cycles)):
             x = 10 + i * (bar_w + gap)
             bar_h = max(4, int(dur / max_dur * 50))
@@ -436,7 +504,7 @@ def render():
         st.markdown(
             f'<div style="overflow-x:auto;padding:4px 0">'
             f'{"".join(parts)}'
-            f'</div>'
+            f"</div>"
             f'<div style="margin-top:4px">{"".join(legend_parts)}</div>'
             f'<div><small style="color:#888">Cycle duration (seconds) by cycle number — last {n} completed cycles</small></div>',
             unsafe_allow_html=True,
@@ -444,8 +512,12 @@ def render():
 
         # Summary stats
         avg_all = round(sum(durs) / len(durs))
-        evolve_durs = [c["duration_seconds"] for c in recent_cycles if c.get("type") == "evolve"]
-        goal_durs = [c["duration_seconds"] for c in recent_cycles if c.get("type") == "goal"]
+        evolve_durs = [
+            c["duration_seconds"] for c in recent_cycles if c.get("type") == "evolve"
+        ]
+        goal_durs = [
+            c["duration_seconds"] for c in recent_cycles if c.get("type") == "goal"
+        ]
         sc1, sc2, sc3 = st.columns(3)
         with sc1:
             st.metric("Avg Duration (all)", f"{avg_all}s")
@@ -465,7 +537,9 @@ def render():
     st.caption("What the agent has built and improved — latest first.")
 
     journal_data = load_journal(limit=50, offset=0)
-    journal_entries = journal_data.get("entries", []) if isinstance(journal_data, dict) else []
+    journal_entries = (
+        journal_data.get("entries", []) if isinstance(journal_data, dict) else []
+    )
 
     # Build a map from cycle number → journal entry for rich summaries
     journal_by_cycle: dict[int, dict] = {}
@@ -480,14 +554,18 @@ def render():
     # Collect all completed evolve + goal cycles, newest first
     all_cycles = load_cycles() or []
     improvement_cycles = [
-        c for c in all_cycles
+        c
+        for c in all_cycles
         if c.get("status") == "completed" and c.get("type") in ("evolve", "goal")
     ]
     improvement_cycles.sort(key=lambda c: c.get("start", ""), reverse=True)
 
     # Show selector for how many to display
     show_n = st.select_slider(
-        "Show last N improvements", options=[5, 10, 20, 50], value=10, key="ov_improvements_n"
+        "Show last N improvements",
+        options=[5, 10, 20, 50],
+        value=10,
+        key="ov_improvements_n",
     )
     improvement_cycles = improvement_cycles[:show_n]
 
@@ -502,28 +580,31 @@ def render():
             dur = c.get("duration_seconds")
 
             # Prefer journal entry summary (richer) over cycles.json summary
-            je = journal_by_cycle.get(int(cycle_num) if str(cycle_num).isdigit() else -1, {})
-            summary = (
-                je.get("summary") or je.get("outcome") or
-                c.get("summary") or ""
+            je = journal_by_cycle.get(
+                int(cycle_num) if str(cycle_num).isdigit() else -1, {}
             )
+            summary = je.get("summary") or je.get("outcome") or c.get("summary") or ""
             actions = je.get("actions") or c.get("actions") or []
 
             # Build category badge HTML
             cat_color = _CATEGORY_COLORS.get(category, "#888")
             cat_icon = _CATEGORY_ICONS.get(category, "•")
             cat_badge = (
-                f'<span style="background:{cat_color};color:#fff;padding:1px 7px;'
-                f'border-radius:10px;font-size:11px;font-weight:600;margin-left:6px">'
-                f'{cat_icon} {category.replace("_", " ")}</span>'
-            ) if category else ""
+                (
+                    f'<span style="background:{cat_color};color:#fff;padding:1px 7px;'
+                    f'border-radius:10px;font-size:11px;font-weight:600;margin-left:6px">'
+                    f'{cat_icon} {category.replace("_", " ")}</span>'
+                )
+                if category
+                else ""
+            )
 
             type_badge_color = "#2196F3" if ctype == "goal" else "#9C27B0"
             type_icon = "🎯" if ctype == "goal" else "🧬"
             type_badge = (
                 f'<span style="background:{type_badge_color};color:#fff;padding:1px 7px;'
                 f'border-radius:10px;font-size:11px;font-weight:600">'
-                f'{type_icon} {ctype}</span>'
+                f"{type_icon} {ctype}</span>"
             )
 
             dur_str = ""
@@ -533,15 +614,19 @@ def render():
             label_html = (
                 f'<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
                 f'<span style="font-weight:600">#{cycle_num}</span>'
-                f'{type_badge}{cat_badge}'
+                f"{type_badge}{cat_badge}"
                 f'<span style="color:#888;font-size:12px;margin-left:auto">'
-                f'{dur_str}{start}</span>'
-                f'</div>'
+                f"{dur_str}{start}</span>"
+                f"</div>"
             )
 
             # Show summary as expander label (plain text for expander, rich HTML inside)
             short_summary = (summary or "No summary available")[:80]
-            expander_label = f"#{cycle_num} · {type_icon} {ctype}" + (f" · {cat_icon} {category.replace('_',' ')}" if category else "") + f"  — {short_summary}"
+            expander_label = (
+                f"#{cycle_num} · {type_icon} {ctype}"
+                + (f" · {cat_icon} {category.replace('_',' ')}" if category else "")
+                + f"  — {short_summary}"
+            )
 
             with st.expander(expander_label, expanded=False):
                 st.markdown(label_html, unsafe_allow_html=True)
@@ -554,8 +639,6 @@ def render():
                         st.markdown(f"- {act}")
                 if not summary and not actions:
                     st.caption("(No detailed summary recorded)")
-
-
 
 
 def _status_icon(status):

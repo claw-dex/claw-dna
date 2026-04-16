@@ -61,15 +61,21 @@ def cmd_archive(keep=DEFAULT_KEEP, dry_run=False):
     to_keep = entries[total - keep :]
 
     print(f"Journal: {total} entries total")
-    print(f"  Archive: {len(to_archive)} entries  "
-          f"(cycles {to_archive[0].get('cycle')}–{to_archive[-1].get('cycle')})")
-    print(f"  Keep:    {len(to_keep)} entries  "
-          f"(cycles {to_keep[0].get('cycle')}–{to_keep[-1].get('cycle')})")
+    print(
+        f"  Archive: {len(to_archive)} entries  "
+        f"(cycles {to_archive[0].get('cycle')}–{to_archive[-1].get('cycle')})"
+    )
+    print(
+        f"  Keep:    {len(to_keep)} entries  "
+        f"(cycles {to_keep[0].get('cycle')}–{to_keep[-1].get('cycle')})"
+    )
 
     if dry_run:
         size_before = JOURNAL.stat().st_size if JOURNAL.exists() else 0
         approx_size_after = int(size_before * len(to_keep) / total)
-        print(f"\n  journal.json size: {size_before // 1024} KB → ~{approx_size_after // 1024} KB")
+        print(
+            f"\n  journal.json size: {size_before // 1024} KB → ~{approx_size_after // 1024} KB"
+        )
         print("\n[DRY RUN] No files were modified.")
         return 0
 
@@ -77,10 +83,7 @@ def cmd_archive(keep=DEFAULT_KEEP, dry_run=False):
     if not isinstance(existing_archive, list):
         existing_archive = []
 
-    new_archive = sorted(
-        existing_archive + to_archive,
-        key=lambda e: e.get("cycle", 0)
-    )
+    new_archive = sorted(existing_archive + to_archive, key=lambda e: e.get("cycle", 0))
 
     _write_json_atomic(ARCHIVE, new_archive)
     _write_json_atomic(JOURNAL, to_keep)
@@ -105,7 +108,9 @@ def cmd_list():
     print("-" * 55)
     print(f"{'journal.json':<35} {active_count:>8}  {journal_size // 1024:>7} KB")
     if ARCHIVE.exists():
-        print(f"{'journal-archive.json':<35} {archive_count:>8}  {archive_size // 1024:>7} KB")
+        print(
+            f"{'journal-archive.json':<35} {archive_count:>8}  {archive_size // 1024:>7} KB"
+        )
     else:
         print(f"{'journal-archive.json':<35} {'—':>8}  {'(not created)':>12}")
     print("-" * 55)
@@ -126,12 +131,14 @@ def cmd_search(query):
     results = []
 
     def matches(entry):
-        text = " ".join([
-            str(entry.get("goal", "")),
-            str(entry.get("summary", "")),
-            str(entry.get("outcome", "")),
-            " ".join(entry.get("actions", [])),
-        ]).lower()
+        text = " ".join(
+            [
+                str(entry.get("goal", "")),
+                str(entry.get("summary", "")),
+                str(entry.get("outcome", "")),
+                " ".join(entry.get("actions", [])),
+            ]
+        ).lower()
         return q in text
 
     active = _load_json(JOURNAL, [])
@@ -168,32 +175,52 @@ def cmd_json(keep=DEFAULT_KEEP):
     archive_count = len(archive) if isinstance(archive, list) else 0
     journal_size = JOURNAL.stat().st_size if JOURNAL.exists() else 0
     archive_size = ARCHIVE.stat().st_size if ARCHIVE.exists() else 0
-    print(json.dumps({
-        "active_entries": active_count,
-        "archived_entries": archive_count,
-        "total_entries": active_count + archive_count,
-        "journal_size_kb": round(journal_size / 1024, 1),
-        "archive_size_kb": round(archive_size / 1024, 1),
-        "would_archive": max(0, active_count - keep),
-        "keep_setting": keep,
-        "needs_archive": active_count > keep,
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "active_entries": active_count,
+                "archived_entries": archive_count,
+                "total_entries": active_count + archive_count,
+                "journal_size_kb": round(journal_size / 1024, 1),
+                "archive_size_kb": round(archive_size / 1024, 1),
+                "would_archive": max(0, active_count - keep),
+                "keep_setting": keep,
+                "needs_archive": active_count > keep,
+            },
+            indent=2,
+        )
+    )
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="Archive old journal entries to keep journal.json small."
     )
-    parser.add_argument("--keep", type=int, default=DEFAULT_KEEP, metavar="N",
-                        help=f"Keep N most recent entries in journal.json (default: {DEFAULT_KEEP})")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Preview what would be archived without modifying files")
-    parser.add_argument("--list", action="store_true",
-                        help="Show entry counts and file sizes for active journal + archive")
-    parser.add_argument("--search", metavar="QUERY",
-                        help="Search across active journal and archive by keyword")
-    parser.add_argument("--json", action="store_true",
-                        help="Output stats as JSON without archiving")
+    parser.add_argument(
+        "--keep",
+        type=int,
+        default=DEFAULT_KEEP,
+        metavar="N",
+        help=f"Keep N most recent entries in journal.json (default: {DEFAULT_KEEP})",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview what would be archived without modifying files",
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="Show entry counts and file sizes for active journal + archive",
+    )
+    parser.add_argument(
+        "--search",
+        metavar="QUERY",
+        help="Search across active journal and archive by keyword",
+    )
+    parser.add_argument(
+        "--json", action="store_true", help="Output stats as JSON without archiving"
+    )
     args = parser.parse_args()
 
     if args.list:

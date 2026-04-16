@@ -62,7 +62,9 @@ def _flock(timeout=10):
                     break
                 except BlockingIOError:
                     if time.monotonic() >= deadline:
-                        raise TimeoutError(f"Could not acquire notes.json lock within {timeout}s")
+                        raise TimeoutError(
+                            f"Could not acquire notes.json lock within {timeout}s"
+                        )
                     time.sleep(0.05)
             yield
         finally:
@@ -80,9 +82,7 @@ def load_notes() -> list:
 
 
 def save_notes(notes: list):
-    tmp_fd, tmp_path = tempfile.mkstemp(
-        dir=str(NOTES_PATH.parent), suffix=".tmp"
-    )
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=str(NOTES_PATH.parent), suffix=".tmp")
     try:
         with os.fdopen(tmp_fd, "w") as f:
             json.dump(notes, f, indent=2)
@@ -215,8 +215,16 @@ def cmd_search(args: list) -> int:
     notes = load_notes()
     query_lower = query.lower()
     matches = [
-        n for n in notes
-        if query_lower in (n.get("title", "") + " " + n.get("content", "") + " " + " ".join(n.get("tags", []))).lower()
+        n
+        for n in notes
+        if query_lower
+        in (
+            n.get("title", "")
+            + " "
+            + n.get("content", "")
+            + " "
+            + " ".join(n.get("tags", []))
+        ).lower()
     ]
 
     if as_json:
@@ -259,7 +267,9 @@ def cmd_edit(args: list) -> int:
     unpin = "--unpin" in args
 
     if not any([new_title, new_content, new_tags is not None, pin, unpin]):
-        print("No changes specified. Use --title, --content, --tags, --pin, or --unpin.")
+        print(
+            "No changes specified. Use --title, --content, --tags, --pin, or --unpin."
+        )
         return 1
 
     with _flock():
@@ -432,7 +442,10 @@ def main() -> int:
 
 # --- Public API (for direct import by services) ---
 
-def add_note(title: str, content: str, tags: list[str] | None = None, pinned: bool = False) -> str | None:
+
+def add_note(
+    title: str, content: str, tags: list[str] | None = None, pinned: bool = False
+) -> str | None:
     """Add a note programmatically. Returns the note ID on success, None on error."""
     try:
         tags = tags or []
@@ -474,8 +487,16 @@ def search_notes(query: str) -> list:
     notes = load_notes()
     q = query.lower()
     return [
-        n for n in notes
-        if q in (n.get("title", "") + " " + n.get("content", "") + " " + " ".join(n.get("tags", []))).lower()
+        n
+        for n in notes
+        if q
+        in (
+            n.get("title", "")
+            + " "
+            + n.get("content", "")
+            + " "
+            + " ".join(n.get("tags", []))
+        ).lower()
     ]
 
 

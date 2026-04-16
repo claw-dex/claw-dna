@@ -39,9 +39,7 @@ def _timed_flock(lock_f, timeout: float = _FLOCK_TIMEOUT):
         except BlockingIOError:
             remaining = deadline - _time.monotonic()
             if remaining <= 0:
-                raise TimeoutError(
-                    f"Could not acquire file lock within {timeout}s"
-                )
+                raise TimeoutError(f"Could not acquire file lock within {timeout}s")
             _time.sleep(min(delay, remaining))
             delay = min(delay * 1.5, 1.0)  # back off up to 1 s
 
@@ -157,9 +155,7 @@ def write_to_inbox(
 
                 if dedup:
                     existing_keys = {
-                        _inbox_dedup_key(e)
-                        for e in existing
-                        if isinstance(e, dict)
+                        _inbox_dedup_key(e) for e in existing if isinstance(e, dict)
                     }
                     new_items = []
                     for item in items:
@@ -285,9 +281,7 @@ def locked_outbox_rw(fn, *, outbox_file: Path | None = None) -> bool:
                             parsed = json.loads(raw)
                             existing = parsed if isinstance(parsed, list) else []
                         except json.JSONDecodeError:
-                            log.warning(
-                                f"{target.name} invalid JSON, starting fresh"
-                            )
+                            log.warning(f"{target.name} invalid JSON, starting fresh")
                 new_data = fn(existing)
                 if new_data is None:
                     log.warning(
@@ -326,9 +320,7 @@ def locked_json_rw(fn, *, json_file: Path, default=None) -> bool:
                         try:
                             existing = json.loads(raw)
                         except json.JSONDecodeError:
-                            log.warning(
-                                f"{json_file.name} invalid JSON, using default"
-                            )
+                            log.warning(f"{json_file.name} invalid JSON, using default")
                 new_data = fn(existing)
                 if new_data is None:
                     log.warning(
@@ -377,7 +369,9 @@ def surface_error(
             "tab": service_name,
             "source_type": "service",
             "error": str(error),
-            "error_type": type(error).__name__ if isinstance(error, BaseException) else "str",
+            "error_type": (
+                type(error).__name__ if isinstance(error, BaseException) else "str"
+            ),
         }
         if context:
             entry["context"] = context
@@ -390,7 +384,9 @@ def surface_error(
 
         locked_json_rw(_append_and_trim, json_file=SERVER_ERRORS_FILE, default=[])
     except Exception as exc:  # noqa: BLE001
-        log.warning(f"surface_error: failed to write service error for {service_name!r}: {exc}")
+        log.warning(
+            f"surface_error: failed to write service error for {service_name!r}: {exc}"
+        )
 
 
 def append_to_history(items: list, history_file: Path, *, max_entries: int = 500):

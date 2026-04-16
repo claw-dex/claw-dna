@@ -44,17 +44,17 @@ from shared import atomic_write_json, write_to_inbox, append_to_history
 
 # --- Paths ---
 BASE = Path("/agent")
-STATE_FILE         = BASE / "memory" / "telegram_state.json"
-INBOX_FILE         = BASE / "messages" / "inbox.json"
-OUTBOX_FILE        = BASE / "messages" / "outbox.json"
-INBOX_HISTORY_FILE  = BASE / "memory" / "telegram_inbox_history.json"
+STATE_FILE = BASE / "memory" / "telegram_state.json"
+INBOX_FILE = BASE / "messages" / "inbox.json"
+OUTBOX_FILE = BASE / "messages" / "outbox.json"
+INBOX_HISTORY_FILE = BASE / "memory" / "telegram_inbox_history.json"
 OUTBOX_HISTORY_FILE = BASE / "memory" / "outbox_history.json"
-CHAT_HISTORY_FILE   = BASE / "memory" / "telegram_chat_history.json"
-LOG_DIR             = BASE / "memory" / "logs"
-LOG_FILE            = LOG_DIR / "telegram_bridge.log"
-HEARTBEAT_DIR       = BASE / "memory" / "heartbeats"
-HEARTBEAT_FILE      = HEARTBEAT_DIR / "telegram_bridge.heartbeat"
-LOCK_FILE           = BASE / "memory" / "telegram_bridge.lock"
+CHAT_HISTORY_FILE = BASE / "memory" / "telegram_chat_history.json"
+LOG_DIR = BASE / "memory" / "logs"
+LOG_FILE = LOG_DIR / "telegram_bridge.log"
+HEARTBEAT_DIR = BASE / "memory" / "heartbeats"
+HEARTBEAT_FILE = HEARTBEAT_DIR / "telegram_bridge.heartbeat"
+LOCK_FILE = BASE / "memory" / "telegram_bridge.lock"
 
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 HEARTBEAT_DIR.mkdir(parents=True, exist_ok=True)
@@ -87,8 +87,8 @@ KEEPASS_TELEGRAM_BOT_TOKEN = "TELEGRAM_BOT_TOKEN"
 KEEPASS_TELEGRAM_CHAT_ID = "TELEGRAM_CHAT_ID"
 KEEPASS_TELEGRAM_OWNER_USERNAME = "TELEGRAM_OWNER_USERNAME"
 TELEGRAM_API = "https://api.telegram.org/bot{token}/{method}"
-POLL_TIMEOUT  = 25   # Telegram long-poll timeout (seconds)
-SEND_TIMEOUT  = 10   # HTTP timeout for non-polling API calls (sendMessage etc.)
+POLL_TIMEOUT = 25  # Telegram long-poll timeout (seconds)
+SEND_TIMEOUT = 10  # HTTP timeout for non-polling API calls (sendMessage etc.)
 OUTBOX_INTERVAL = 60  # How often to check outbox (seconds)
 STATE_JSON = BASE / "memory" / "state.json"
 MEDIA_DIR = BASE / "workspace" / "telegram"
@@ -158,19 +158,26 @@ def build_ack_message() -> str:
 # KeePass helpers
 # ---------------------------------------------------------------------------
 
+
 def keepass_get(title: str) -> str | None:
     try:
         from scripts.keepass import get_credential
+
         return get_credential(title)
     except Exception as e:
         log.warning(f"KeePass get({title!r}) failed: {e}")
     return None
 
 
-def keepass_store(title: str, username: str, value: str, group: str = "API Keys") -> bool:
+def keepass_store(
+    title: str, username: str, value: str, group: str = "API Keys"
+) -> bool:
     try:
         from scripts.keepass import store_credential
-        return store_credential(title=title, username=username, password=value, group=group)
+
+        return store_credential(
+            title=title, username=username, password=value, group=group
+        )
     except Exception as e:
         log.warning(f"KeePass store({title!r}) failed: {e}")
     return False
@@ -179,6 +186,7 @@ def keepass_store(title: str, username: str, value: str, group: str = "API Keys"
 # ---------------------------------------------------------------------------
 # Chat ID helpers
 # ---------------------------------------------------------------------------
+
 
 def parse_chat_ids(csv_string: str | None) -> list[str]:
     """Parse a comma-separated string of chat IDs into a list."""
@@ -194,7 +202,7 @@ def serialize_chat_ids(chat_ids: list[str]) -> str:
 
 def contains_username(text: str, username: str) -> bool:
     """Check if text contains the username (or @username) as a whole word, case-insensitive."""
-    pattern = r'(?<!\w)@?' + re.escape(username) + r'\b'
+    pattern = r"(?<!\w)@?" + re.escape(username) + r"\b"
     return bool(re.search(pattern, text, re.IGNORECASE))
 
 
@@ -202,27 +210,36 @@ def contains_username(text: str, username: str) -> bool:
 # State management
 # ---------------------------------------------------------------------------
 
+
 def _validate_state(data) -> dict:
     """Ensure state has the expected structure, repairing wrong types."""
     default = {"last_update_id": 0, "sent_hashes": []}
     if not isinstance(data, dict):
-        log.warning(f"Telegram state has unexpected type {type(data).__name__}, resetting")
+        log.warning(
+            f"Telegram state has unexpected type {type(data).__name__}, resetting"
+        )
         return dict(default)
     # Validate last_update_id — must be int
     uid = data.get("last_update_id")
     if not isinstance(uid, int):
-        log.warning(f"Telegram state last_update_id has wrong type {type(uid).__name__}, resetting to 0")
+        log.warning(
+            f"Telegram state last_update_id has wrong type {type(uid).__name__}, resetting to 0"
+        )
         data["last_update_id"] = 0
     # Validate sent_hashes — must be list of strings
     hashes = data.get("sent_hashes")
     if not isinstance(hashes, list):
-        log.warning(f"Telegram state sent_hashes has wrong type {type(hashes).__name__}, resetting to []")
+        log.warning(
+            f"Telegram state sent_hashes has wrong type {type(hashes).__name__}, resetting to []"
+        )
         data["sent_hashes"] = []
     else:
         # Filter out any non-string entries
         cleaned = [h for h in hashes if isinstance(h, str)]
         if len(cleaned) != len(hashes):
-            log.warning(f"Removed {len(hashes) - len(cleaned)} non-string entries from sent_hashes")
+            log.warning(
+                f"Removed {len(hashes) - len(cleaned)} non-string entries from sent_hashes"
+            )
             data["sent_hashes"] = cleaned
     return data
 
@@ -257,13 +274,13 @@ def protect_urls_in_markdown(text: str) -> str:
     """
     # Match URLs: http(s)://... until whitespace or end of string
     # Lookahead/lookbehind ensure we don't wrap already-wrapped URLs
-    url_pattern = r'(?<!`)(?<!`)\b(https?://[^\s`]+)(?!`)(?!`)'
+    url_pattern = r"(?<!`)(?<!`)\b(https?://[^\s`]+)(?!`)(?!`)"
 
     def wrap_url(match):
         url = match.group(1)
-        if url.endswith('`'):
+        if url.endswith("`"):
             return url
-        return f'`{url}`'
+        return f"`{url}`"
 
     return re.sub(url_pattern, wrap_url, text)
 
@@ -275,7 +292,7 @@ def _strip_markdown_preserve_code(text: str) -> str:
     bold (*) and italic (_) markers but keeps backtick-wrapped URLs intact.
     """
     # Extract backtick-wrapped content (URLs, code blocks)
-    backtick_pattern = r'`([^`]+)`'
+    backtick_pattern = r"`([^`]+)`"
     placeholders = {}
     counter = 0
 
@@ -304,6 +321,7 @@ def _strip_markdown_preserve_code(text: str) -> str:
 # Chat history (in-memory + disk-synced)
 # ---------------------------------------------------------------------------
 
+
 def load_chat_history() -> dict:
     """Load per-chat conversation history from disk."""
     if CHAT_HISTORY_FILE.exists():
@@ -326,11 +344,13 @@ def append_chat_message(history: dict, chat_id: str, role: str, text: str):
     """Append a message to a chat's history, keeping last 50 per chat."""
     if chat_id not in history:
         history[chat_id] = []
-    history[chat_id].append({
-        "role": role,
-        "text": text,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    })
+    history[chat_id].append(
+        {
+            "role": role,
+            "text": text,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    )
     history[chat_id] = history[chat_id][-50:]
 
 
@@ -394,6 +414,7 @@ def build_chat_context(history: dict, chat_id: str) -> str:
 # Telegram API
 # ---------------------------------------------------------------------------
 
+
 def tg(token: str, method: str, _http_timeout: float | None = None, **params):
     """Call the Telegram Bot API. Returns result on success, None on failure.
 
@@ -403,8 +424,10 @@ def tg(token: str, method: str, _http_timeout: float | None = None, **params):
     Pass an explicit value to override (e.g. file downloads need more time).
     """
     is_long_poll = method == "getUpdates"
-    http_timeout = _http_timeout if _http_timeout is not None else (
-        POLL_TIMEOUT + 5 if is_long_poll else SEND_TIMEOUT
+    http_timeout = (
+        _http_timeout
+        if _http_timeout is not None
+        else (POLL_TIMEOUT + 5 if is_long_poll else SEND_TIMEOUT)
     )
     url = TELEGRAM_API.format(token=token, method=method)
     try:
@@ -412,14 +435,18 @@ def tg(token: str, method: str, _http_timeout: float | None = None, **params):
         try:
             data = resp.json()
         except (ValueError, requests.exceptions.JSONDecodeError):
-            log.warning(f"Telegram API non-JSON response ({method}, HTTP {resp.status_code}): {resp.text[:200]}")
+            log.warning(
+                f"Telegram API non-JSON response ({method}, HTTP {resp.status_code}): {resp.text[:200]}"
+            )
             return None
         if data.get("ok"):
             return data.get("result")
         log.warning(f"Telegram API error ({method}): {data.get('description')}")
     except requests.exceptions.Timeout:
         if not is_long_poll:
-            log.warning(f"Telegram request timed out ({method}, timeout={http_timeout}s)")
+            log.warning(
+                f"Telegram request timed out ({method}, timeout={http_timeout}s)"
+            )
         # else: normal for long-poll — no log noise
     except Exception as e:
         log.error(f"Telegram request failed ({method}): {e}")
@@ -429,6 +456,7 @@ def tg(token: str, method: str, _http_timeout: float | None = None, **params):
 # ---------------------------------------------------------------------------
 # Media download helpers
 # ---------------------------------------------------------------------------
+
 
 def extract_media(msg: dict) -> list[tuple[str, str, str]]:
     """Extract downloadable media from a Telegram message.
@@ -464,7 +492,9 @@ def extract_media(msg: dict) -> list[tuple[str, str, str]]:
     return media
 
 
-def download_telegram_file(token: str, file_id: str, chat_id: str, filename_hint: str) -> str | None:
+def download_telegram_file(
+    token: str, file_id: str, chat_id: str, filename_hint: str
+) -> str | None:
     """Download a file from Telegram and save to /agent/workspace/telegram/{chat_id}/.
 
     Returns the local file path on success, None on failure.
@@ -493,7 +523,9 @@ def download_telegram_file(token: str, file_id: str, chat_id: str, filename_hint
             # Check Content-Length header if available for early rejection
             content_length = resp.headers.get("Content-Length")
             if content_length and int(content_length) > max_size:
-                log.warning(f"File {remote_path} too large ({content_length} bytes), skipping")
+                log.warning(
+                    f"File {remote_path} too large ({content_length} bytes), skipping"
+                )
                 return None
             size = 0
             exceeded = False
@@ -501,7 +533,9 @@ def download_telegram_file(token: str, file_id: str, chat_id: str, filename_hint
                 for chunk in resp.iter_content(chunk_size=8192):
                     size += len(chunk)
                     if size > max_size:
-                        log.warning(f"File {remote_path} exceeded {max_size} byte limit at {size} bytes, aborting")
+                        log.warning(
+                            f"File {remote_path} exceeded {max_size} byte limit at {size} bytes, aborting"
+                        )
                         exceeded = True
                         break
                     f.write(chunk)
@@ -524,7 +558,14 @@ def download_telegram_file(token: str, file_id: str, chat_id: str, filename_hint
 # Command handlers
 # ---------------------------------------------------------------------------
 
-def handle_heartbeat_command(token: str, from_chat: str, from_user: str, chat_history: dict, extra_args: list[str] = None) -> bool:
+
+def handle_heartbeat_command(
+    token: str,
+    from_chat: str,
+    from_user: str,
+    chat_history: dict,
+    extra_args: list[str] = None,
+) -> bool:
     """Handle the /heartbeat command by triggering an immediate heartbeat.
 
     Args:
@@ -550,7 +591,7 @@ def handle_heartbeat_command(token: str, from_chat: str, from_user: str, chat_hi
             capture_output=True,
             text=True,
             timeout=300,  # 5 minute timeout
-            cwd="/agent"
+            cwd="/agent",
         )
 
         if result.returncode == 0:
@@ -558,14 +599,18 @@ def handle_heartbeat_command(token: str, from_chat: str, from_user: str, chat_hi
             log.info(f"Heartbeat completed successfully for @{from_user}")
         else:
             response = f"⚠️ Heartbeat triggered but returned non-zero exit code: {result.returncode}\n\nCheck logs for details."
-            log.warning(f"Heartbeat failed with code {result.returncode}: {result.stderr}")
+            log.warning(
+                f"Heartbeat failed with code {result.returncode}: {result.stderr}"
+            )
 
         tg(token, "sendMessage", chat_id=from_chat, text=response)
         append_chat_message(chat_history, from_chat, "bot", response)
         return True
 
     except subprocess.TimeoutExpired:
-        response = "⏱️ Heartbeat timed out after 5 minutes. The cycle may still be running."
+        response = (
+            "⏱️ Heartbeat timed out after 5 minutes. The cycle may still be running."
+        )
         log.error(f"Heartbeat timeout for @{from_user}")
         tg(token, "sendMessage", chat_id=from_chat, text=response)
         append_chat_message(chat_history, from_chat, "bot", response)
@@ -583,7 +628,10 @@ def handle_heartbeat_command(token: str, from_chat: str, from_user: str, chat_hi
 # Quick-reply commands (no heartbeat needed)
 # ---------------------------------------------------------------------------
 
-def handle_status_command(token: str, from_chat: str, from_user: str, chat_history: dict) -> None:
+
+def handle_status_command(
+    token: str, from_chat: str, from_user: str, chat_history: dict
+) -> None:
     """Handle /status — return live agent status from memory files instantly."""
     try:
         state_path = BASE / "memory" / "state.json"
@@ -602,7 +650,9 @@ def handle_status_command(token: str, from_chat: str, from_user: str, chat_histo
 
         # Count goals by status
         if isinstance(goals, list):
-            active = sum(1 for g in goals if g.get("status") in ("pending", "in_progress"))
+            active = sum(
+                1 for g in goals if g.get("status") in ("pending", "in_progress")
+            )
             completed = sum(1 for g in goals if g.get("status") == "completed")
             failed = sum(1 for g in goals if g.get("status") == "failed")
         else:
@@ -611,7 +661,9 @@ def handle_status_command(token: str, from_chat: str, from_user: str, chat_histo
         # Count cycles
         total_cycles = len(cycles) if isinstance(cycles, list) else 0
 
-        status_emoji = {"running": "⚙️", "idle": "✅", "waiting_for_human": "⏳"}.get(status, "❓")
+        status_emoji = {"running": "⚙️", "idle": "✅", "waiting_for_human": "⏳"}.get(
+            status, "❓"
+        )
 
         lines = [
             f"{status_emoji} *Agent Status*",
@@ -624,7 +676,13 @@ def handle_status_command(token: str, from_chat: str, from_user: str, chat_histo
             lines.append(f"\n_Last: {summary[:200]}_")
 
         response = "\n".join(lines)
-        tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="Markdown")
+        tg(
+            token,
+            "sendMessage",
+            chat_id=from_chat,
+            text=response,
+            parse_mode="Markdown",
+        )
         append_chat_message(chat_history, from_chat, "bot", response)
         log.info(f"/status command served to @{from_user}")
     except Exception as e:
@@ -633,7 +691,9 @@ def handle_status_command(token: str, from_chat: str, from_user: str, chat_histo
         log.error(f"/status error for @{from_user}: {e}", exc_info=True)
 
 
-def handle_goals_command(token: str, from_chat: str, from_user: str, chat_history: dict, limit: int = 5) -> None:
+def handle_goals_command(
+    token: str, from_chat: str, from_user: str, chat_history: dict, limit: int = 5
+) -> None:
     """Handle /goals [N] — show the N most recent goals and their status."""
     try:
         goals_path = BASE / "memory" / "goal.json"
@@ -669,7 +729,13 @@ def handle_goals_command(token: str, from_chat: str, from_user: str, chat_histor
             lines.append(f"{emoji} `{st}` — {goal_text}")
 
         response = "\n".join(lines)
-        tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="Markdown")
+        tg(
+            token,
+            "sendMessage",
+            chat_id=from_chat,
+            text=response,
+            parse_mode="Markdown",
+        )
         append_chat_message(chat_history, from_chat, "bot", response)
         log.info(f"/goals command served to @{from_user} (limit={limit})")
     except Exception as e:
@@ -678,7 +744,9 @@ def handle_goals_command(token: str, from_chat: str, from_user: str, chat_histor
         log.error(f"/goals error for @{from_user}: {e}", exc_info=True)
 
 
-def handle_journal_command(token: str, from_chat: str, from_user: str, chat_history: dict, limit: int = 3) -> None:
+def handle_journal_command(
+    token: str, from_chat: str, from_user: str, chat_history: dict, limit: int = 3
+) -> None:
     """Handle /journal [N] — show the N most recent journal entries with summaries."""
     try:
         journal_path = BASE / "memory" / "journal.json"
@@ -691,7 +759,9 @@ def handle_journal_command(token: str, from_chat: str, from_user: str, chat_hist
             return
 
         # Sort by timestamp desc and take limit
-        sorted_entries = sorted(entries, key=lambda e: e.get("timestamp", ""), reverse=True)
+        sorted_entries = sorted(
+            entries, key=lambda e: e.get("timestamp", ""), reverse=True
+        )
         recent = sorted_entries[:limit]
 
         type_emoji = {
@@ -701,7 +771,9 @@ def handle_journal_command(token: str, from_chat: str, from_user: str, chat_hist
             "self_heal": "🔧",
         }
 
-        lines = [f"📓 *Last {len(recent)} journal entr{'y' if len(recent) == 1 else 'ies'}*"]
+        lines = [
+            f"📓 *Last {len(recent)} journal entr{'y' if len(recent) == 1 else 'ies'}*"
+        ]
         for e in recent:
             cycle_num = e.get("cycle", "?")
             etype = e.get("type", "unknown")
@@ -712,10 +784,18 @@ def handle_journal_command(token: str, from_chat: str, from_user: str, chat_hist
             if len(summary) > 120:
                 summary = summary[:117] + "..."
             ts = (e.get("timestamp", "") or "")[:10]
-            lines.append(f"{emoji} *#{cycle_num}*{cat_label} — {summary or '(no summary)'} _{ts}_")
+            lines.append(
+                f"{emoji} *#{cycle_num}*{cat_label} — {summary or '(no summary)'} _{ts}_"
+            )
 
         response = "\n".join(lines)
-        tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="Markdown")
+        tg(
+            token,
+            "sendMessage",
+            chat_id=from_chat,
+            text=response,
+            parse_mode="Markdown",
+        )
         append_chat_message(chat_history, from_chat, "bot", response)
         log.info(f"/journal command served to @{from_user} (limit={limit})")
     except Exception as e:
@@ -724,10 +804,13 @@ def handle_journal_command(token: str, from_chat: str, from_user: str, chat_hist
         log.error(f"/journal error for @{from_user}: {e}", exc_info=True)
 
 
-def handle_today_command(token: str, from_chat: str, from_user: str, chat_history: dict) -> None:
+def handle_today_command(
+    token: str, from_chat: str, from_user: str, chat_history: dict
+) -> None:
     """Handle /today — show today's activity summary: completed goals, cycle count."""
     try:
         from datetime import datetime, timezone, timedelta
+
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(hours=24)
         cutoff_str = cutoff.isoformat()
@@ -742,7 +825,8 @@ def handle_today_command(token: str, from_chat: str, from_user: str, chat_histor
                 all_goals.extend(bucket)
 
         completed_today = [
-            g for g in all_goals
+            g
+            for g in all_goals
             if g.get("status") == "completed"
             and (g.get("updated_at") or "") >= cutoff_str
         ]
@@ -751,14 +835,17 @@ def handle_today_command(token: str, from_chat: str, from_user: str, chat_histor
         cycles_path = BASE / "memory" / "cycles.json"
         cycles = json.loads(cycles_path.read_text()) if cycles_path.exists() else []
         cycles_today = [
-            c for c in cycles
+            c
+            for c in cycles
             if c.get("status") == "completed"
             and (c.get("end_time") or c.get("start_time") or "") >= cutoff_str
         ]
         evolve_today = [c for c in cycles_today if c.get("type") == "evolve"]
         goal_today = [c for c in cycles_today if c.get("type") == "goal"]
 
-        lines = [f"📅 *Today's Summary* _(last 24h as of {now.strftime('%H:%M')} UTC)_\n"]
+        lines = [
+            f"📅 *Today's Summary* _(last 24h as of {now.strftime('%H:%M')} UTC)_\n"
+        ]
 
         # Goals completed today
         if completed_today:
@@ -779,22 +866,38 @@ def handle_today_command(token: str, from_chat: str, from_user: str, chat_histor
         outbox_path = BASE / "messages" / "outbox.json"
         if outbox_path.exists():
             outbox_data = json.loads(outbox_path.read_text())
-            msgs = outbox_data if isinstance(outbox_data, list) else outbox_data.get("messages", [])
+            msgs = (
+                outbox_data
+                if isinstance(outbox_data, list)
+                else outbox_data.get("messages", [])
+            )
             blocked = [m for m in msgs if m.get("type") == "needs_human"]
             if blocked:
-                lines.append(f"\n⚠️ *Blocked* — {len(blocked)} item(s) need human attention (`/outbox` for details)")
+                lines.append(
+                    f"\n⚠️ *Blocked* — {len(blocked)} item(s) need human attention (`/outbox` for details)"
+                )
 
         response = "\n".join(lines)
-        tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="Markdown")
+        tg(
+            token,
+            "sendMessage",
+            chat_id=from_chat,
+            text=response,
+            parse_mode="Markdown",
+        )
         append_chat_message(chat_history, from_chat, "bot", response)
-        log.info(f"/today command served to @{from_user} ({len(completed_today)} goals, {len(cycles_today)} cycles)")
+        log.info(
+            f"/today command served to @{from_user} ({len(completed_today)} goals, {len(cycles_today)} cycles)"
+        )
     except Exception as e:
         err = f"❌ Failed to generate today summary: {e}"
         tg(token, "sendMessage", chat_id=from_chat, text=err)
         log.error(f"/today error for @{from_user}: {e}", exc_info=True)
 
 
-def handle_outbox_command(token: str, from_chat: str, from_user: str, chat_history: dict, limit: int = 5) -> None:
+def handle_outbox_command(
+    token: str, from_chat: str, from_user: str, chat_history: dict, limit: int = 5
+) -> None:
     """Handle /outbox [N] — show the N most recent outbox messages, highlighting needs_human items."""
     try:
         outbox_path = BASE / "messages" / "outbox.json"
@@ -807,7 +910,9 @@ def handle_outbox_command(token: str, from_chat: str, from_user: str, chat_histo
             return
 
         # Sort by timestamp desc and take limit
-        sorted_msgs = sorted(messages, key=lambda m: m.get("timestamp", ""), reverse=True)
+        sorted_msgs = sorted(
+            messages, key=lambda m: m.get("timestamp", ""), reverse=True
+        )
         recent = sorted_msgs[:limit]
 
         # Count needs_human
@@ -839,16 +944,26 @@ def handle_outbox_command(token: str, from_chat: str, from_user: str, chat_histo
             lines.append(f"{emoji} `{mtype}` — {display} _{ts}_")
 
         response = "\n".join(lines)
-        tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="Markdown")
+        tg(
+            token,
+            "sendMessage",
+            chat_id=from_chat,
+            text=response,
+            parse_mode="Markdown",
+        )
         append_chat_message(chat_history, from_chat, "bot", response)
-        log.info(f"/outbox command served to @{from_user} (limit={limit}, needs_human={needs_human_count})")
+        log.info(
+            f"/outbox command served to @{from_user} (limit={limit}, needs_human={needs_human_count})"
+        )
     except Exception as e:
         err = f"❌ Failed to read outbox: {e}"
         tg(token, "sendMessage", chat_id=from_chat, text=err)
         log.error(f"/outbox error for @{from_user}: {e}", exc_info=True)
 
 
-def handle_cycles_command(token: str, from_chat: str, from_user: str, chat_history: dict, limit: int = 5) -> None:
+def handle_cycles_command(
+    token: str, from_chat: str, from_user: str, chat_history: dict, limit: int = 5
+) -> None:
     """Handle /cycles [N] — show the N most recent completed cycles with type, category, duration, and summary."""
     try:
         cycles_path = BASE / "memory" / "cycles.json"
@@ -888,7 +1003,13 @@ def handle_cycles_command(token: str, from_chat: str, from_user: str, chat_histo
                 lines.append(f"   _{summary}_")
 
         response = "\n".join(lines)
-        tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="Markdown")
+        tg(
+            token,
+            "sendMessage",
+            chat_id=from_chat,
+            text=response,
+            parse_mode="Markdown",
+        )
         append_chat_message(chat_history, from_chat, "bot", response)
         log.info(f"/cycles command served to @{from_user} (limit={limit})")
     except Exception as e:
@@ -897,12 +1018,17 @@ def handle_cycles_command(token: str, from_chat: str, from_user: str, chat_histo
         log.error(f"/cycles error for @{from_user}: {e}", exc_info=True)
 
 
-def handle_services_command(token: str, from_chat: str, from_user: str, chat_history: dict) -> None:
+def handle_services_command(
+    token: str, from_chat: str, from_user: str, chat_history: dict
+) -> None:
     """Handle /services — show background service status from services.json."""
     try:
         import os
+
         services_path = BASE / "memory" / "services.json"
-        services = json.loads(services_path.read_text()) if services_path.exists() else {}
+        services = (
+            json.loads(services_path.read_text()) if services_path.exists() else {}
+        )
 
         if not services:
             response = "⚙️ *Services*\n\nNo services registered."
@@ -940,7 +1066,13 @@ def handle_services_command(token: str, from_chat: str, from_user: str, chat_his
 
             response = "\n".join(lines)
 
-        tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="Markdown")
+        tg(
+            token,
+            "sendMessage",
+            chat_id=from_chat,
+            text=response,
+            parse_mode="Markdown",
+        )
         append_chat_message(chat_history, from_chat, "bot", response)
         log.info(f"/services command served to @{from_user}")
     except Exception as e:
@@ -949,7 +1081,9 @@ def handle_services_command(token: str, from_chat: str, from_user: str, chat_his
         log.error(f"/services error for @{from_user}: {e}", exc_info=True)
 
 
-def handle_remind_command(token: str, from_chat: str, from_user: str, chat_history: dict, args: list[str]) -> None:
+def handle_remind_command(
+    token: str, from_chat: str, from_user: str, chat_history: dict, args: list[str]
+) -> None:
     """Handle /remind <duration> <text> — create a one-time reminder.
 
     Duration formats: 30m, 2h, 1d (minutes, hours, days).
@@ -987,10 +1121,13 @@ def handle_remind_command(token: str, from_chat: str, from_user: str, chat_histo
         return
 
     # Compute fire-at time
-    fire_at = (datetime.now(timezone.utc) + timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M")
+    fire_at = (datetime.now(timezone.utc) + timedelta(minutes=minutes)).strftime(
+        "%Y-%m-%dT%H:%M"
+    )
 
     # Create reminder via direct import
     from scripts.reminder import add_reminder
+
     rid = add_reminder(reminder_text, at=fire_at)
 
     if rid:
@@ -1011,16 +1148,15 @@ def handle_remind_command(token: str, from_chat: str, from_user: str, chat_histo
     append_chat_message(chat_history, from_chat, "bot", response)
 
 
-def handle_note_command(token: str, from_chat: str, from_user: str, chat_history: dict, args: list[str]) -> None:
+def handle_note_command(
+    token: str, from_chat: str, from_user: str, chat_history: dict, args: list[str]
+) -> None:
     """Handle /note <text> — save a quick note via Telegram.
 
     Example: /note check the deploy logs tomorrow
     """
     if not args:
-        usage = (
-            "Usage: `/note <text>`\n"
-            "Example: `/note review PR 125 tomorrow`"
-        )
+        usage = "Usage: `/note <text>`\n" "Example: `/note review PR 125 tomorrow`"
         tg(token, "sendMessage", chat_id=from_chat, text=usage, parse_mode="Markdown")
         append_chat_message(chat_history, from_chat, "bot", usage)
         return
@@ -1030,6 +1166,7 @@ def handle_note_command(token: str, from_chat: str, from_user: str, chat_history
     title = content[:60].rstrip() + ("..." if len(content) > 60 else "")
 
     from scripts.notes import add_note
+
     note_id = add_note(title, content, tags=["telegram"])
 
     if note_id:
@@ -1043,7 +1180,9 @@ def handle_note_command(token: str, from_chat: str, from_user: str, chat_history
     append_chat_message(chat_history, from_chat, "bot", response)
 
 
-def handle_notes_command(token: str, from_chat: str, from_user: str, chat_history: dict, args: list[str]) -> None:
+def handle_notes_command(
+    token: str, from_chat: str, from_user: str, chat_history: dict, args: list[str]
+) -> None:
     """Handle /notes [query] — list recent notes or search by keyword.
 
     Examples:
@@ -1061,8 +1200,16 @@ def handle_notes_command(token: str, from_chat: str, from_user: str, chat_histor
         header = "Recent notes:"
 
     if not notes:
-        response = "No notes found." if not args else f"No notes matching _{' '.join(args)}_."
-        tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="Markdown")
+        response = (
+            "No notes found." if not args else f"No notes matching _{' '.join(args)}_."
+        )
+        tg(
+            token,
+            "sendMessage",
+            chat_id=from_chat,
+            text=response,
+            parse_mode="Markdown",
+        )
         append_chat_message(chat_history, from_chat, "bot", response)
         return
 
@@ -1088,10 +1235,14 @@ def handle_notes_command(token: str, from_chat: str, from_user: str, chat_histor
     response = "\n".join(lines)
     tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="Markdown")
     append_chat_message(chat_history, from_chat, "bot", response)
-    log.info(f"/notes command served to @{from_user} (query={' '.join(args) if args else None}, count={len(shown)})")
+    log.info(
+        f"/notes command served to @{from_user} (query={' '.join(args) if args else None}, count={len(shown)})"
+    )
 
 
-def handle_help_command(token: str, from_chat: str, from_user: str, chat_history: dict) -> None:
+def handle_help_command(
+    token: str, from_chat: str, from_user: str, chat_history: dict
+) -> None:
     """Handle /help — list available bot commands."""
     response = (
         "🤖 *Agent — Available Commands*\n\n"
@@ -1118,9 +1269,15 @@ def handle_help_command(token: str, from_chat: str, from_user: str, chat_history
 # Incoming messages (Telegram → inbox.json)
 # ---------------------------------------------------------------------------
 
+
 def _process_authorized_message(
-    token: str, msg: dict, text: str, from_user: str, from_chat: str,
-    chat_history: dict, inbox_items: list,
+    token: str,
+    msg: dict,
+    text: str,
+    from_user: str,
+    from_chat: str,
+    chat_history: dict,
+    inbox_items: list,
 ):
     """Process an authorized incoming message (text and/or media) into an inbox item."""
     # Check for commands first
@@ -1135,10 +1292,10 @@ def _process_authorized_message(
             extra_args = [a for a in raw_args if a in ALLOWED_HEARTBEAT_ARGS]
             rejected = [a for a in raw_args if a not in ALLOWED_HEARTBEAT_ARGS]
             if rejected:
-                log.warning(
-                    f"Rejected heartbeat args from @{from_user}: {rejected}"
-                )
-            handle_heartbeat_command(token, from_chat, from_user, chat_history, extra_args)
+                log.warning(f"Rejected heartbeat args from @{from_user}: {rejected}")
+            handle_heartbeat_command(
+                token, from_chat, from_user, chat_history, extra_args
+            )
             return  # Don't process as regular message
 
         if command == "/status":
@@ -1212,20 +1369,24 @@ def _process_authorized_message(
     for file_id, media_type, filename_hint in media_list:
         local_path = download_telegram_file(token, file_id, from_chat, filename_hint)
         if local_path:
-            attachments.append({
-                "type": media_type,
-                "path": local_path,
-                "filename": Path(local_path).name,
-            })
+            attachments.append(
+                {
+                    "type": media_type,
+                    "path": local_path,
+                    "filename": Path(local_path).name,
+                }
+            )
 
     # Build content string
     context = build_chat_context(chat_history, from_chat)
-    base_content = f"[Telegram @{from_user}]: {effective_text}" if effective_text else f"[Telegram @{from_user}]:"
+    base_content = (
+        f"[Telegram @{from_user}]: {effective_text}"
+        if effective_text
+        else f"[Telegram @{from_user}]:"
+    )
 
     if attachments:
-        attachment_lines = "\n".join(
-            f"- {a['type']}: {a['path']}" for a in attachments
-        )
+        attachment_lines = "\n".join(f"- {a['type']}: {a['path']}" for a in attachments)
         base_content += f"\n[Attachments]\n{attachment_lines}"
 
     if context:
@@ -1247,7 +1408,10 @@ def _process_authorized_message(
         inbox_item["attachments"] = attachments
 
     inbox_items.append(inbox_item)
-    log.info(f"Received from @{from_user}: {chat_text[:100]}" + (f" (+{len(attachments)} attachment(s))" if attachments else ""))
+    log.info(
+        f"Received from @{from_user}: {chat_text[:100]}"
+        + (f" (+{len(attachments)} attachment(s))" if attachments else "")
+    )
 
     ack = build_ack_message()
     tg(token, "sendMessage", chat_id=from_chat, text=ack)
@@ -1255,13 +1419,20 @@ def _process_authorized_message(
     log.info(f"Sent ack reply to {from_chat}")
 
 
-def poll_updates(token: str, state: dict, owner_username: str | None, chat_ids: list[str], chat_history: dict) -> tuple[str | None, list[str], list]:  # noqa: E501
+def poll_updates(
+    token: str,
+    state: dict,
+    owner_username: str | None,
+    chat_ids: list[str],
+    chat_history: dict,
+) -> tuple[str | None, list[str], list]:  # noqa: E501
     """
     Long-poll Telegram for new updates.
     Returns (updated_owner_username, updated_chat_ids, list_of_inbox_items).
     """
     updates = tg(
-        token, "getUpdates",
+        token,
+        "getUpdates",
         offset=state["last_update_id"] + 1,
         timeout=POLL_TIMEOUT,
         limit=100,
@@ -1273,7 +1444,9 @@ def poll_updates(token: str, state: dict, owner_username: str | None, chat_ids: 
     for update in updates:
         uid = update.get("update_id")
         if uid is None:
-            log.warning(f"Skipping malformed update (no update_id): {str(update)[:200]}")
+            log.warning(
+                f"Skipping malformed update (no update_id): {str(update)[:200]}"
+            )
             continue
         state["last_update_id"] = max(state["last_update_id"], uid)
 
@@ -1284,10 +1457,7 @@ def poll_updates(token: str, state: dict, owner_username: str | None, chat_ids: 
 
             from_chat = str(msg.get("chat", {}).get("id", ""))
             from_info = msg.get("from", {})
-            from_user = (
-                from_info.get("username")
-                or from_info.get("first_name", "user")
-            )
+            from_user = from_info.get("username") or from_info.get("first_name", "user")
             text = msg.get("text", "").strip()
             caption = msg.get("caption", "").strip()
             check_text = text or caption  # for auth checks on media-with-caption
@@ -1299,31 +1469,70 @@ def poll_updates(token: str, state: dict, owner_username: str | None, chat_ids: 
                 log.info(f"Auto-discovered owner: @{from_user} (chat_id: {from_chat})")
                 owner_username = from_user
                 chat_ids.append(from_chat)
-                keepass_store(KEEPASS_TELEGRAM_OWNER_USERNAME, "telegram", from_user, group="System")
-                keepass_store(KEEPASS_TELEGRAM_CHAT_ID, "telegram", serialize_chat_ids(chat_ids), group="System")
+                keepass_store(
+                    KEEPASS_TELEGRAM_OWNER_USERNAME,
+                    "telegram",
+                    from_user,
+                    group="System",
+                )
+                keepass_store(
+                    KEEPASS_TELEGRAM_CHAT_ID,
+                    "telegram",
+                    serialize_chat_ids(chat_ids),
+                    group="System",
+                )
                 log.info("Owner username and chat ID saved to KeePass.")
-                _process_authorized_message(token, msg, text, from_user, from_chat, chat_history, inbox_items)
+                _process_authorized_message(
+                    token, msg, text, from_user, from_chat, chat_history, inbox_items
+                )
 
             elif from_chat in chat_ids:
                 # Known session — process normally
-                _process_authorized_message(token, msg, text, from_user, from_chat, chat_history, inbox_items)
+                _process_authorized_message(
+                    token, msg, text, from_user, from_chat, chat_history, inbox_items
+                )
 
-            elif from_chat and owner_username and check_text and contains_username(check_text, owner_username):
+            elif (
+                from_chat
+                and owner_username
+                and check_text
+                and contains_username(check_text, owner_username)
+            ):
                 # New session authorized — message contains owner's username
                 log.info(f"Authorized new session: @{from_user} (chat_id: {from_chat})")
                 chat_ids.append(from_chat)
-                keepass_store(KEEPASS_TELEGRAM_CHAT_ID, "telegram", serialize_chat_ids(chat_ids), group="System")
+                keepass_store(
+                    KEEPASS_TELEGRAM_CHAT_ID,
+                    "telegram",
+                    serialize_chat_ids(chat_ids),
+                    group="System",
+                )
 
-                tg(token, "sendMessage", chat_id=from_chat,
-                   text="Welcome! You've been authorized. I'll forward messages to you from now on.")
-                append_chat_message(chat_history, from_chat, "bot", "Welcome! You've been authorized. I'll forward messages to you from now on.")
-                _process_authorized_message(token, msg, text, from_user, from_chat, chat_history, inbox_items)
+                tg(
+                    token,
+                    "sendMessage",
+                    chat_id=from_chat,
+                    text="Welcome! You've been authorized. I'll forward messages to you from now on.",
+                )
+                append_chat_message(
+                    chat_history,
+                    from_chat,
+                    "bot",
+                    "Welcome! You've been authorized. I'll forward messages to you from now on.",
+                )
+                _process_authorized_message(
+                    token, msg, text, from_user, from_chat, chat_history, inbox_items
+                )
 
             else:
                 # Unauthorized new session — reject
                 log.info(f"Rejected message from @{from_user} (chat_id: {from_chat})")
-                tg(token, "sendMessage", chat_id=from_chat,
-                   text="Sorry, I don't know you. Please include my owner's username in your message to get access.")
+                tg(
+                    token,
+                    "sendMessage",
+                    chat_id=from_chat,
+                    text="Sorry, I don't know you. Please include my owner's username in your message to get access.",
+                )
 
         except Exception as e:
             log.error(f"Error processing update {uid}: {e}", exc_info=True)
@@ -1332,15 +1541,25 @@ def poll_updates(token: str, state: dict, owner_username: str | None, chat_ids: 
     return owner_username, chat_ids, inbox_items
 
 
-def poll_updates_and_persist(token: str, state: dict, owner_username: str | None, chat_ids: list[str], chat_history: dict):
+def poll_updates_and_persist(
+    token: str,
+    state: dict,
+    owner_username: str | None,
+    chat_ids: list[str],
+    chat_history: dict,
+):
     """Poll for updates, write to inbox AND persist to history."""
-    owner_username, chat_ids, items = poll_updates(token, state, owner_username, chat_ids, chat_history)
+    owner_username, chat_ids, items = poll_updates(
+        token, state, owner_username, chat_ids, chat_history
+    )
     if items:
         if write_to_inbox(items):
             append_to_inbox_history(items)
             save_chat_history(chat_history)
         else:
-            log.error(f"Inbox write failed for {len(items)} item(s) — skipping history/chat save to allow retry")
+            log.error(
+                f"Inbox write failed for {len(items)} item(s) — skipping history/chat save to allow retry"
+            )
     return owner_username, chat_ids
 
 
@@ -1357,7 +1576,10 @@ def append_to_inbox_history(items: list):
 # Outgoing messages (outbox.json → Telegram)
 # ---------------------------------------------------------------------------
 
-def send_outbox_messages(token: str, chat_ids: list[str], state: dict, chat_history: dict):
+
+def send_outbox_messages(
+    token: str, chat_ids: list[str], state: dict, chat_history: dict
+):
     """Forward unsent outbox messages to all authorized Telegram chats."""
     from services.shared import read_outbox_locked
 
@@ -1380,25 +1602,24 @@ def send_outbox_messages(token: str, chat_ids: list[str], state: dict, chat_hist
 
         succeeded_cids = []
         for cid in chat_ids:
-            result = tg(token, "sendMessage",
-                        chat_id=cid,
-                        text=text,
-                        parse_mode="Markdown")
+            result = tg(
+                token, "sendMessage", chat_id=cid, text=text, parse_mode="Markdown"
+            )
             if result:
                 succeeded_cids.append(cid)
             else:
                 # Try without Markdown (preserve backtick-wrapped content as-is)
                 fallback_text = _strip_markdown_preserve_code(text)
-                result2 = tg(token, "sendMessage",
-                             chat_id=cid,
-                             text=fallback_text)
+                result2 = tg(token, "sendMessage", chat_id=cid, text=fallback_text)
                 if result2:
                     succeeded_cids.append(cid)
 
         if succeeded_cids:
             state["sent_hashes"].append(h)
             sent_count += 1
-            log.info(f"Sent to Telegram ({len(succeeded_cids)} chat(s)): {msg.get('subject', text[:60])!r}")
+            log.info(
+                f"Sent to Telegram ({len(succeeded_cids)} chat(s)): {msg.get('subject', text[:60])!r}"
+            )
             sent_history_batch.append(msg)
             for cid in succeeded_cids:
                 append_chat_message(chat_history, cid, "bot", text)
@@ -1412,15 +1633,16 @@ def send_outbox_messages(token: str, chat_ids: list[str], state: dict, chat_hist
 
     if sent_count:
         save_chat_history(chat_history)
-        log.info(f"Forwarded {sent_count} outbox message(s) to {len(chat_ids)} Telegram chat(s).")
-
+        log.info(
+            f"Forwarded {sent_count} outbox message(s) to {len(chat_ids)} Telegram chat(s)."
+        )
 
 
 def _format_outbox_msg(msg: dict) -> str:
     """Convert an outbox dict to a readable Telegram message."""
     msg_type = msg.get("type", "")
-    subject  = msg.get("subject", "")
-    content  = msg.get("content", "")
+    subject = msg.get("subject", "")
+    content = msg.get("content", "")
 
     lines = []
 
@@ -1447,6 +1669,7 @@ def _format_outbox_msg(msg: dict) -> str:
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
+
 
 def main():
     # --- Singleton lock: prevent multiple instances from running simultaneously ---
@@ -1531,7 +1754,9 @@ def main():
         while not shutdown_requested:
             try:
                 # 1. Poll Telegram for incoming messages
-                owner_username, chat_ids = poll_updates_and_persist(token, state, owner_username, chat_ids, chat_history)
+                owner_username, chat_ids = poll_updates_and_persist(
+                    token, state, owner_username, chat_ids, chat_history
+                )
                 try:
                     save_state(state)
                 except Exception as e:
@@ -1544,7 +1769,10 @@ def main():
                     try:
                         save_state(state)
                     except Exception as e:
-                        log.error(f"Failed to save state after outbox send: {e}", exc_info=True)
+                        log.error(
+                            f"Failed to save state after outbox send: {e}",
+                            exc_info=True,
+                        )
                     last_outbox_check = now
 
                 # Reset backoff on successful iteration
@@ -1557,8 +1785,11 @@ def main():
             except Exception as e:
                 consecutive_errors += 1
                 backoff = min(10 * (2 ** (consecutive_errors - 1)), MAX_BACKOFF)
-                log.error(f"Unexpected error in main loop (attempt {consecutive_errors}, "
-                          f"backoff {backoff}s): {e}", exc_info=True)
+                log.error(
+                    f"Unexpected error in main loop (attempt {consecutive_errors}, "
+                    f"backoff {backoff}s): {e}",
+                    exc_info=True,
+                )
                 time.sleep(backoff)
     finally:
         log.info("Saving final state before exit...")
