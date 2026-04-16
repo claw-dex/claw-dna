@@ -341,13 +341,18 @@ def render():
             try:
                 test_result = subprocess.run(
                     ["gh", "auth", "status"],
-                    capture_output=True, text=True, timeout=10,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
                 )
                 output = test_result.stdout or test_result.stderr
                 if test_result.returncode == 0:
                     st.success(output.strip())
                 else:
-                    st.error(output.strip() or "gh auth status returned a non-zero exit code.")
+                    st.error(
+                        output.strip()
+                        or "gh auth status returned a non-zero exit code."
+                    )
             except FileNotFoundError:
                 st.error("`gh` is not installed or not in PATH.")
             except subprocess.TimeoutExpired:
@@ -363,7 +368,9 @@ def render():
         if st.session_state.get("gh_replace", False):
             with st.form("gh_replace_form", clear_on_submit=True):
                 new_gh_user = st.text_input("GitHub Username", value=gh_username)
-                new_gh_pat = st.text_input("New Personal Access Token (PAT)", type="password")
+                new_gh_pat = st.text_input(
+                    "New Personal Access Token (PAT)", type="password"
+                )
                 replace_submitted = st.form_submit_button("Save & Login")
             if replace_submitted:
                 if not new_gh_user.strip() or not new_gh_pat.strip():
@@ -384,22 +391,36 @@ def render():
                             login_result = subprocess.run(
                                 ["gh", "auth", "login", "--with-token"],
                                 input=new_gh_pat.strip(),
-                                capture_output=True, text=True, timeout=15,
+                                capture_output=True,
+                                text=True,
+                                timeout=15,
                             )
                             if login_result.returncode == 0:
-                                for k in ("gh_cred_data", "gh_cred_check_ts", "gh_replace"):
+                                for k in (
+                                    "gh_cred_data",
+                                    "gh_cred_check_ts",
+                                    "gh_replace",
+                                ):
                                     st.session_state.pop(k, None)
                                 st.success("Token saved and gh CLI authenticated.")
                                 st.rerun()
                             else:
-                                for k in ("gh_cred_data", "gh_cred_check_ts", "gh_replace"):
+                                for k in (
+                                    "gh_cred_data",
+                                    "gh_cred_check_ts",
+                                    "gh_replace",
+                                ):
                                     st.session_state.pop(k, None)
-                                st.error(f"Token saved but gh login failed: {login_result.stderr.strip()}")
+                                st.error(
+                                    f"Token saved but gh login failed: {login_result.stderr.strip()}"
+                                )
                         except FileNotFoundError:
                             st.session_state.pop("gh_cred_data", None)
                             st.session_state.pop("gh_cred_check_ts", None)
                             st.session_state.pop("gh_replace", None)
-                            st.warning("Token saved to KeePass, but `gh` is not installed or not in PATH.")
+                            st.warning(
+                                "Token saved to KeePass, but `gh` is not installed or not in PATH."
+                            )
                         except Exception as exc:
                             st.session_state.pop("gh_cred_data", None)
                             st.session_state.pop("gh_cred_check_ts", None)
@@ -436,19 +457,25 @@ def render():
                         login_result = subprocess.run(
                             ["gh", "auth", "login", "--with-token"],
                             input=gh_pat.strip(),
-                            capture_output=True, text=True, timeout=15,
+                            capture_output=True,
+                            text=True,
+                            timeout=15,
                         )
                         st.session_state.pop("gh_cred_data", None)
                         st.session_state.pop("gh_cred_check_ts", None)
                         if login_result.returncode == 0:
                             st.success("Token saved and gh CLI authenticated.")
                         else:
-                            st.error(f"Token saved but gh login failed: {login_result.stderr.strip()}")
+                            st.error(
+                                f"Token saved but gh login failed: {login_result.stderr.strip()}"
+                            )
                         st.rerun()
                     except FileNotFoundError:
                         st.session_state.pop("gh_cred_data", None)
                         st.session_state.pop("gh_cred_check_ts", None)
-                        st.warning("Token saved to KeePass, but `gh` is not installed or not in PATH.")
+                        st.warning(
+                            "Token saved to KeePass, but `gh` is not installed or not in PATH."
+                        )
                         st.rerun()
                     except Exception as exc:
                         st.session_state.pop("gh_cred_data", None)
