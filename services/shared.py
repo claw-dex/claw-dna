@@ -3,7 +3,7 @@
 Provides atomic JSON file operations with proper file locking to prevent
 data corruption when multiple services write to the same files concurrently
 (e.g., inbox.json written by telegram_bridge, github_watcher, webhook_receiver,
-and whatsapp_bridge).
+and webhook_receiver's whatsapp sub-handler).
 """
 
 from __future__ import annotations
@@ -191,7 +191,7 @@ def write_to_outbox(items: list, *, outbox_file: Path | None = None) -> bool:
 
     Mirrors write_to_inbox but for the outbox. Prevents data loss when
     multiple writers (health-notify, outbox-manager, cycle-close) and
-    readers (telegram_bridge, whatsapp_bridge) access outbox.json
+    readers (telegram_bridge, whatsapp_bridge_handler) access outbox.json
     concurrently.
 
     Returns True on success, False on failure.

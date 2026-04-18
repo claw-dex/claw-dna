@@ -83,8 +83,9 @@ Agent-specific instructions loaded by the AI coding agent at session start.
 ├── services/                    ← Long-running background services (managed by service_manager.py)
 │   ├── shared.py                ← Shared utilities for services (atomic writes, locking, messaging)
 │   ├── telegram_bridge.py       ← Telegram ↔ inbox/outbox bridge
-│   ├── webhook_receiver.py      ← Incoming webhook handler (port 8082, auto-start)
-│   └── whatsapp_bridge.py       ← WhatsApp ↔ inbox/outbox bridge
+│   ├── webhook_receiver.py      ← Incoming webhook handler (port 8082, auto-start) + sub-handler host
+│   └── webhook/                 ← Sub-handlers registered with webhook_receiver
+│       └── whatsapp_bridge_handler.py  ← WhatsApp ↔ inbox/outbox bridge (path /whatsapp-bridge)
 │
 ├── web/                         ← Static files served by Caddy at / (PUBLIC — exposed to user browser)
 │   └── index.html               ← Welcome page (auto-redirects to /app/)

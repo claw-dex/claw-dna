@@ -1,13 +1,17 @@
 ---
 name: whatsapp-bridge-setup
-description: Set up and manage the WhatsApp bridge service that connects the agent's inbox/outbox to WhatsApp Business Cloud API via webhook. Use this skill when setting up WhatsApp messaging for the first time, storing or updating Meta API credentials in KeePass, starting or restarting the bridge, configuring the webhook URL in the Meta Developer Portal, or troubleshooting a non-responsive WhatsApp bot or missing chat ID.
+description: Set up and manage the WhatsApp bridge that connects the agent's inbox/outbox to the WhatsApp Business Cloud API via webhook. Use this skill when setting up WhatsApp messaging for the first time, storing or updating Meta API credentials in KeePass, configuring the webhook URL in the Meta Developer Portal, or troubleshooting a non-responsive WhatsApp bot or missing chat ID.
 ---
 
 # whatsapp-bridge-setup
 
-**Service:** `services/whatsapp_bridge.py`
+**Handler:** `services/webhook/whatsapp_bridge_handler.py`
+**Host service:** `services/webhook_receiver.py` (port 8082)
+**Webhook path:** `/whatsapp-bridge` (internal) → `/webhook/whatsapp-bridge` (external, after Caddy's `/webhook/*` route strips the `/webhook` prefix)
 
-Long-running bridge that runs an HTTP webhook server on port 8083 to receive incoming WhatsApp messages (saved to `/agent/messages/inbox.json`) and forwards outbox messages to WhatsApp every 60s. The Caddy reverse proxy route is registered/deregistered automatically by the bridge. Phone numbers and owner name are auto-discovered when the first message is received.
+The WhatsApp bridge runs as a sub-handler **inside** `webhook_receiver`. It owns both GET (Meta verification challenge) and POST (incoming messages) to its path, writes incoming messages to `/agent/messages/inbox.json`, and polls `/agent/messages/outbox.json` every 60s to forward unsent messages to all authorized WhatsApp chats. There is **no separate service, no separate port, and no dynamic Caddy registration** — the existing `/webhook/*` → `localhost:8082` route in the Caddyfile covers it. Phone numbers and owner name are auto-discovered on the first message.
+
+If the three required KeePass credentials are missing, the handler logs a warning and self-disables, but `webhook_receiver` keeps serving all other webhook paths.
 
 ## Prerequisites
 
@@ -44,7 +48,7 @@ uv run python scripts/keepass.py store \
   --group "API Keys"
 ```
 
-> `WHATSAPP_CHAT_ID` and `WHATSAPP_OWNER_USERNAME` are auto-populated by the bridge when you send your first message — do not store them manually unless migrating an existing setup.
+> `WHATSAPP_CHAT_ID` and `WHATSAPP_OWNER_USERNAME` are auto-populated on the first message — do not store them manually unless migrating an existing setup.
 
 ## Setup Steps
 
@@ -56,32 +60,32 @@ uv run python scripts/keepass.py get "WHATSAPP_PHONE_NUMBER_ID"
 uv run python scripts/keepass.py get "WHATSAPP_VERIFY_TOKEN"
 ```
 
-### 2. Start the service
+### 2. Ensure webhook_receiver is running and pick up the new handler
 
 ```bash
-uv run python scripts/service_manager.py start whatsapp_bridge 8083 -- uv run python services/whatsapp_bridge.py
+uv run python scripts/service_manager.py status webhook_receiver
+# If not running:
+uv run python scripts/service_manager.py start webhook_receiver 8082 -- uv run python services/webhook_receiver.py
+# If already running, restart so the handler reloads credentials from KeePass:
+uv run python scripts/service_manager.py restart webhook_receiver
 ```
 
-To have the bridge auto-restart on every heartbeat cycle, add `--auto-start`:
+On startup the receiver logs one of:
+- `Registered sub-handler WhatsAppBridgeHandler on /whatsapp-bridge` — handler active
+- `WhatsApp handler disabled — missing KeePass credentials: …` — store the missing credentials and restart
 
-```bash
-uv run python scripts/service_manager.py start whatsapp_bridge 8083 --auto-start -- uv run python services/whatsapp_bridge.py
-```
-
-The bridge automatically registers a Caddy reverse proxy route for the webhook path on startup.
-
-### 3. Configure the webhook in Meta Developer Portal
+### 3. Configure the webhook in the Meta Developer Portal
 
 In the Meta Developer Portal, go to **WhatsApp → Configuration → Webhook** and set:
 
-- **Callback URL:** `https://<your-public-domain>/system/whatsapp-bridge/webhook`
+- **Callback URL:** `https://<your-public-domain>/webhook/whatsapp-bridge`
 - **Verify Token:** the value you stored as `WHATSAPP_VERIFY_TOKEN`
 
 Subscribe to the **messages** field under Webhook Fields.
 
 ### 4. Send the first WhatsApp message to auto-discover your phone number
 
-Send any message to your business number from your personal WhatsApp. The bridge detects the incoming message, extracts your phone number and name, and writes them to KeePass automatically. Confirm they were saved:
+Send any message to your business number from your personal WhatsApp. The handler detects the incoming message, extracts your phone number and name, and writes them to KeePass automatically. Confirm they were saved:
 
 ```bash
 uv run python scripts/keepass.py get "WHATSAPP_CHAT_ID"
@@ -90,40 +94,40 @@ uv run python scripts/keepass.py get "WHATSAPP_CHAT_ID"
 ## Verification
 
 ```bash
-# Check the service is running
-uv run python scripts/service_manager.py status whatsapp_bridge
+# Host service is running
+uv run python scripts/service_manager.py status webhook_receiver
+
+# Handler registered successfully (look for "Registered sub-handler WhatsAppBridgeHandler")
+grep -i whatsapp /agent/memory/logs/webhook_receiver.log | tail -20
 
 # Confirm the inbox received the first message
 cat /agent/messages/inbox.json
 
-# Watch live logs
-tail -f /agent/memory/logs/service-whatsapp_bridge.stdout.log
-tail -f /agent/memory/logs/service-whatsapp_bridge.stderr.log
+# Smoke-test the verification endpoint locally (challenge echo)
+curl -i "http://localhost:8082/whatsapp-bridge?hub.mode=subscribe&hub.verify_token=<VERIFY_TOKEN>&hub.challenge=abc123"
+# Expect: 200 OK with body "abc123"
 ```
 
 Send `/heartbeat` to the business number from your personal WhatsApp — it should reply with the last heartbeat timestamp.
 
 ## Management
 
+The bridge is managed through the `webhook_receiver` host service, not as a separate service.
+
 ```bash
-# Start (port 8083 is required)
-uv run python scripts/service_manager.py start whatsapp_bridge 8083 -- uv run python services/whatsapp_bridge.py
+# Restart (reloads handler credentials from KeePass)
+uv run python scripts/service_manager.py restart webhook_receiver
 
-# Stop (also deregisters the Caddy webhook route)
-uv run python scripts/service_manager.py stop whatsapp_bridge
-
-# Restart
-uv run python scripts/service_manager.py restart whatsapp_bridge
+# Stop (also stops the handler's outbox polling thread)
+uv run python scripts/service_manager.py stop webhook_receiver
 
 # Status
-uv run python scripts/service_manager.py status whatsapp_bridge
+uv run python scripts/service_manager.py status webhook_receiver
 
-# Logs
-tail -f /agent/memory/logs/service-whatsapp_bridge.stdout.log
-tail -f /agent/memory/logs/service-whatsapp_bridge.stderr.log
-
-# Bridge's own combined log
-tail -f /agent/memory/logs/whatsapp_bridge.log
+# Logs (handler shares webhook_receiver's log file)
+tail -f /agent/memory/logs/webhook_receiver.log
+tail -f /agent/memory/logs/service-webhook_receiver.stdout.log
+tail -f /agent/memory/logs/service-webhook_receiver.stderr.log
 ```
 
 ## Bot Commands
@@ -135,19 +139,22 @@ tail -f /agent/memory/logs/whatsapp_bridge.log
 ## Troubleshooting
 
 **Bot does not reply to `/heartbeat`:**
-- Check the service is running: `uv run python scripts/service_manager.py status whatsapp_bridge`
-- Check for errors: `tail -50 /agent/memory/logs/service-whatsapp_bridge.stderr.log`
+- Confirm webhook_receiver is running: `uv run python scripts/service_manager.py status webhook_receiver`
+- Confirm the handler registered on startup: `grep -i "sub-handler WhatsAppBridgeHandler" /agent/memory/logs/webhook_receiver.log`
+- Check for handler errors: `grep -i whatsapp /agent/memory/logs/webhook_receiver.log | tail -50`
 - Confirm credentials are valid: `uv run python scripts/keepass.py get "WHATSAPP_ACCESS_TOKEN"`
-- Verify the Caddy route was registered: `curl -s http://localhost:2019/config/apps/http/servers/srv0/routes | python3 -m json.tool | grep whatsapp`
+
+**Handler disabled at startup:**
+- The log shows `WhatsApp handler disabled — missing KeePass credentials: …`. Store any missing credentials (see Prerequisites) and run `restart webhook_receiver`.
 
 **Webhook verification fails in Meta Developer Portal:**
-- Confirm the service is running and reachable at `https://<domain>/system/whatsapp-bridge/webhook`
+- Confirm the webhook URL is `https://<domain>/webhook/whatsapp-bridge` (not the old `/system/whatsapp-bridge/webhook`)
 - Confirm the verify token in KeePass matches exactly what you entered in the portal
-- Check Caddy is proxying correctly: `curl -s https://<domain>/system/whatsapp-bridge/webhook?hub.mode=subscribe&hub.verify_token=<token>&hub.challenge=test`
+- Test Caddy → webhook_receiver end-to-end: `curl -s "https://<domain>/webhook/whatsapp-bridge?hub.mode=subscribe&hub.verify_token=<token>&hub.challenge=test"` (expect body `test`)
 
 **Chat ID was not auto-discovered:**
 - Confirm you messaged the correct business number
-- Check logs for `"New chat_id discovered"` or any KeePass write error
+- Check logs for auto-discovery or any KeePass write error
 - Manually store the phone number if needed (E.164 format, e.g. `15551234567`):
   ```bash
   uv run python scripts/keepass.py store \
@@ -156,18 +163,13 @@ tail -f /agent/memory/logs/whatsapp_bridge.log
     --password "<phone_number>" \
     --group "System"
   ```
-  Then restart: `uv run python scripts/service_manager.py restart whatsapp_bridge`
+  Then: `uv run python scripts/service_manager.py restart webhook_receiver`
 
 **Multiple phone numbers:**
 - The bridge supports comma-separated phone numbers in `WHATSAPP_CHAT_ID`
-- Additional numbers are appended automatically when new users message the bot
-
-**Service crashes on startup:**
-- Confirm all three KeePass credentials exist before starting
-- Confirm Caddy is running (the bridge registers a route on port 2019)
-- Review startup errors: `tail -100 /agent/memory/logs/service-whatsapp_bridge.stderr.log`
+- Additional numbers are appended automatically when new users message the bot and mention the owner's name
 
 **Outbox messages not being sent:**
-- Verify `WHATSAPP_CHAT_ID` is populated — the bridge needs a known phone number to send
-- Outbox is checked every 60s; wait one full cycle after the phone number is discovered
+- Verify `WHATSAPP_CHAT_ID` is populated — the handler needs a known phone number to send
+- Outbox is polled every 60s from a daemon thread inside webhook_receiver; wait one full cycle after the phone number is discovered
 - Inspect outbox contents: `cat /agent/messages/outbox.json`

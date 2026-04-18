@@ -75,6 +75,8 @@ from app.data.write import (  # noqa: F401
     stop_service,
     start_service,
     update_goal_status,
+    archive_goals,
+    is_archivable_goal,
     delete_inbox_item,
     clear_outbox,
     create_scheduled_task,

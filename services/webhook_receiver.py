@@ -11,6 +11,11 @@ writes them to /agent/messages/inbox.json for agent processing.
   and logs full payload to webhook_receiver.log for audit
 - GET/HEAD/OPTIONS: returns 200 without recording (probes/preflights)
 
+Sub-handler registration:
+  Registered handlers in HANDLERS own a URL path prefix and take over all
+  requests (every HTTP method) to that path — bypassing the default
+  inbox-writing behavior. Used by services/webhook/*_handler.py modules.
+
 Setup:
   Start via service manager:
     uv run python scripts/service_manager.py start webhook_receiver 8082 -- uv run python services/webhook_receiver.py
@@ -33,6 +38,8 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 from shared import surface_error, write_to_inbox
+
+from webhook.whatsapp_bridge_handler import WhatsAppBridgeHandler
 
 # --- Paths ---
 BASE = Path("/agent")
@@ -60,6 +67,34 @@ logging.basicConfig(
 log = logging.getLogger("webhook_receiver")
 
 
+# ---------------------------------------------------------------------------
+# Sub-handler registry
+# ---------------------------------------------------------------------------
+# Each handler owns a URL path prefix (matched after Caddy strips /webhook).
+# Registered handlers take over all HTTP methods on their path; unmatched
+# paths fall through to the default inbox-writing behavior.
+# Add new handlers as a one-line import + append.
+
+HANDLERS: list = [
+    WhatsAppBridgeHandler(),
+]
+
+
+def _find_handler(path: str):
+    """Return the first registered handler whose path_prefix matches, or None.
+
+    A prefix matches when the URL path equals it exactly or starts with
+    ``prefix + "/"`` (so "/foo" does not accidentally match "/foobar").
+    """
+    for h in HANDLERS:
+        prefix = getattr(h, "path_prefix", None)
+        if not prefix:
+            continue
+        if path == prefix or path.startswith(prefix + "/"):
+            return h
+    return None
+
+
 def _write_heartbeat():
     try:
         HEARTBEAT_FILE.write_text(str(time.time()))
@@ -85,8 +120,42 @@ class WebhookHandler(BaseHTTPRequestHandler):
         if self.command != "HEAD":  # HEAD must not include a body (RFC 9110 §9.3.2)
             self.wfile.write(body)
 
+    def _dispatch_to_subhandler(self) -> bool:
+        """If a registered sub-handler owns this path, let it handle the request.
+
+        Returns True when a handler took over (response already sent), False
+        otherwise. A crashing handler must not take down the server — log the
+        error, try to send a 500, and return True so the default logic does
+        not also write a response.
+        """
+        parsed = urlparse(self.path)
+        handler = _find_handler(parsed.path)
+        if handler is None:
+            return False
+        try:
+            handler.handle(self)
+        except Exception as e:
+            log.error(
+                f"Sub-handler {type(handler).__name__} failed on "
+                f"{self.command} {parsed.path}: {e}",
+                exc_info=True,
+            )
+            surface_error(
+                "webhook_receiver",
+                e,
+                context=f"sub-handler {type(handler).__name__} "
+                f"{self.command} {parsed.path}",
+            )
+            try:
+                self._send_json(500, {"status": "error"})
+            except Exception:
+                pass
+        return True
+
     def _handle_read_request(self):
         """Handle GET/HEAD/OPTIONS: respond 200 without recording."""
+        if self._dispatch_to_subhandler():
+            return
         parsed = urlparse(self.path)
         log.debug(
             f"{self.command} {parsed.path} from {self.client_address[0]} (not recorded)"
@@ -95,6 +164,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
     def _handle_write_request(self):
         """Handle POST/PUT/DELETE/PATCH: write event to inbox.json."""
+        if self._dispatch_to_subhandler():
+            return
         try:
             parsed = urlparse(self.path)
 
@@ -228,6 +299,17 @@ def main():
     log.info("Webhook Receiver starting up")
     log.info("=" * 60)
 
+    # Start sub-handlers. A failure here must not prevent the generic receiver
+    # from serving — a single bad handler self-disables via its own logging.
+    for h in HANDLERS:
+        name = type(h).__name__
+        prefix = getattr(h, "path_prefix", "<no-prefix>")
+        try:
+            h.start()
+            log.info(f"Registered sub-handler {name} on {prefix}")
+        except Exception as e:
+            log.error(f"Sub-handler {name} start() failed: {e}", exc_info=True)
+
     # Start HTTP server in a thread
     server = HTTPServer(("0.0.0.0", WEBHOOK_PORT), WebhookHandler)
     serve_thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -254,8 +336,16 @@ def main():
         log.info("Shutdown via KeyboardInterrupt")
     finally:
         log.info("Cleaning up...")
+        # Stop the HTTP server first so no new requests land on sub-handlers
+        # while they are tearing down their state.
         server.shutdown()
         serve_thread.join(timeout=5)
+        for h in HANDLERS:
+            name = type(h).__name__
+            try:
+                h.shutdown()
+            except Exception as e:
+                log.warning(f"Sub-handler {name} shutdown() failed: {e}")
         log.info("Webhook Receiver stopped.")
 
 

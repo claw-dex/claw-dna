@@ -149,6 +149,50 @@ def update_goal_status(goal_index: int, new_status: str):
     _cache_clear_all()
 
 
+def is_archivable_goal(g: dict) -> bool:
+    """True when a goal is a short-term completed/failed entry safe to archive.
+
+    Long-term goals use ids prefixed with 'goal' and are preserved regardless
+    of status so the agent keeps re-reading them as durable context.
+    """
+    return g.get("status") in ("completed", "failed") and not str(
+        g.get("id", "")
+    ).startswith("goal")
+
+
+def archive_goals():
+    """Archive completed/failed short-term goals to goal_history.json.
+
+    Preserves long-term goals (id prefixed with 'goal') regardless of status.
+    Returns the number of goals archived.
+    """
+    history_path = f"{MEMORY_DIR}/goal_history.json"
+    archived_count = 0
+
+    with AtomicJSON(GOALS_PATH, default=[]) as goals:
+        to_archive = [g for g in goals if is_archivable_goal(g)]
+        if to_archive:
+            with AtomicJSON(history_path, default=[]) as history:
+                existing_keys = {
+                    (e.get("id"), e.get("created_at"))
+                    for e in history
+                    if isinstance(e, dict) and e.get("id")
+                }
+                for g in to_archive:
+                    key = (g.get("id"), g.get("created_at"))
+                    if g.get("id") and key in existing_keys:
+                        continue
+                    history.append(g)
+                    if g.get("id"):
+                        existing_keys.add(key)
+
+            goals[:] = [g for g in goals if not is_archivable_goal(g)]
+            archived_count = len(to_archive)
+
+    _cache_clear_all()
+    return archived_count
+
+
 def delete_inbox_item(item_index: int):
     """Delete a single inbox item by index."""
     inbox_path = f"{MESSAGES_DIR}/inbox.json"

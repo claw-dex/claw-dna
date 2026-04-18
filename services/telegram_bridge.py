@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import signal
 import subprocess
 import sys
@@ -90,6 +91,7 @@ TELEGRAM_API = "https://api.telegram.org/bot{token}/{method}"
 POLL_TIMEOUT = 25  # Telegram long-poll timeout (seconds)
 SEND_TIMEOUT = 10  # HTTP timeout for non-polling API calls (sendMessage etc.)
 OUTBOX_INTERVAL = 60  # How often to check outbox (seconds)
+MAX_PASSCODE_ATTEMPTS = 5  # Max wrong passcode tries before permanent block
 STATE_JSON = BASE / "memory" / "state.json"
 MEDIA_DIR = BASE / "workspace" / "telegram"
 TELEGRAM_FILE_API = "https://api.telegram.org/file/bot{token}/{file_path}"
@@ -206,6 +208,141 @@ def contains_username(text: str, username: str) -> bool:
     return bool(re.search(pattern, text, re.IGNORECASE))
 
 
+def is_group_chat(chat_type: str) -> bool:
+    """Return True for group and supergroup chats."""
+    return chat_type in ("group", "supergroup")
+
+
+def strip_bot_suffix(command: str, bot_username: str = "") -> str:
+    """Strip the ``@BotName`` suffix Telegram appends to commands in groups.
+
+    Only strips the suffix when it targets *this* bot (or when *bot_username*
+    is empty — e.g. during startup before ``getMe`` has returned).  For
+    commands addressed to other bots (``/goals@OtherBot``), the original
+    string is returned unchanged so the dispatcher won't match it.
+    """
+    if "@" not in command:
+        return command
+    base, _, suffix = command.partition("@")
+    if not bot_username or suffix.lower() == bot_username.lower():
+        return base
+    return command
+
+
+def bot_is_addressed(msg: dict, bot_username: str, check_text: str) -> bool:
+    """Return True if the bot should respond to this message in a group.
+
+    In groups Telegram's privacy mode means the bot only receives:
+      • Commands  (/something or /something@BotName)
+      • Messages that @mention the bot
+      • Replies to one of the bot's own messages
+    This helper mirrors that logic so we don't respond to every message
+    even when privacy mode is disabled.
+    """
+    text = check_text or ""
+    # Any slash-command
+    if text.lstrip().startswith("/"):
+        return True
+    # @mention of this bot — word-boundary match so @foo doesn't match @foobar
+    if bot_username and contains_username(text, bot_username):
+        return True
+    # Reply to the bot's own message
+    reply_to = msg.get("reply_to_message") or {}
+    reply_from = reply_to.get("from") or {}
+    if bot_username and reply_from.get("username", "").lower() == bot_username.lower():
+        return True
+    return False
+
+
+def generate_passcode() -> str:
+    """Generate a cryptographically secure random 4-digit passcode (zero-padded)."""
+    return f"{secrets.randbelow(10000):04d}"
+
+
+# ---------------------------------------------------------------------------
+# Block-list helpers
+# ---------------------------------------------------------------------------
+# blocked_chat_ids entries are dicts: {"chat_id": "...", "username": "..."}
+# Legacy string entries (plain chat_id) are migrated in _validate_state.
+
+
+def is_blocked(state: dict, chat_id: str) -> bool:
+    """Return True if chat_id is in the blocked list."""
+    for entry in state.get("blocked_chat_ids", []):
+        if isinstance(entry, dict):
+            if entry.get("chat_id") == chat_id:
+                return True
+        elif entry == chat_id:  # legacy string format
+            return True
+    return False
+
+
+def find_blocked_entry(state: dict, identifier: str) -> dict | None:
+    """Find a blocked entry by chat_id or username (leading @ stripped).
+
+    Returns the entry dict on match, or None if not found.
+    """
+    needle = identifier.lstrip("@").lower()
+    for entry in state.get("blocked_chat_ids", []):
+        if isinstance(entry, dict):
+            if entry.get("chat_id") == needle:
+                return entry
+            if entry.get("username", "").lower() == needle:
+                return entry
+        elif entry == needle:  # legacy string
+            return {"chat_id": entry, "username": ""}
+    return None
+
+
+def add_block(state: dict, chat_id: str, username: str = "") -> None:
+    """Add chat_id to the blocked list, storing username alongside it.
+
+    Removes any existing entry for that chat_id first (no duplicates).
+    """
+    _remove_block_by_chat_id(state, chat_id)
+    state["blocked_chat_ids"].append(
+        {"chat_id": chat_id, "username": username.lstrip("@")}
+    )
+
+
+def _remove_block_by_chat_id(state: dict, chat_id: str) -> bool:
+    """Internal: remove by exact chat_id only."""
+    before = len(state.get("blocked_chat_ids", []))
+    state["blocked_chat_ids"] = [
+        e
+        for e in state.get("blocked_chat_ids", [])
+        if not (isinstance(e, dict) and e.get("chat_id") == chat_id)
+        and not (isinstance(e, str) and e == chat_id)
+    ]
+    return len(state["blocked_chat_ids"]) < before
+
+
+def remove_block(state: dict, identifier: str) -> dict | None:
+    """Remove a blocked entry by chat_id or username (leading @ stripped).
+
+    Returns the removed entry dict on success, or None if not found.
+    """
+    needle = identifier.lstrip("@").lower()
+    found = None
+    kept = []
+    for entry in state.get("blocked_chat_ids", []):
+        matched = False
+        if isinstance(entry, dict):
+            if (
+                entry.get("chat_id") == needle
+                or entry.get("username", "").lower() == needle
+            ):
+                matched = True
+                found = entry
+        elif isinstance(entry, str) and entry == needle:
+            matched = True
+            found = {"chat_id": entry, "username": ""}
+        if not matched:
+            kept.append(entry)
+    state["blocked_chat_ids"] = kept
+    return found
+
+
 # ---------------------------------------------------------------------------
 # State management
 # ---------------------------------------------------------------------------
@@ -213,7 +350,12 @@ def contains_username(text: str, username: str) -> bool:
 
 def _validate_state(data) -> dict:
     """Ensure state has the expected structure, repairing wrong types."""
-    default = {"last_update_id": 0, "sent_hashes": []}
+    default = {
+        "last_update_id": 0,
+        "sent_hashes": [],
+        "pending_authorizations": {},
+        "blocked_chat_ids": [],
+    }
     if not isinstance(data, dict):
         log.warning(
             f"Telegram state has unexpected type {type(data).__name__}, resetting"
@@ -241,11 +383,43 @@ def _validate_state(data) -> dict:
                 f"Removed {len(hashes) - len(cleaned)} non-string entries from sent_hashes"
             )
             data["sent_hashes"] = cleaned
+    # Validate pending_authorizations — must be dict
+    pending = data.get("pending_authorizations")
+    if not isinstance(pending, dict):
+        log.warning(
+            f"Telegram state pending_authorizations has wrong type {type(pending).__name__}, resetting to {{}}"
+        )
+        data["pending_authorizations"] = {}
+    # Validate blocked_chat_ids — must be list of dicts; migrate legacy string entries
+    blocked = data.get("blocked_chat_ids")
+    if not isinstance(blocked, list):
+        log.warning(
+            f"Telegram state blocked_chat_ids has wrong type {type(blocked).__name__}, resetting to []"
+        )
+        data["blocked_chat_ids"] = []
+    else:
+        migrated = []
+        for entry in blocked:
+            if isinstance(entry, str):
+                # Legacy format: plain chat_id string → upgrade to dict
+                migrated.append({"chat_id": entry, "username": ""})
+                log.info(
+                    f"Migrated legacy blocked_chat_ids entry '{entry}' to dict format"
+                )
+            elif isinstance(entry, dict) and entry.get("chat_id"):
+                migrated.append(entry)
+            # else: malformed entry, drop it
+        data["blocked_chat_ids"] = migrated
     return data
 
 
 def load_state() -> dict:
-    default = {"last_update_id": 0, "sent_hashes": []}
+    default = {
+        "last_update_id": 0,
+        "sent_hashes": [],
+        "pending_authorizations": {},
+        "blocked_chat_ids": [],
+    }
     if STATE_FILE.exists():
         try:
             data = json.loads(STATE_FILE.read_text())
@@ -1240,6 +1414,55 @@ def handle_notes_command(
     )
 
 
+def handle_unblock_command(
+    token: str,
+    from_chat: str,
+    from_user: str,
+    chat_history: dict,
+    state: dict,
+    args: list[str],
+) -> None:
+    """Handle /unblock <@username|chat_id> — remove a user from the permanent block list."""
+    if not args:
+        usage = (
+            "Usage: `/unblock <@username or chat_id>`\n"
+            "Examples:\n"
+            "  `/unblock @vinhbachsy`\n"
+            "  `/unblock 98313829`"
+        )
+        tg(token, "sendMessage", chat_id=from_chat, text=usage, parse_mode="Markdown")
+        append_chat_message(chat_history, from_chat, "bot", usage)
+        return
+
+    identifier = args[0]
+    entry = remove_block(state, identifier)
+
+    if entry:
+        display = f"@{entry['username']}" if entry.get("username") else entry["chat_id"]
+        chat_id_label = (
+            f" (chat ID: `{entry['chat_id']}`)" if entry.get("username") else ""
+        )
+        response = (
+            f"✅ *{display}*{chat_id_label} has been unblocked.\n"
+            "They can now message the bot again and will be prompted for a new passcode challenge."
+        )
+        log.info(
+            f"/unblock: removed {display} (chat_id={entry['chat_id']}) from block list by @{from_user}"
+        )
+        save_state(state)
+    else:
+        response = (
+            f"⚠️ `{identifier}` was not found in the block list.\n"
+            "Check the identifier and try again."
+        )
+        log.info(
+            f"/unblock: '{identifier}' not found in block list (requested by @{from_user})"
+        )
+
+    tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="Markdown")
+    append_chat_message(chat_history, from_chat, "bot", response)
+
+
 def handle_help_command(
     token: str, from_chat: str, from_user: str, chat_history: dict
 ) -> None:
@@ -1257,6 +1480,7 @@ def handle_help_command(
         "/note <text> — Save a quick note (e.g. `/note review PR 125 tomorrow`)\n"
         "/notes [query] — List recent notes or search (e.g. `/notes deploy`)\n"
         "/heartbeat — Trigger an immediate agent cycle\n"
+        "/unblock <@username|chat\\_id> — Remove a user from the permanent block list\n"
         "/help — Show this help message\n\n"
         "_Any other message is queued as a goal for the next heartbeat._"
     )
@@ -1278,12 +1502,27 @@ def _process_authorized_message(
     from_chat: str,
     chat_history: dict,
     inbox_items: list,
+    state: dict | None = None,
+    history_key: str | None = None,
+    bot_username: str = "",
 ):
-    """Process an authorized incoming message (text and/or media) into an inbox item."""
+    """Process an authorized incoming message (text and/or media) into an inbox item.
+
+    *history_key* is the key used for chat-history lookups.  For private chats it
+    equals *from_chat*; for group chats it is ``"<group_chat_id>:<user_id>"`` so
+    each group member gets their own conversation context.  Falls back to
+    *from_chat* when not supplied.
+    """
+    hkey = history_key if history_key is not None else from_chat
+    chat_type = msg.get("chat", {}).get("type", "private")
+    group_chat = is_group_chat(chat_type)
+
     # Check for commands first
     if text and text.startswith("/"):
         parts = text.split()
-        command = parts[0].lower()
+        # Strip @BotName suffix (only when it targets *this* bot — commands
+        # addressed to other bots in a group will not match any handler).
+        command = strip_bot_suffix(parts[0].lower(), bot_username)
 
         if command == "/heartbeat":
             # Whitelist allowed flags to prevent arbitrary arg injection
@@ -1350,6 +1589,17 @@ def _process_authorized_message(
             handle_notes_command(token, from_chat, from_user, chat_history, parts[1:])
             return
 
+        if command == "/unblock":
+            handle_unblock_command(
+                token, from_chat, from_user, chat_history, state, parts[1:]
+            )
+            return
+
+        if command == "/start":
+            # Authorized user — /start is equivalent to /help
+            handle_help_command(token, from_chat, from_user, chat_history)
+            return
+
         if command == "/help":
             handle_help_command(token, from_chat, from_user, chat_history)
             return
@@ -1378,7 +1628,7 @@ def _process_authorized_message(
             )
 
     # Build content string
-    context = build_chat_context(chat_history, from_chat)
+    context = build_chat_context(chat_history, hkey)
     base_content = (
         f"[Telegram @{from_user}]: {effective_text}"
         if effective_text
@@ -1395,7 +1645,7 @@ def _process_authorized_message(
         content = base_content
 
     chat_text = effective_text or "(media)"
-    append_chat_message(chat_history, from_chat, "user", chat_text)
+    append_chat_message(chat_history, hkey, "user", chat_text)
 
     inbox_item = {
         "type": "message",
@@ -1413,10 +1663,13 @@ def _process_authorized_message(
         + (f" (+{len(attachments)} attachment(s))" if attachments else "")
     )
 
-    ack = build_ack_message()
-    tg(token, "sendMessage", chat_id=from_chat, text=ack)
-    append_chat_message(chat_history, from_chat, "bot", ack)
-    log.info(f"Sent ack reply to {from_chat}")
+    # Suppress the public ack in groups — the agent's actual reply will be
+    # delivered via the outbox, and acking every message publicly is noisy.
+    if not group_chat:
+        ack = build_ack_message()
+        tg(token, "sendMessage", chat_id=from_chat, text=ack)
+        append_chat_message(chat_history, hkey, "bot", ack)
+        log.info(f"Sent ack reply to {from_chat}")
 
 
 def poll_updates(
@@ -1425,6 +1678,7 @@ def poll_updates(
     owner_username: str | None,
     chat_ids: list[str],
     chat_history: dict,
+    bot_username: str = "",
 ) -> tuple[str | None, list[str], list]:  # noqa: E501
     """
     Long-poll Telegram for new updates.
@@ -1462,10 +1716,122 @@ def poll_updates(
             caption = msg.get("caption", "").strip()
             check_text = text or caption  # for auth checks on media-with-caption
 
-            # --- Session authorization logic ---
+            # --- Chat-type metadata ---
+            chat_type = msg.get("chat", {}).get("type", "private")
+            group_chat = is_group_chat(chat_type)
+            from_user_id = str(from_info.get("id", ""))
 
-            if not chat_ids and from_chat:
-                # First-ever message: auto-accept as owner
+            # --- Channel posts are out of scope ---
+            # Channels don't fit the private-chat or group-chat auth model and
+            # have no per-user `from` metadata to gate on.  Ignore entirely.
+            if chat_type == "channel":
+                log.debug(
+                    f"Ignoring channel_post from chat {from_chat} (channels not supported)"
+                )
+                continue
+
+            # Per-user history key in groups; per-chat in private chats.
+            # This prevents different group members' contexts from bleeding together.
+            history_key = f"{from_chat}:{from_user_id}" if group_chat else from_chat
+
+            # --- Privacy-mode guard for groups ---
+            # In groups, only respond to commands, @bot mentions, or replies to the bot.
+            # Ignore all other messages (mirrors Telegram's default bot privacy mode).
+            if group_chat and not bot_is_addressed(msg, bot_username, check_text):
+                continue
+
+            # --- Session authorization logic ---
+            state.setdefault("pending_authorizations", {})
+            state.setdefault("blocked_chat_ids", [])
+
+            # ── BLOCKED ──────────────────────────────────────────────────────────────
+            if is_blocked(state, from_chat):
+                # Permanently blocked — silent reject for both private and group
+                log.info(
+                    f"Silently rejected message from permanently blocked "
+                    f"@{from_user} (chat_id: {from_chat})"
+                )
+
+            # ── KNOWN / AUTHORIZED SESSION ───────────────────────────────────────────
+            elif from_chat in chat_ids:
+                # Per-user gate in groups: authorization is granted to individual
+                # users (identified by their Telegram user-id == private chat-id).
+                # A member of an authorized group who is NOT themselves authorized
+                # should not be able to run commands or forward messages to the
+                # agent inbox — silently drop their messages.
+                if group_chat and from_user_id not in chat_ids:
+                    log.info(
+                        f"Ignoring message from non-authorized user @{from_user} "
+                        f"(user_id={from_user_id}) in authorized group {from_chat}"
+                    )
+                    continue
+
+                _process_authorized_message(
+                    token,
+                    msg,
+                    text,
+                    from_user,
+                    from_chat,
+                    chat_history,
+                    inbox_items,
+                    state,
+                    history_key,
+                    bot_username,
+                )
+
+            # ── GROUP CHAT — special auth path ───────────────────────────────────────
+            elif group_chat:
+                # Groups are never auto-discovered and never get passcode challenges.
+                # A group becomes authorized when an already-authorized user (identified
+                # by their Telegram user-ID, which equals their private chat-ID) sends
+                # a message in it.  That user's private chat-ID must already be in
+                # chat_ids for the check to succeed.
+                if from_user_id and from_user_id in chat_ids:
+                    # Sender is an authorized user → auto-authorize this group
+                    chat_ids.append(from_chat)
+                    keepass_store(
+                        KEEPASS_TELEGRAM_CHAT_ID,
+                        "telegram",
+                        serialize_chat_ids(chat_ids),
+                        group="System",
+                    )
+                    log.info(
+                        f"Auto-authorized group {from_chat} because member "
+                        f"@{from_user} (user_id={from_user_id}) is an authorized user"
+                    )
+                    _process_authorized_message(
+                        token,
+                        msg,
+                        text,
+                        from_user,
+                        from_chat,
+                        chat_history,
+                        inbox_items,
+                        state,
+                        history_key,
+                        bot_username,
+                    )
+                else:
+                    # Group not authorized — tell them how to add it
+                    log.info(
+                        f"Rejected group message from @{from_user} "
+                        f"in unauthorized group {from_chat}"
+                    )
+                    tg(
+                        token,
+                        "sendMessage",
+                        chat_id=from_chat,
+                        text=(
+                            "🔒 *This group is not authorized.*\n\n"
+                            "An already-authorized user needs to send any message here "
+                            "to grant this group access to the bot."
+                        ),
+                        parse_mode="Markdown",
+                    )
+
+            # ── PRIVATE CHAT — owner auto-discovery (first-ever DM) ─────────────────
+            elif not chat_ids and from_chat:
+                # First-ever private message: auto-accept as owner (no passcode)
                 log.info(f"Auto-discovered owner: @{from_user} (chat_id: {from_chat})")
                 owner_username = from_user
                 chat_ids.append(from_chat)
@@ -1483,56 +1849,178 @@ def poll_updates(
                 )
                 log.info("Owner username and chat ID saved to KeePass.")
                 _process_authorized_message(
-                    token, msg, text, from_user, from_chat, chat_history, inbox_items
+                    token,
+                    msg,
+                    text,
+                    from_user,
+                    from_chat,
+                    chat_history,
+                    inbox_items,
+                    state,
+                    history_key,
+                    bot_username,
                 )
 
-            elif from_chat in chat_ids:
-                # Known session — process normally
-                _process_authorized_message(
-                    token, msg, text, from_user, from_chat, chat_history, inbox_items
-                )
+            # ── PRIVATE CHAT — active passcode challenge ─────────────────────────────
+            elif from_chat in state["pending_authorizations"]:
+                pending = state["pending_authorizations"][from_chat]
 
+                if check_text and strip_bot_suffix(
+                    check_text.strip().lower().split()[0], bot_username
+                ) in ("/start", "/help"):
+                    # /start or /help during challenge — remind them
+                    remaining = MAX_PASSCODE_ATTEMPTS - pending.get("attempts", 0)
+                    tg(
+                        token,
+                        "sendMessage",
+                        chat_id=from_chat,
+                        parse_mode="Markdown",
+                        text=(
+                            "🔐 *Access pending*\n\n"
+                            "A 4-digit passcode was sent to the bot owner.\n"
+                            "Please enter that passcode here to gain access.\n\n"
+                            f"_{remaining} attempt{'s' if remaining != 1 else ''} remaining_"
+                        ),
+                    )
+                elif check_text and check_text.strip() == pending["passcode"]:
+                    # ✅ Correct passcode — authorize
+                    del state["pending_authorizations"][from_chat]
+                    chat_ids.append(from_chat)
+                    keepass_store(
+                        KEEPASS_TELEGRAM_CHAT_ID,
+                        "telegram",
+                        serialize_chat_ids(chat_ids),
+                        group="System",
+                    )
+                    log.info(
+                        f"Passcode accepted — authorized new session: "
+                        f"@{from_user} (chat_id: {from_chat})"
+                    )
+                    welcome = "✅ Correct! You've been authorized. I'll forward messages to you from now on."
+                    tg(token, "sendMessage", chat_id=from_chat, text=welcome)
+                    append_chat_message(chat_history, history_key, "bot", welcome)
+                    # Passcode text itself is NOT forwarded to the agent inbox.
+                else:
+                    # ❌ Wrong passcode
+                    pending["attempts"] = pending.get("attempts", 0) + 1
+                    remaining = MAX_PASSCODE_ATTEMPTS - pending["attempts"]
+
+                    if pending["attempts"] >= MAX_PASSCODE_ATTEMPTS:
+                        # 5th wrong attempt → permanently block
+                        blocked_user = pending.get("from_user", from_user)
+                        del state["pending_authorizations"][from_chat]
+                        add_block(state, from_chat, blocked_user)
+                        log.warning(
+                            f"Permanently blocked @{blocked_user} (chat_id: {from_chat}) "
+                            f"after {MAX_PASSCODE_ATTEMPTS} failed passcode attempts"
+                        )
+                        tg(
+                            token,
+                            "sendMessage",
+                            chat_id=from_chat,
+                            text="🚫 Too many wrong attempts. You have been permanently blocked.",
+                        )
+                        if chat_ids:
+                            tg(
+                                token,
+                                "sendMessage",
+                                chat_id=chat_ids[0],
+                                text=(
+                                    f"🚫 @{blocked_user} has been permanently blocked "
+                                    f"after {MAX_PASSCODE_ATTEMPTS} failed passcode attempts."
+                                ),
+                            )
+                    else:
+                        log.info(
+                            f"Wrong passcode from @{from_user} "
+                            f"(attempt {pending['attempts']}/{MAX_PASSCODE_ATTEMPTS})"
+                        )
+                        tg(
+                            token,
+                            "sendMessage",
+                            chat_id=from_chat,
+                            text=(
+                                f"❌ Wrong passcode. "
+                                f"{remaining} attempt{'s' if remaining != 1 else ''} remaining."
+                            ),
+                        )
+
+            # ── PRIVATE CHAT — new user mentions owner username → start challenge ────
             elif (
                 from_chat
                 and owner_username
                 and check_text
                 and contains_username(check_text, owner_username)
             ):
-                # New session authorized — message contains owner's username
-                log.info(f"Authorized new session: @{from_user} (chat_id: {from_chat})")
-                chat_ids.append(from_chat)
-                keepass_store(
-                    KEEPASS_TELEGRAM_CHAT_ID,
-                    "telegram",
-                    serialize_chat_ids(chat_ids),
-                    group="System",
-                )
+                if not chat_ids:
+                    log.info(
+                        f"Rejected @{from_user}: owner username mentioned but no owner chat_id stored"
+                    )
+                    tg(
+                        token,
+                        "sendMessage",
+                        chat_id=from_chat,
+                        text="Sorry, I can't verify you right now. Please try again later.",
+                    )
+                else:
+                    passcode = generate_passcode()
+                    state["pending_authorizations"][from_chat] = {
+                        "passcode": passcode,
+                        "attempts": 0,
+                        "from_user": from_user,
+                    }
+                    owner_chat_id = chat_ids[0]
+                    log.info(
+                        f"Passcode challenge started for @{from_user} (chat_id: {from_chat}), "
+                        f"passcode sent to owner (chat_id: {owner_chat_id})"
+                    )
+                    tg(
+                        token,
+                        "sendMessage",
+                        chat_id=owner_chat_id,
+                        parse_mode="Markdown",
+                        text=(
+                            f"🔐 *New access request*\n"
+                            f"User @{from_user} (chat ID: `{from_chat}`) wants to connect.\n\n"
+                            f"Passcode: *{passcode}*\n\n"
+                            f"_(Max {MAX_PASSCODE_ATTEMPTS} attempts)_"
+                        ),
+                    )
+                    tg(
+                        token,
+                        "sendMessage",
+                        chat_id=from_chat,
+                        text=(
+                            "🔐 A 4-digit passcode has been sent to the owner.\n"
+                            "Please enter it here to gain access:"
+                        ),
+                    )
 
-                tg(
-                    token,
-                    "sendMessage",
-                    chat_id=from_chat,
-                    text="Welcome! You've been authorized. I'll forward messages to you from now on.",
-                )
-                append_chat_message(
-                    chat_history,
-                    from_chat,
-                    "bot",
-                    "Welcome! You've been authorized. I'll forward messages to you from now on.",
-                )
-                _process_authorized_message(
-                    token, msg, text, from_user, from_chat, chat_history, inbox_items
-                )
-
+            # ── PRIVATE CHAT — unknown user, no owner-username mention ───────────────
             else:
-                # Unauthorized new session — reject
-                log.info(f"Rejected message from @{from_user} (chat_id: {from_chat})")
-                tg(
-                    token,
-                    "sendMessage",
-                    chat_id=from_chat,
-                    text="Sorry, I don't know you. Please include my owner's username in your message to get access.",
-                )
+                is_start_cmd = check_text and strip_bot_suffix(
+                    check_text.strip().lower().split()[0], bot_username
+                ) in ("/start",)
+                if is_start_cmd:
+                    log.info(
+                        f"/start from unauthorized @{from_user} (chat_id: {from_chat})"
+                    )
+                    tg(
+                        token,
+                        "sendMessage",
+                        chat_id=from_chat,
+                        text="Enter the bot owner username to start.",
+                    )
+                else:
+                    log.info(
+                        f"Rejected message from @{from_user} (chat_id: {from_chat})"
+                    )
+                    tg(
+                        token,
+                        "sendMessage",
+                        chat_id=from_chat,
+                        text="Sorry, I don't know you. Please include my owner's username in your message to get access.",
+                    )
 
         except Exception as e:
             log.error(f"Error processing update {uid}: {e}", exc_info=True)
@@ -1547,10 +2035,11 @@ def poll_updates_and_persist(
     owner_username: str | None,
     chat_ids: list[str],
     chat_history: dict,
+    bot_username: str = "",
 ):
     """Poll for updates, write to inbox AND persist to history."""
     owner_username, chat_ids, items = poll_updates(
-        token, state, owner_username, chat_ids, chat_history
+        token, state, owner_username, chat_ids, chat_history, bot_username
     )
     if items:
         if write_to_inbox(items):
@@ -1719,6 +2208,16 @@ def main():
     else:
         log.error("Failed to authenticate with Telegram. Check your bot token.")
         sys.exit(1)
+    bot_username: str = (me or {}).get("username", "") if me else ""
+    # A missing bot_username would make strip_bot_suffix() unconditionally strip
+    # any @suffix — allowing this bot to handle commands addressed to OTHER bots
+    # in a shared group (e.g. `/goals@OtherBot`).  Refuse to start in that case.
+    if not bot_username:
+        log.error(
+            "getMe returned no username — cannot safely run in groups without knowing "
+            "our own bot handle. Check the bot token / BotFather setup."
+        )
+        sys.exit(1)
 
     owner_username = keepass_get(KEEPASS_TELEGRAM_OWNER_USERNAME)
     if owner_username:
@@ -1755,7 +2254,7 @@ def main():
             try:
                 # 1. Poll Telegram for incoming messages
                 owner_username, chat_ids = poll_updates_and_persist(
-                    token, state, owner_username, chat_ids, chat_history
+                    token, state, owner_username, chat_ids, chat_history, bot_username
                 )
                 try:
                     save_state(state)

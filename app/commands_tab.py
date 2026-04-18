@@ -40,6 +40,8 @@ def render():
         load_history,
         queue_to_inbox,
         update_goal_status,
+        archive_goals,
+        is_archivable_goal,
         delete_inbox_item,
         clear_outbox,
     )
@@ -173,6 +175,20 @@ def render():
     )
 
     with tab_goals:
+        archivable = [g for g in goals if is_archivable_goal(g)]
+        if archivable:
+            if st.button(
+                f"Archive & Clean Up ({len(archivable)})",
+                key="archive_goals",
+                help=(
+                    "Archives completed/failed short-term goals to "
+                    "goal_history.json. Long-term goals (id prefixed 'goal') "
+                    "are kept."
+                ),
+            ):
+                archive_goals()
+                st.rerun()
+
         if not goals:
             st.caption("No goals yet.")
         else:

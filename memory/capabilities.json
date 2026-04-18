@@ -149,7 +149,7 @@
   {
     "id": "whatsapp_bridge",
     "name": "WhatsApp Bridge",
-    "description": "Bridges inbox/outbox with WhatsApp Business Cloud API; receives messages via webhook on port 8083, forwards outbox to WhatsApp, auto-discovers owner phone; writes heartbeat for liveness monitoring",
+    "description": "Bridges inbox/outbox with WhatsApp Business Cloud API; registered as a sub-handler of webhook_receiver on path /whatsapp-bridge (external URL: /webhook/whatsapp-bridge). Forwards outbox to WhatsApp every 60s and auto-discovers owner phone. Credentials in KeePass: WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN",
     "category": "communication",
     "enabled": false
   },
