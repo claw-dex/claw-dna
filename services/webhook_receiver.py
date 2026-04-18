@@ -39,6 +39,7 @@ from urllib.parse import urlparse, parse_qs
 
 from shared import surface_error, write_to_inbox
 
+from webhook.clickup_task_handler import ClickUpTaskHandler
 from webhook.whatsapp_bridge_handler import WhatsAppBridgeHandler
 
 # --- Paths ---
@@ -84,6 +85,7 @@ def _setup_logging():
 
 HANDLERS: list = [
     WhatsAppBridgeHandler(),
+    ClickUpTaskHandler(),
 ]
 
 
