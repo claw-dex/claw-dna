@@ -9,6 +9,7 @@ import streamlit as st
 
 def render():
     import json
+    import os
     import subprocess
     import time
     from pathlib import Path
@@ -19,17 +20,25 @@ def render():
 
     KEEPASS_DIR = Path("/home/agent/.keepass")
     DB_PATH = KEEPASS_DIR / "credentials.kdbx"
-    MCP_JSON_PATH = Path(__file__).resolve().parents[1] / ".mcp.json"
+    CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 
-    def _update_mcp_json_token(token: str) -> bool:
-        """Write the PAT into .mcp.json, replacing any existing Authorization value."""
+    def _update_claude_settings_env_token(token: str) -> tuple[bool, str]:
+        """Write GITHUB_TOKEN into ~/.claude/settings.json env, preserving other keys."""
         try:
-            data = json.loads(MCP_JSON_PATH.read_text())
-            data["mcpServers"]["github"]["headers"]["Authorization"] = f"Bearer {token}"
-            MCP_JSON_PATH.write_text(json.dumps(data, indent=2) + "\n")
-            return True
-        except Exception:
-            return False
+            CLAUDE_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            if CLAUDE_SETTINGS_PATH.exists():
+                raw = CLAUDE_SETTINGS_PATH.read_text()
+                data = json.loads(raw) if raw.strip() else {}
+            else:
+                data = {}
+            env = data.setdefault("env", {})
+            env["GITHUB_TOKEN"] = token
+            tmp_path = CLAUDE_SETTINGS_PATH.with_suffix(".json.tmp")
+            tmp_path.write_text(json.dumps(data, indent=2) + "\n")
+            os.replace(tmp_path, CLAUDE_SETTINGS_PATH)
+            return True, str(CLAUDE_SETTINGS_PATH)
+        except Exception as exc:
+            return False, str(exc)
 
     # ── Init guard ────────────────────────────────────────────────
     if not DB_PATH.exists():
@@ -385,8 +394,11 @@ def render():
                     if not saved_ok:
                         st.error("Failed to save token to KeePass.")
                     else:
-                        if not _update_mcp_json_token(new_gh_pat.strip()):
-                            st.warning("Token saved, but failed to update `.mcp.json`.")
+                        ok, detail = _update_claude_settings_env_token(new_gh_pat.strip())
+                        if not ok:
+                            st.warning(
+                                f"Token saved, but failed to update `~/.claude/settings.json`: {detail}"
+                            )
                         try:
                             login_result = subprocess.run(
                                 ["gh", "auth", "login", "--with-token"],
@@ -451,8 +463,11 @@ def render():
                 if not saved_ok:
                     st.error("Failed to save token to KeePass.")
                 else:
-                    if not _update_mcp_json_token(gh_pat.strip()):
-                        st.warning("Token saved, but failed to update `.mcp.json`.")
+                    ok, detail = _update_claude_settings_env_token(gh_pat.strip())
+                    if not ok:
+                        st.warning(
+                            f"Token saved, but failed to update `~/.claude/settings.json`: {detail}"
+                        )
                     try:
                         login_result = subprocess.run(
                             ["gh", "auth", "login", "--with-token"],
