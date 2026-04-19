@@ -64,7 +64,12 @@ def render():
         else:
             ts = datetime.now(timezone.utc).isoformat()
             queue_to_inbox(content.strip(), cmd_type, ts, priority=priority)
-            st.success(f"Queued {cmd_type} command to inbox (priority {priority}).")
+            # Toast survives the rerun; st.success would be torn down instantly.
+            st.toast(
+                f"Queued {cmd_type} command to inbox (priority {priority}).",
+                icon="✅",
+            )
+            st.rerun()
 
     st.divider()
 
@@ -221,24 +226,28 @@ def render():
 
                     # Status change control
                     status_options = ["pending", "in_progress", "completed", "failed"]
-                    # Normalize legacy "in-progress" to "in_progress"
                     status_normalized = (
                         status.replace("-", "_") if status else "pending"
                     )
-                    current_idx = (
-                        status_options.index(status_normalized)
-                        if status_normalized in status_options
-                        else 0
-                    )
-                    new_status = st.selectbox(
+                    if status_normalized not in status_options:
+                        status_normalized = "pending"
+
+                    widget_key = f"goal_status_{goal_id}"
+                    # Resync widget state with on-disk status every render so
+                    # externally-applied status changes (agent heartbeat, other
+                    # browser tabs) don't resurface as phantom user selections.
+                    # on_change captures real user edits before the next rerun.
+                    st.session_state[widget_key] = status_normalized
+
+                    def _on_goal_status_change(idx: int = i, key: str = widget_key):
+                        update_goal_status(idx, st.session_state[key])
+
+                    st.selectbox(
                         "Change status",
                         status_options,
-                        index=current_idx,
-                        key=f"goal_status_{i}",
+                        key=widget_key,
+                        on_change=_on_goal_status_change,
                     )
-                    if new_status != status_normalized:
-                        update_goal_status(i, new_status)
-                        st.rerun()
 
     with tab_inbox:
         if not inbox:

@@ -310,9 +310,9 @@ build_task_prompt() {
         evolve)
             cat /agent/prompts/evolve.md
             echo ""
-            echo "## Your Goal Statuses"
+            echo "## Your Past Goal Statuses"
             echo '```json'
-            jq '[.[] | select(.status == "pending" or .status == "in-progress" or .status == "in_progress")] | sort_by(.created_at) | .[0:10]' /agent/memory/goal.json 2>/dev/null || echo '[]'
+            jq '[.[] | select(.status == "completed" or .status == "failed")] | sort_by(.created_at) | .[0:10]' /agent/memory/goal.json 2>/dev/null || echo '[]'
             echo '```'
             ;;
     esac
