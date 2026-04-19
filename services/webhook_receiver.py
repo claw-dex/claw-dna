@@ -39,6 +39,13 @@ from urllib.parse import urlparse, parse_qs
 
 from shared import surface_error, write_to_inbox
 
+from webhook.github_pull_request_handler import GithubPullRequestHandler
+from webhook.github_pull_request_review_comment_handler import (
+    GithubPullRequestReviewCommentHandler,
+)
+from webhook.github_pull_request_review_thread_handler import (
+    GithubPullRequestReviewThreadHandler,
+)
 from webhook.whatsapp_bridge_handler import WhatsAppBridgeHandler
 
 # --- Paths ---
@@ -84,20 +91,35 @@ def _setup_logging():
 
 HANDLERS: list = [
     WhatsAppBridgeHandler(),
+    GithubPullRequestHandler(),
+    GithubPullRequestReviewCommentHandler(),
+    GithubPullRequestReviewThreadHandler(),
 ]
 
 
 def _find_handler(path: str):
-    """Return the first registered handler whose path_prefix matches, or None.
+    """Return the first registered handler that claims ``path``, or None.
 
-    A prefix matches when the URL path equals it exactly or starts with
-    ``prefix + "/"`` (so "/foo" does not accidentally match "/foobar").
+    Selection is two-stage so multiple handlers can share a single
+    ``path_prefix`` (e.g. several GitHub event handlers all under
+    ``/github``):
+
+    1. The handler's ``path_prefix`` must match — exact equality, or
+       the URL starts with ``prefix + "/"`` (so "/foo" does not
+       accidentally match "/foobar").
+    2. If the handler defines an optional ``matches(path) -> bool``
+       method, it must also return True. This lets handlers sharing a
+       prefix disambiguate by full URL. Handlers without ``matches``
+       continue to work by prefix alone (existing behaviour).
     """
     for h in HANDLERS:
         prefix = getattr(h, "path_prefix", None)
         if not prefix:
             continue
-        if path == prefix or path.startswith(prefix + "/"):
+        if not (path == prefix or path.startswith(prefix + "/")):
+            continue
+        matches = getattr(h, "matches", None)
+        if matches is None or matches(path):
             return h
     return None
 
