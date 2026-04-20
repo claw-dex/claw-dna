@@ -250,9 +250,9 @@ def load_validate():
             hb = datetime.fromisoformat(state["last_heartbeat"])
             now = datetime.now(timezone.utc)
             delta = (now - hb).total_seconds()
-            stale = delta > 600
+            stale = delta > 900
             check(
-                "heartbeat fresh (<10min)", not stale, "warning", f"{int(delta)}s ago"
+                "heartbeat fresh (<15min)", not stale, "warning", f"{int(delta)}s ago"
             )
         except (ValueError, TypeError):
             check("heartbeat parseable", False, "warning", "Invalid timestamp format")

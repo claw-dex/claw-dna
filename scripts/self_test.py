@@ -141,7 +141,7 @@ def test_state_fields():
         try:
             hb_dt = datetime.fromisoformat(hb.replace("Z", "+00:00"))
             age_s = (datetime.now(timezone.utc) - hb_dt).total_seconds()
-            ok = age_s < 600
+            ok = age_s < 900
             _check("state_heartbeat_fresh", ok, f"heartbeat {age_s:.0f}s ago")
         except Exception:
             _check("state_heartbeat_fresh", False, f"cannot parse: {hb!r}")

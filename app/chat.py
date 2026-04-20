@@ -5,6 +5,7 @@ Also provides the Streamlit chat UI render() function.
 
 import asyncio
 import json
+import os
 import queue
 import threading
 from pathlib import Path
@@ -27,6 +28,7 @@ from claude_agent_sdk.types import StreamEvent
 SYSTEM_MD = Path("/agent/system.md")
 CONSTITUTION_MD = Path("/agent/constitution.md")
 PORTAL_CONFIG = Path("/agent/memory/portal_config.json")
+CONTAINER_NAME = os.environ.get("CONTAINER_NAME", "myagent")
 
 
 def _build_system_prompt(chat_history: list[dict] | None = None) -> str:
@@ -419,7 +421,7 @@ def render():
             st.warning(
                 f"Could not start Claude Code chat session: {exc}\n\n"
                 "Make sure Claude Code CLI is authenticated:\n"
-                "```\ndocker exec -it myagent claude\n```"
+                f"```\ndocker exec -it {CONTAINER_NAME} claude\n```"
             )
             st.session_state.chat_session = None
             st.session_state.chat_connect_failed = True

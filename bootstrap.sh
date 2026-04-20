@@ -5,12 +5,17 @@
 #  Manages 2 services: Caddy (gateway) and Streamlit (dashboard).
 #
 #  First run:  Starts Caddy (lightweight), polls for auth
-#  Auth:       docker exec -it myagent /agent/agent.sh --auth-status
+#  Auth:       docker exec -it $CONTAINER_NAME /agent/agent.sh --auth-status
 #              (authenticate via the agent CLI's built-in flow)
 #  After auth: Bootstrap auto-completes, no restart needed.
 # ══════════════════════════════════════════════════════════════
 
 set -euo pipefail
+
+# Container name — overridable via `docker run -e CONTAINER_NAME=…`.
+# Used in user-facing help text so copy-pasted docker commands match the
+# name the operator actually chose.
+CONTAINER_NAME="${CONTAINER_NAME:-myagent}"
 
 # ── Colors ───────────────────────────────────────────────────
 CYAN='\033[0;36m'
@@ -246,13 +251,17 @@ else
     echo -e "  ${YELLOW}║  Authentication required — run from another terminal: ║${NC}"
     echo -e "  ${YELLOW}╠═══════════════════════════════════════════════════════╣${NC}"
     echo -e "  ${YELLOW}║                                                       ║${NC}"
-    echo -e "  ${YELLOW}║${NC}  ${BOLD}docker exec -it myagent claude${NC}                       ${YELLOW}║${NC}"
+    echo -e "  ${YELLOW}║${NC}  ${BOLD}docker exec -it ${CONTAINER_NAME} claude${NC}                       ${YELLOW}║${NC}"
     echo -e "  ${YELLOW}║                                                       ║${NC}"
     echo -e "  ${YELLOW}╚═══════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "  ${DIM}Starting Caddy gateway while waiting for auth...${NC}"
     echo -e "  ${DIM}(lightweight — Streamlit starts after authentication)${NC}"
     echo ""
+
+    # Render setup.html with the current container name so the shown
+    # `docker exec` command matches what the operator ran.
+    sed -i "s|__CONTAINER_NAME__|${CONTAINER_NAME}|g" /agent/setup.html
 
     # Start Caddy in setup mode — serves setup.html at / while waiting for auth
     start_caddy_setup
@@ -329,7 +338,7 @@ echo ""
 echo -e "  ${CYAN}1.${NC} Portal: ${BOLD}http://localhost:8080/app/${NC}"
 echo ""
 echo -e "  ${CYAN}2.${NC} Commit authenticated state ${DIM}(from another terminal):${NC}"
-echo -e "     ${BOLD}docker commit myagent myagent:authenticated${NC}"
+echo -e "     ${BOLD}docker commit ${CONTAINER_NAME} ${CONTAINER_NAME}:authenticated${NC}"
 echo ""
 echo -e "  ${CYAN}3.${NC} Open the portal and enter your first goal:"
 echo -e "     ${BOLD}http://localhost:8080/app/${NC}"
@@ -338,7 +347,7 @@ echo ""
 echo -e "  ${CYAN}4.${NC} Or start the orchestrator:"
 echo -e "     ${BOLD}./orchestrator.sh${NC}"
 echo ""
-echo -e "${DIM}Logs: docker logs -f myagent${NC}"
+echo -e "${DIM}Logs: docker logs -f ${CONTAINER_NAME}${NC}"
 echo ""
 # Run the watchdog loop to monitor services and restart if they crash (loops indefinitely)
 watchdog_loop
