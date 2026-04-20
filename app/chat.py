@@ -28,25 +28,33 @@ from claude_agent_sdk.types import StreamEvent
 SYSTEM_MD = Path("/agent/system.md")
 CONSTITUTION_MD = Path("/agent/constitution.md")
 PORTAL_CONFIG = Path("/agent/memory/portal_config.json")
+CLAUDE_SYSTEM_PROMPT_MD = Path("/home/agent/claude-system-prompt.md")
 CONTAINER_NAME = os.environ.get("CONTAINER_NAME", "myagent")
 
 
 def _build_system_prompt(chat_history: list[dict] | None = None) -> str:
-    """Build system prompt from system.md + constitution.md + public URL + optional chat history."""
+    """Build system prompt from system.md + constitution.md + public URL + optional chat history.
+
+    Sections are wrapped in XML tags so that boundaries remain unambiguous when
+    concatenated with other markdown content (e.g. by agent.sh).
+    """
     parts: list[str] = []
     if SYSTEM_MD.exists():
+        parts.append("<system_info>")
         parts.append(SYSTEM_MD.read_text())
+        parts.append("</system_info>")
     if CONSTITUTION_MD.exists():
-        parts.append("## Immutable Rules (Constitution)\n")
+        parts.append("<constitution>")
         parts.append(CONSTITUTION_MD.read_text())
+        parts.append("</constitution>")
     # Inject public hostname if configured
     if PORTAL_CONFIG.exists():
         try:
             cfg = json.loads(PORTAL_CONFIG.read_text())
             public_url = cfg.get("public_url", "")
             if public_url:
-                parts.append(f"\n## Public URL\n")
-                parts.append(f"This agent is accessible at: {public_url}\n")
+                parts.append("<public_url>")
+                parts.append(f"This agent is accessible at: {public_url}")
                 parts.append(
                     "When sharing links with the user (portal, file explorer, workspace files, "
                     "generated reports), use this public URL as the base instead of localhost:8080. "
@@ -54,18 +62,19 @@ def _build_system_prompt(chat_history: list[dict] | None = None) -> str:
                     f"- Portal: {public_url}/app/\n"
                     f"- Static Web: {public_url}/web/ (static files from /agent/web/)\n"
                     f"- File Explorer: {public_url}/_/\n"
-                    f"- Workspace files: ${public_url}/_/agent/workspace/path/to/<filename>\n"
+                    f"- Workspace files: {public_url}/_/agent/workspace/path/to/<filename>"
                 )
                 parts.append(
                     "Note: For internal operations (curl, health checks, Caddy admin API), "
                     "continue using localhost."
                 )
+                parts.append("</public_url>")
         except (json.JSONDecodeError, OSError):
             pass
     if chat_history:
-        parts.append("\n## Previous Chat History\n")
+        parts.append("<previous_chat_history>")
         parts.append(
-            "Below is the conversation history from the previous session. Use it for context.\n"
+            "Below is the conversation history from the previous session. Use it for context."
         )
         # Cap injected history to avoid exceeding context window limits
         max_chars = 8000
@@ -82,7 +91,12 @@ def _build_system_prompt(chat_history: list[dict] | None = None) -> str:
         for msg in trimmed:
             role = msg.get("role", "unknown")
             content = msg.get("content", "")
-            parts.append(f"**{role}**: {content}\n")
+            parts.append(f"**{role}**: {content}")
+        parts.append("</previous_chat_history>")
+    if CLAUDE_SYSTEM_PROMPT_MD.exists():
+        parts.append("<claude_system_prompt>")
+        parts.append(CLAUDE_SYSTEM_PROMPT_MD.read_text())
+        parts.append("</claude_system_prompt>")
     return "\n".join(parts)
 
 

@@ -53,9 +53,14 @@ def render():
         content = st.text_area(
             "Content", placeholder="Enter your command or goal here..."
         )
-        priority = st.slider(
-            "Priority", 1, 5, 3, help="1 = highest priority, 5 = lowest"
+        priority_options = ["P5", "P4", "P3", "P2", "P1"]
+        priority_label = st.select_slider(
+            "Priority",
+            options=priority_options,
+            value="P3",
+            help="P1 = highest priority (right), P5 = lowest (left)",
         )
+        priority = {"P1": 1, "P2": 2, "P3": 3, "P4": 4, "P5": 5}[priority_label]
         submitted = st.form_submit_button("Send")
 
     if submitted:

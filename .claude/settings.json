@@ -6,7 +6,8 @@
   "autoUpdatesChannel": "latest",
   "autoMemoryDirectory": "/agent/memory",
   "env": {
-    "ENABLE_CLAUDEAI_MCP_SERVERS": "false"
+    "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
+    "ENABLE_PROMPT_CACHING_1H": "1"
   },
   "enabledPlugins": {
     "agent-browser@agent-browser": true,

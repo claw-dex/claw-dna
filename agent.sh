@@ -170,12 +170,15 @@ claude_run() {
     if [ -f "/home/agent/claude-system-prompt.md" ]; then
         local claude_system_content
         claude_system_content=$(cat /home/agent/claude-system-prompt.md)
+        local claude_system_block="<claude_system_prompt>
+${claude_system_content}
+</claude_system_prompt>"
         if [ -n "$final_system_prompt" ]; then
             final_system_prompt="${final_system_prompt}
 
-${claude_system_content}"
+${claude_system_block}"
         else
-            final_system_prompt="$claude_system_content"
+            final_system_prompt="$claude_system_block"
         fi
     fi
 

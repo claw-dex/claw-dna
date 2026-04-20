@@ -216,9 +216,13 @@ fi
 
 build_system_prompt() {
     cat <<SYSTEM
+<agent_system_prompt>
 $(cat /agent/system.md 2>/dev/null)
-## Immutable Rules (Constitution)
+</agent_system_prompt>
+
+<agent_constitution>
 $(cat /agent/constitution.md 2>/dev/null || echo "No constitution found.")
+</agent_constitution>
 SYSTEM
 
     # Inject public hostname if configured
@@ -228,8 +232,7 @@ SYSTEM
         if [ -n "$public_url" ]; then
             cat <<PUBLIC
 
-## Public URL
-
+<public_url>
 This agent is accessible at: ${public_url}
 
 When sharing links with the user (portal, file explorer, workspace files, generated reports), use this public URL as the base instead of localhost:8080. For example:
@@ -239,6 +242,7 @@ When sharing links with the user (portal, file explorer, workspace files, genera
 - Workspace files: ${public_url}/_/agent/workspace/path/to/<filename>
 
 Note: For internal operations (curl, health checks, Caddy admin API), continue using localhost.
+</public_url>
 PUBLIC
         fi
     fi
@@ -261,10 +265,9 @@ build_task_prompt() {
         bootstrap)
             cat /agent/prompts/bootstrap.md
             echo ""
-            echo "## Your Goal"
-            echo '```json'
+            echo "<your_goals>"
             cat /agent/memory/goal.json 2>/dev/null || echo '[]'
-            echo '```'
+            echo "</your_goals>"
             echo "Read this goal carefully. Incorporate it into your bootstrap plan."
             echo "You MAY modify server.py and app/*.py to customise the Streamlit UI for this goal."
             ;;
@@ -297,23 +300,22 @@ build_task_prompt() {
         goal)
             cat /agent/prompts/goal.md
             echo ""
-            echo "## Current Inbox Contents (sorted by priority, 1=highest)"
-            echo '```json'
+            echo "<your_inbox_messages>"
+            echo "(sorted by priority, 1=highest)"
             jq 'sort_by(.priority // 3)' /agent/messages/inbox.json 2>/dev/null || cat /agent/messages/inbox.json 2>/dev/null || echo '[]'
-            echo '```'
+            echo "</your_inbox_messages>"
             echo ""
-            echo "## Your Goal Statuses"
-            echo '```json'
+            echo "<your_current_goals>"
             jq '[.[] | select(.status == "pending" or .status == "in-progress" or .status == "in_progress")] | sort_by(.created_at) | .[0:10]' /agent/memory/goal.json 2>/dev/null || echo '[]'
-            echo '```'
+            echo "</your_current_goals>"
             ;;
         evolve)
             cat /agent/prompts/evolve.md
             echo ""
-            echo "## Your Past Goal Statuses"
-            echo '```json'
+            echo "<your_past_goals>"
+            echo "(completed/failed goals, sorted by created_at)"
             jq '[.[] | select(.status == "completed" or .status == "failed")] | sort_by(.created_at) | .[0:10]' /agent/memory/goal.json 2>/dev/null || echo '[]'
-            echo '```'
+            echo "</your_past_goals>"
             ;;
     esac
 }
