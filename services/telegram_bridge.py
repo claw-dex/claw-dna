@@ -460,10 +460,10 @@ def protect_urls_in_markdown(text: str) -> str:
 
 
 def _strip_markdown_preserve_code(text: str) -> str:
-    """Strip Markdown formatting but preserve backtick-wrapped content.
+    """Strip MarkdownV2 formatting but preserve backtick-wrapped content.
 
-    Used as fallback when Telegram's Markdown parser fails. Removes
-    bold (*) and italic (_) markers but keeps backtick-wrapped URLs intact.
+    Used as fallback when Telegram's MarkdownV2 parser fails. Removes
+    formatting markers and unescapes backslash-escaped characters.
     """
     # Extract backtick-wrapped content (URLs, code blocks)
     backtick_pattern = r"`([^`]+)`"
@@ -472,7 +472,6 @@ def _strip_markdown_preserve_code(text: str) -> str:
 
     def replace_with_placeholder(match):
         nonlocal counter
-        # Use placeholder without underscores to avoid stripping issues
         placeholder = f"{{{{PRESERVED{counter}}}}}"
         placeholders[placeholder] = match.group(1)  # Store without backticks
         counter += 1
@@ -481,14 +480,69 @@ def _strip_markdown_preserve_code(text: str) -> str:
     # Replace backtick blocks with placeholders
     text = re.sub(backtick_pattern, replace_with_placeholder, text)
 
-    # Strip markdown formatting chars
-    text = text.replace("*", "").replace("_", "")
+    # Unescape backslash-escaped chars first, so stripped markers are not confused
+    # with escape targets (e.g. \* should become * not be swallowed by the * strip)
+    text = re.sub(r"\\(.)", r"\1", text)
+
+    # Strip unescaped MarkdownV2 formatting chars
+    text = text.replace("*", "").replace("_", "").replace("~", "").replace("||", "")
 
     # Restore preserved content
     for placeholder, content in placeholders.items():
         text = text.replace(placeholder, content)
 
     return text
+
+
+# Copied from python-telegram-bot (LGPL-3.0-or-later), telegram/helpers.py.
+# Copyright (C) 2015-2026 Leandro Toledo de Souza <devs@python-telegram-bot.org>.
+# Source: https://github.com/python-telegram-bot/python-telegram-bot
+def escape_markdown(
+    text: str, version: int | str = 1, entity_type: str | None = None
+) -> str:
+    """Escape Telegram markup symbols.
+
+    Args:
+        text: The text to escape.
+        version: Telegram Markdown version, ``1`` or ``2``. Defaults to ``1``.
+        entity_type: For MarkdownV2, ``"pre"`` / ``"code"`` escape only ``\\`` and
+            ``` ` ```; ``"text_link"`` / ``"custom_emoji"`` escape only ``\\`` and ``)``.
+            Ignored for v1.
+    """
+    if int(version) == 1:
+        escape_chars = r"_*`["
+    elif int(version) == 2:
+        if entity_type in ["pre", "code"]:
+            escape_chars = r"\`"
+        elif entity_type in ["text_link", "custom_emoji"]:
+            escape_chars = r"\)"
+        else:
+            escape_chars = r"\_*[]()~`>#+-=|{}.!"
+    else:
+        raise ValueError("Markdown version must be either 1 or 2!")
+
+    return re.sub(f"([{re.escape(escape_chars)}])", r"\\\1", text)
+
+
+def escape_markdown_v2(text: str, entity_type: str | None = None) -> str:
+    """Shorthand for ``escape_markdown(text, version=2, entity_type=...)``."""
+    return escape_markdown(text, version=2, entity_type=entity_type)
+
+
+# Copied from python-telegram-bot (LGPL-3.0-or-later), telegram/helpers.py.
+# Copyright (C) 2015-2026 Leandro Toledo de Souza <devs@python-telegram-bot.org>.
+def mention_markdown(user_id: int | str, name: str, version: int | str = 1) -> str:
+    """Create a tappable user mention in Markdown syntax.
+
+    Args:
+        user_id: The user's numeric Telegram ID to mention.
+        name: The display name shown for the mention.
+        version: Telegram Markdown version, ``1`` or ``2``. Defaults to ``1``.
+    """
+    tg_link = f"tg://user?id={user_id}"
+    if version == 1:
+        return f"[{name}]({tg_link})"
+    return f"[{escape_markdown(name, version=version)}]({tg_link})"
 
 
 # ---------------------------------------------------------------------------
@@ -839,15 +893,16 @@ def handle_status_command(
             status, "❓"
         )
 
+        hb_display = escape_markdown_v2(last_hb[:19]) if last_hb and last_hb != "unknown" else "unknown"
         lines = [
             f"{status_emoji} *Agent Status*",
-            f"Cycle: #{cycle_num}  |  Status: `{status}`",
-            f"Last heartbeat: {last_hb[:19] if last_hb and last_hb != 'unknown' else 'unknown'}",
+            f"Cycle: \\#{cycle_num}  \\|  Status: `{status}`",
+            f"Last heartbeat: {hb_display}",
             f"Goals: {active} active, {completed} done, {failed} failed",
             f"Total cycles: {total_cycles}",
         ]
         if summary:
-            lines.append(f"\n_Last: {summary[:200]}_")
+            lines.append(f"\n_Last: {escape_markdown_v2(summary[:200])}_")
 
         response = "\n".join(lines)
         tg(
@@ -855,7 +910,7 @@ def handle_status_command(
             "sendMessage",
             chat_id=from_chat,
             text=response,
-            parse_mode="Markdown",
+            parse_mode="MarkdownV2",
         )
         append_chat_message(chat_history, from_chat, "bot", response)
         log.info(f"/status command served to @{from_user}")
@@ -892,15 +947,14 @@ def handle_goals_command(
             "pending": "⏳",
         }
 
-        lines = [f"📋 *Last {len(recent)} goal(s)*"]
+        lines = [f"📋 *Last {len(recent)} goal\\(s\\)*"]
         for g in recent:
             st = g.get("status", "?")
             emoji = status_emoji.get(st, "❓")
             goal_text = g.get("goal", "untitled")
-            # Truncate long goal text
             if len(goal_text) > 80:
                 goal_text = goal_text[:77] + "..."
-            lines.append(f"{emoji} `{st}` — {goal_text}")
+            lines.append(f"{emoji} `{st}` — {escape_markdown_v2(goal_text)}")
 
         response = "\n".join(lines)
         tg(
@@ -908,7 +962,7 @@ def handle_goals_command(
             "sendMessage",
             chat_id=from_chat,
             text=response,
-            parse_mode="Markdown",
+            parse_mode="MarkdownV2",
         )
         append_chat_message(chat_history, from_chat, "bot", response)
         log.info(f"/goals command served to @{from_user} (limit={limit})")
@@ -958,8 +1012,9 @@ def handle_journal_command(
             if len(summary) > 120:
                 summary = summary[:117] + "..."
             ts = (e.get("timestamp", "") or "")[:10]
+            summary_display = escape_markdown_v2(summary) if summary else "\\(no summary\\)"
             lines.append(
-                f"{emoji} *#{cycle_num}*{cat_label} — {summary or '(no summary)'} _{ts}_"
+                f"{emoji} *\\#{cycle_num}*{cat_label} — {summary_display} _{escape_markdown_v2(ts)}_"
             )
 
         response = "\n".join(lines)
@@ -968,7 +1023,7 @@ def handle_journal_command(
             "sendMessage",
             chat_id=from_chat,
             text=response,
-            parse_mode="Markdown",
+            parse_mode="MarkdownV2",
         )
         append_chat_message(chat_history, from_chat, "bot", response)
         log.info(f"/journal command served to @{from_user} (limit={limit})")
@@ -1018,20 +1073,20 @@ def handle_today_command(
         goal_today = [c for c in cycles_today if c.get("type") == "goal"]
 
         lines = [
-            f"📅 *Today's Summary* _(last 24h as of {now.strftime('%H:%M')} UTC)_\n"
+            f"📅 *Today's Summary* _\\(last 24h as of {escape_markdown_v2(now.strftime('%H:%M'))} UTC\\)_\n"
         ]
 
         # Goals completed today
         if completed_today:
             lines.append(f"*Goals Completed* — {len(completed_today)}")
             for g in completed_today[-5:]:
-                goal_text = g.get("goal", "")[:70]
+                goal_text = escape_markdown_v2(g.get("goal", "")[:70])
                 lines.append(f"  🎯 {goal_text}")
 
         # Cycles summary
         lines.append(f"\n*Cycles* — {len(cycles_today)} total")
         if evolve_today:
-            cats = [c.get("category", "?") for c in evolve_today]
+            cats = [escape_markdown_v2(c.get("category", "?")) for c in evolve_today]
             lines.append(f"  ⚙️ {len(evolve_today)} evolve: {', '.join(cats[:5])}")
         if goal_today:
             lines.append(f"  🎯 {len(goal_today)} goal cycles")
@@ -1048,7 +1103,7 @@ def handle_today_command(
             blocked = [m for m in msgs if m.get("type") == "needs_human"]
             if blocked:
                 lines.append(
-                    f"\n⚠️ *Blocked* — {len(blocked)} item(s) need human attention (`/outbox` for details)"
+                    f"\n⚠️ *Blocked* — {len(blocked)} item\\(s\\) need human attention \\(`/outbox` for details\\)"
                 )
 
         response = "\n".join(lines)
@@ -1057,7 +1112,7 @@ def handle_today_command(
             "sendMessage",
             chat_id=from_chat,
             text=response,
-            parse_mode="Markdown",
+            parse_mode="MarkdownV2",
         )
         append_chat_message(chat_history, from_chat, "bot", response)
         log.info(
@@ -1100,7 +1155,7 @@ def handle_outbox_command(
             "success": "✅",
         }
 
-        header = f"📤 *Outbox* (last {len(recent)} of {len(messages)})"
+        header = f"📤 *Outbox* \\(last {len(recent)} of {len(messages)}\\)"
         if needs_human_count > 0:
             header += f" — 🚨 *{needs_human_count} needs human*"
         lines = [header]
@@ -1111,11 +1166,10 @@ def handle_outbox_command(
             subject = m.get("subject", "") or ""
             content = m.get("content", "") or ""
             ts = (m.get("timestamp", "") or "")[:16].replace("T", " ")
-            # Use subject if available, otherwise truncate content
             display = subject if subject else content
             if len(display) > 100:
                 display = display[:97] + "..."
-            lines.append(f"{emoji} `{mtype}` — {display} _{ts}_")
+            lines.append(f"{emoji} `{mtype}` — {escape_markdown_v2(display)} _{escape_markdown_v2(ts)}_")
 
         response = "\n".join(lines)
         tg(
@@ -1123,7 +1177,7 @@ def handle_outbox_command(
             "sendMessage",
             chat_id=from_chat,
             text=response,
-            parse_mode="Markdown",
+            parse_mode="MarkdownV2",
         )
         append_chat_message(chat_history, from_chat, "bot", response)
         log.info(
@@ -1156,7 +1210,7 @@ def handle_cycles_command(
         total = len(completed)
         type_emoji = {"evolve": "🔧", "goal": "🎯", "self-heal": "🩺", "unknown": "❓"}
 
-        header = f"📊 *Recent Cycles* (last {len(recent)} of {total} completed)"
+        header = f"📊 *Recent Cycles* \\(last {len(recent)} of {total} completed\\)"
         lines = [header]
 
         for c in recent:
@@ -1172,9 +1226,9 @@ def handle_cycles_command(
             dur_str = f"{dur}s" if dur is not None else "?"
             label = f"{ctype}/{cat}" if cat else ctype
 
-            lines.append(f"{emoji} *#{num}* `{label}` — {dur_str}")
+            lines.append(f"{emoji} *\\#{num}* `{escape_markdown_v2(label, entity_type='code')}` — {escape_markdown_v2(dur_str)}")
             if summary:
-                lines.append(f"   _{summary}_")
+                lines.append(f"   _{escape_markdown_v2(summary)}_")
 
         response = "\n".join(lines)
         tg(
@@ -1182,7 +1236,7 @@ def handle_cycles_command(
             "sendMessage",
             chat_id=from_chat,
             text=response,
-            parse_mode="Markdown",
+            parse_mode="MarkdownV2",
         )
         append_chat_message(chat_history, from_chat, "bot", response)
         log.info(f"/cycles command served to @{from_user} (limit={limit})")
@@ -1234,9 +1288,10 @@ def handle_services_command(
                     meta.append(f"PID {pid}")
                 if started:
                     meta.append(f"since {started[:10]}")
-                meta_str = f" _({', '.join(meta)})_" if meta else ""
+                escaped_meta = [escape_markdown_v2(m) for m in meta]
+                meta_str = f" _\\({', '.join(escaped_meta)}\\)_" if escaped_meta else ""
 
-                lines.append(f"{status_icon} `{name}` — {status_label}{meta_str}")
+                lines.append(f"{status_icon} `{name}` — {escape_markdown_v2(status_label)}{meta_str}")
 
             response = "\n".join(lines)
 
@@ -1245,7 +1300,7 @@ def handle_services_command(
             "sendMessage",
             chat_id=from_chat,
             text=response,
-            parse_mode="Markdown",
+            parse_mode="MarkdownV2",
         )
         append_chat_message(chat_history, from_chat, "bot", response)
         log.info(f"/services command served to @{from_user}")
@@ -1269,7 +1324,7 @@ def handle_remind_command(
             "Duration: `30m`, `2h`, `1d`\n"
             "Example: `/remind 30m check deployment`"
         )
-        tg(token, "sendMessage", chat_id=from_chat, text=usage, parse_mode="Markdown")
+        tg(token, "sendMessage", chat_id=from_chat, text=usage, parse_mode="MarkdownV2")
         append_chat_message(chat_history, from_chat, "bot", usage)
         return
 
@@ -1289,8 +1344,8 @@ def handle_remind_command(
         if minutes <= 0:
             raise ValueError("non-positive")
     except (ValueError, IndexError):
-        err = f"Invalid duration `{duration_str}`. Use formats like `30m`, `2h`, `1d`."
-        tg(token, "sendMessage", chat_id=from_chat, text=err, parse_mode="Markdown")
+        err = f"Invalid duration `{escape_markdown_v2(duration_str, entity_type='code')}`\\. Use formats like `30m`, `2h`, `1d`\\."
+        tg(token, "sendMessage", chat_id=from_chat, text=err, parse_mode="MarkdownV2")
         append_chat_message(chat_history, from_chat, "bot", err)
         return
 
@@ -1312,13 +1367,13 @@ def handle_remind_command(
             label = f"{minutes // 60}h"
         else:
             label = f"{minutes}m"
-        response = f"Reminder set for *{label}* from now: _{reminder_text}_"
+        response = f"Reminder set for *{escape_markdown_v2(label)}* from now: _{escape_markdown_v2(reminder_text)}_"
         log.info(f"/remind command: '{reminder_text}' in {label} by @{from_user}")
     else:
         response = f"Failed to create reminder."
         log.error(f"/remind error for @{from_user}: add_reminder returned None")
 
-    tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="Markdown")
+    tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="MarkdownV2")
     append_chat_message(chat_history, from_chat, "bot", response)
 
 
@@ -1331,7 +1386,7 @@ def handle_note_command(
     """
     if not args:
         usage = "Usage: `/note <text>`\n" "Example: `/note review PR 125 tomorrow`"
-        tg(token, "sendMessage", chat_id=from_chat, text=usage, parse_mode="Markdown")
+        tg(token, "sendMessage", chat_id=from_chat, text=usage, parse_mode="MarkdownV2")
         append_chat_message(chat_history, from_chat, "bot", usage)
         return
 
@@ -1344,13 +1399,13 @@ def handle_note_command(
     note_id = add_note(title, content, tags=["telegram"])
 
     if note_id:
-        response = f"Note saved: _{title}_"
+        response = f"Note saved: _{escape_markdown_v2(title)}_"
         log.info(f"/note command: '{title}' by @{from_user}")
     else:
-        response = f"Failed to save note."
+        response = "Failed to save note\\."
         log.error(f"/note error for @{from_user}: add_note returned None")
 
-    tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="Markdown")
+    tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="MarkdownV2")
     append_chat_message(chat_history, from_chat, "bot", response)
 
 
@@ -1368,21 +1423,21 @@ def handle_notes_command(
     if args:
         query = " ".join(args)
         notes = search_notes(query)
-        header = f"Notes matching _{query}_:"
+        header = f"Notes matching _{escape_markdown_v2(query)}_:"
     else:
         notes = list_notes()
         header = "Recent notes:"
 
     if not notes:
         response = (
-            "No notes found." if not args else f"No notes matching _{' '.join(args)}_."
+            "No notes found\\." if not args else f"No notes matching _{escape_markdown_v2(' '.join(args))}_\\."
         )
         tg(
             token,
             "sendMessage",
             chat_id=from_chat,
             text=response,
-            parse_mode="Markdown",
+            parse_mode="MarkdownV2",
         )
         append_chat_message(chat_history, from_chat, "bot", response)
         return
@@ -1394,20 +1449,19 @@ def handle_notes_command(
         title = n.get("title", "Untitled")
         content = n.get("content", "")
         tags = n.get("tags", [])
-        # Truncate content preview
         preview = content[:80].replace("\n", " ")
         if len(content) > 80:
             preview += "..."
-        tag_str = f" _#{' #'.join(tags)}_" if tags else ""
-        lines.append(f"• *{title}*{tag_str}")
+        tag_str = f" _\\#{' \\#'.join(escape_markdown_v2(t) for t in tags)}_" if tags else ""
+        lines.append(f"• *{escape_markdown_v2(title)}*{tag_str}")
         if preview and preview != title:
-            lines.append(f"  {preview}")
+            lines.append(f"  {escape_markdown_v2(preview)}")
 
     if len(notes) > 5:
         lines.append(f"\n_…and {len(notes) - 5} more_")
 
     response = "\n".join(lines)
-    tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="Markdown")
+    tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="MarkdownV2")
     append_chat_message(chat_history, from_chat, "bot", response)
     log.info(
         f"/notes command served to @{from_user} (query={' '.join(args) if args else None}, count={len(shown)})"
@@ -1425,12 +1479,12 @@ def handle_unblock_command(
     """Handle /unblock <@username|chat_id> — remove a user from the permanent block list."""
     if not args:
         usage = (
-            "Usage: `/unblock <@username or chat_id>`\n"
+            "Usage: `/unblock <@username or chat\\_id>`\n"
             "Examples:\n"
             "  `/unblock @vinhbachsy`\n"
             "  `/unblock 98313829`"
         )
-        tg(token, "sendMessage", chat_id=from_chat, text=usage, parse_mode="Markdown")
+        tg(token, "sendMessage", chat_id=from_chat, text=usage, parse_mode="MarkdownV2")
         append_chat_message(chat_history, from_chat, "bot", usage)
         return
 
@@ -1440,11 +1494,11 @@ def handle_unblock_command(
     if entry:
         display = f"@{entry['username']}" if entry.get("username") else entry["chat_id"]
         chat_id_label = (
-            f" (chat ID: `{entry['chat_id']}`)" if entry.get("username") else ""
+            f" \\(chat ID: `{entry['chat_id']}`\\)" if entry.get("username") else ""
         )
         response = (
-            f"✅ *{display}*{chat_id_label} has been unblocked.\n"
-            "They can now message the bot again and will be prompted for a new passcode challenge."
+            f"✅ *{escape_markdown_v2(display)}*{chat_id_label} has been unblocked\\.\n"
+            "They can now message the bot again and will be prompted for a new passcode challenge\\."
         )
         log.info(
             f"/unblock: removed {display} (chat_id={entry['chat_id']}) from block list by @{from_user}"
@@ -1452,14 +1506,14 @@ def handle_unblock_command(
         save_state(state)
     else:
         response = (
-            f"⚠️ `{identifier}` was not found in the block list.\n"
-            "Check the identifier and try again."
+            f"⚠️ `{escape_markdown_v2(identifier, entity_type='code')}` was not found in the block list\\.\n"
+            "Check the identifier and try again\\."
         )
         log.info(
             f"/unblock: '{identifier}' not found in block list (requested by @{from_user})"
         )
 
-    tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="Markdown")
+    tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="MarkdownV2")
     append_chat_message(chat_history, from_chat, "bot", response)
 
 
@@ -1469,22 +1523,22 @@ def handle_help_command(
     """Handle /help — list available bot commands."""
     response = (
         "🤖 *Agent — Available Commands*\n\n"
-        "/status — Live agent status (cycle, goals, last heartbeat)\n"
-        "/goals [N] — Show last N goals (default 5, max 20)\n"
-        "/cycles [N] — Show last N completed cycles with type/category/duration (default 5, max 20)\n"
-        "/journal [N] — Show last N journal entries (default 3, max 10)\n"
-        "/outbox [N] — Show last N outbox messages, highlights needs\\_human (default 5, max 20)\n"
-        "/services — Show background service status (running/dead, PID, port)\n"
+        "/status — Live agent status \\(cycle, goals, last heartbeat\\)\n"
+        "/goals \\[N\\] — Show last N goals \\(default 5, max 20\\)\n"
+        "/cycles \\[N\\] — Show last N completed cycles with type/category/duration \\(default 5, max 20\\)\n"
+        "/journal \\[N\\] — Show last N journal entries \\(default 3, max 10\\)\n"
+        "/outbox \\[N\\] — Show last N outbox messages, highlights needs\\_human \\(default 5, max 20\\)\n"
+        "/services — Show background service status \\(running/dead, PID, port\\)\n"
         "/today — Summary of last 24h: goals, cycles, blockers\n"
-        "/remind <duration> <text> — Set a reminder (e.g. `/remind 30m check deploy`)\n"
-        "/note <text> — Save a quick note (e.g. `/note review PR 125 tomorrow`)\n"
-        "/notes [query] — List recent notes or search (e.g. `/notes deploy`)\n"
+        "/remind <duration> <text> — Set a reminder \\(e\\.g\\. `/remind 30m check deploy`\\)\n"
+        "/note <text> — Save a quick note \\(e\\.g\\. `/note review PR 125 tomorrow`\\)\n"
+        "/notes \\[query\\] — List recent notes or search \\(e\\.g\\. `/notes deploy`\\)\n"
         "/heartbeat — Trigger an immediate agent cycle\n"
-        "/unblock <@username|chat\\_id> — Remove a user from the permanent block list\n"
+        "/unblock <@username\\|chat\\_id> — Remove a user from the permanent block list\n"
         "/help — Show this help message\n\n"
-        "_Any other message is queued as a goal for the next heartbeat._"
+        "_Any other message is queued as a goal for the next heartbeat\\._"
     )
-    tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="Markdown")
+    tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="MarkdownV2")
     append_chat_message(chat_history, from_chat, "bot", response)
     log.info(f"/help command served to @{from_user}")
 
@@ -1822,11 +1876,11 @@ def poll_updates(
                         "sendMessage",
                         chat_id=from_chat,
                         text=(
-                            "🔒 *This group is not authorized.*\n\n"
-                            "An already-authorized user needs to send any message here "
-                            "to grant this group access to the bot."
+                            "🔒 *This group is not authorized\\.*\n\n"
+                            "An already\\-authorized user needs to send any message here "
+                            "to grant this group access to the bot\\."
                         ),
-                        parse_mode="Markdown",
+                        parse_mode="MarkdownV2",
                     )
 
             # ── PRIVATE CHAT — owner auto-discovery (first-ever DM) ─────────────────
@@ -1874,11 +1928,11 @@ def poll_updates(
                         token,
                         "sendMessage",
                         chat_id=from_chat,
-                        parse_mode="Markdown",
+                        parse_mode="MarkdownV2",
                         text=(
                             "🔐 *Access pending*\n\n"
-                            "A 4-digit passcode was sent to the bot owner.\n"
-                            "Please enter that passcode here to gain access.\n\n"
+                            "A 4\\-digit passcode was sent to the bot owner\\.\n"
+                            "Please enter that passcode here to gain access\\.\n\n"
                             f"_{remaining} attempt{'s' if remaining != 1 else ''} remaining_"
                         ),
                     )
@@ -1978,12 +2032,12 @@ def poll_updates(
                         token,
                         "sendMessage",
                         chat_id=owner_chat_id,
-                        parse_mode="Markdown",
+                        parse_mode="MarkdownV2",
                         text=(
                             f"🔐 *New access request*\n"
-                            f"User @{from_user} (chat ID: `{from_chat}`) wants to connect.\n\n"
+                            f"User {mention_markdown(from_chat, from_user, version=2)} \\(chat ID: `{from_chat}`\\) wants to connect\\.\n\n"
                             f"Passcode: *{passcode}*\n\n"
-                            f"_(Max {MAX_PASSCODE_ATTEMPTS} attempts)_"
+                            f"_\\(Max {MAX_PASSCODE_ATTEMPTS} attempts\\)_"
                         ),
                     )
                     tg(
@@ -2092,7 +2146,7 @@ def send_outbox_messages(
         succeeded_cids = []
         for cid in chat_ids:
             result = tg(
-                token, "sendMessage", chat_id=cid, text=text, parse_mode="Markdown"
+                token, "sendMessage", chat_id=cid, text=text, parse_mode="MarkdownV2"
             )
             if result:
                 succeeded_cids.append(cid)
@@ -2146,13 +2200,12 @@ def _format_outbox_msg(msg: dict) -> str:
         lines.append(type_badges[msg_type])
 
     if subject:
-        lines.append(f"*{subject}*")
+        lines.append(f"*{escape_markdown_v2(subject)}*")
 
     if content:
-        lines.append(content)
+        lines.append(escape_markdown_v2(content))
 
-    formatted = "\n".join(lines) if lines else json.dumps(msg, indent=2)
-    return protect_urls_in_markdown(formatted)
+    return "\n".join(lines) if lines else escape_markdown_v2(json.dumps(msg, indent=2))
 
 
 # ---------------------------------------------------------------------------
