@@ -8,12 +8,36 @@ import streamlit as st
 
 
 def render():
+    import json
+    import os
+    import time
     from pathlib import Path
 
     from pykeepass import PyKeePass, create_database
+    from scripts.keepass import get_credential_entry as _ph_get_entry
+    from scripts.keepass import store_credential as _ph_store_credential
 
     KEEPASS_DIR = Path("/home/agent/.keepass")
     DB_PATH = KEEPASS_DIR / "credentials.kdbx"
+    CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
+
+    def _update_claude_settings_env(var_name: str, value: str) -> tuple[bool, str]:
+        """Write `env[var_name] = value` into ~/.claude/settings.json, preserving other keys."""
+        try:
+            CLAUDE_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            if CLAUDE_SETTINGS_PATH.exists():
+                raw = CLAUDE_SETTINGS_PATH.read_text()
+                data = json.loads(raw) if raw.strip() else {}
+            else:
+                data = {}
+            env = data.setdefault("env", {})
+            env[var_name] = value
+            tmp_path = CLAUDE_SETTINGS_PATH.with_suffix(".json.tmp")
+            tmp_path.write_text(json.dumps(data, indent=2) + "\n")
+            os.replace(tmp_path, CLAUDE_SETTINGS_PATH)
+            return True, str(CLAUDE_SETTINGS_PATH)
+        except Exception as exc:
+            return False, str(exc)
 
     # ── Init guard ────────────────────────────────────────────────
     if not DB_PATH.exists():
@@ -300,6 +324,79 @@ def render():
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Failed to save SSH key: {exc}")
+
+    # ── PostHog API key ────────────────────────────────────────────
+    st.divider()
+    st.subheader("PostHog API key")
+
+    PH_KEEPASS_TITLE = "POSTHOG_API_KEY_1"
+    PH_KEEPASS_GROUP = "API Keys"
+    PH_ENV_VAR = "POSTHOG_API_KEY"
+
+    ph_cache_ts = st.session_state.get("ph_cred_check_ts", 0)
+    if time.time() - ph_cache_ts > 60 or "ph_cred_data" not in st.session_state:
+        st.session_state["ph_cred_data"] = _ph_get_entry(PH_KEEPASS_TITLE)
+        st.session_state["ph_cred_check_ts"] = time.time()
+
+    ph_cred = st.session_state.get("ph_cred_data")
+
+    def _ph_save(label: str, key: str) -> None:
+        saved_ok = _ph_store_credential(
+            PH_KEEPASS_TITLE,
+            label,
+            key,
+            group=PH_KEEPASS_GROUP,
+        )
+        if not saved_ok:
+            st.error("Failed to save key to KeePass.")
+            return
+        ok, detail = _update_claude_settings_env(PH_ENV_VAR, key)
+        if ok:
+            st.success(
+                "Key saved to KeePass and written to `~/.claude/settings.json`. "
+                "The posthog MCP server will pick it up on the next Claude Code session."
+            )
+        else:
+            st.warning(
+                f"Key saved to KeePass, but failed to update `~/.claude/settings.json`: {detail}"
+            )
+        for k in ("ph_cred_data", "ph_cred_check_ts", "ph_replace"):
+            st.session_state.pop(k, None)
+        st.rerun()
+
+    if ph_cred is not None:
+        ph_label = ph_cred.get("username", "")
+        st.success(f"PostHog API key stored for **{ph_label}**.")
+
+        if st.button("Replace Key", key="ph_replace_btn"):
+            st.session_state["ph_replace"] = True
+            st.rerun()
+
+        if st.session_state.get("ph_replace", False):
+            with st.form("ph_replace_form", clear_on_submit=True):
+                new_ph_label = st.text_input("Label / account", value=ph_label)
+                new_ph_key = st.text_input("New API key", type="password")
+                replace_submitted = st.form_submit_button("Save")
+            if replace_submitted:
+                if not new_ph_label.strip() or not new_ph_key.strip():
+                    st.error("Label and API key are required.")
+                else:
+                    _ph_save(new_ph_label.strip(), new_ph_key.strip())
+    else:
+        st.caption(
+            "Paste a PostHog Personal API key. It will be saved to KeePass and "
+            "written to `~/.claude/settings.json` so the `posthog` MCP server "
+            "picks it up on the next Claude Code session."
+        )
+        with st.form("ph_add_form", clear_on_submit=True):
+            ph_label = st.text_input("Label / account")
+            ph_key = st.text_input("Personal API key", type="password")
+            ph_submitted = st.form_submit_button("Save")
+        if ph_submitted:
+            if not ph_label.strip() or not ph_key.strip():
+                st.error("Label and API key are required.")
+            else:
+                _ph_save(ph_label.strip(), ph_key.strip())
 
     # ── Replace Database ───────────────────────────────────────────
     st.divider()
