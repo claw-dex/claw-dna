@@ -1452,7 +1452,12 @@ def handle_notes_command(
         preview = content[:80].replace("\n", " ")
         if len(content) > 80:
             preview += "..."
-        tag_str = f" _\\#{' \\#'.join(escape_markdown_v2(t) for t in tags)}_" if tags else ""
+        if tags:
+            tag_sep = " \\#"
+            tag_joined = tag_sep.join(escape_markdown_v2(t) for t in tags)
+            tag_str = f" _\\#{tag_joined}_"
+        else:
+            tag_str = ""
         lines.append(f"• *{escape_markdown_v2(title)}*{tag_str}")
         if preview and preview != title:
             lines.append(f"  {escape_markdown_v2(preview)}")
