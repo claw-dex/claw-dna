@@ -7,7 +7,7 @@ Automates the repetitive boilerplate from cycle-close.md:
   2. Updates state.json (cycle_number, status, last_cycle_summary, last_cycle_type)
   3. Appends a journal entry to journal.json
   4. Normalizes cycles.json schema (inlined — no subprocess)
-  5. (Removed — outbox archiving is now manual via the portal)
+  5. Archives inbox.json items to inbox_history.json, then clears inbox.json
   6. Checks for stale tab/test/script counts and warns when drift is found
   7. Auto-backs up memory files if last backup >1h old (inlined — no subprocess)
   8. Reports what was written
@@ -153,6 +153,57 @@ def _run_normalize_inlined(cycles_path: Path, verbose: bool = True) -> int:
         return total_changes
     except Exception:
         return 0
+
+
+# ── Inbox archiving ─────────────────────────────────────────────────────────
+
+
+def _archive_inbox() -> int:
+    """Archive /agent/messages/inbox.json to inbox_history.json, then clear inbox.
+
+    Appends current inbox items to inbox_history.json (created as [] if missing),
+    then writes [] back to inbox.json. Returns the number of items archived,
+    or -1 on failure (caller can distinguish "nothing to do" from "data at risk").
+    Returns 0 when inbox is missing or already empty.
+    """
+    inbox_path = Path("/agent/messages/inbox.json")
+    history_path = Path("/agent/messages/inbox_history.json")
+
+    if not inbox_path.exists():
+        return 0
+    try:
+        items = json.loads(inbox_path.read_text())
+    except Exception as e:
+        print(f"  ⚠ inbox archive — failed to read inbox.json: {e}")
+        return -1
+    if not isinstance(items, list) or not items:
+        return 0
+
+    history = []
+    if history_path.exists():
+        try:
+            loaded = json.loads(history_path.read_text())
+        except Exception as e:
+            print(f"  ⚠ inbox archive — failed to read inbox_history.json: {e}")
+            return -1
+        if not isinstance(loaded, list):
+            print(
+                "  ⚠ inbox archive — inbox_history.json is not a list; aborting to avoid overwriting"
+            )
+            return -1
+        history = loaded
+
+    history.extend(items)
+    write_atomic(history_path, history)
+    tmp_inbox = inbox_path.with_suffix(inbox_path.suffix + ".tmp")
+    try:
+        tmp_inbox.write_text("[]")
+        tmp_inbox.rename(inbox_path)
+    except Exception as e:
+        tmp_inbox.unlink(missing_ok=True)
+        print(f"  ⚠ inbox archive — failed to clear inbox.json: {e}")
+        return -1
+    return len(items)
 
 
 # ── Argument parsing (no external deps) ─────────────────────────────────────
@@ -720,8 +771,18 @@ def main():
         except Exception as e:
             print(f"  ⚠ normalize failed (non-fatal): {e}")
 
-    # 5. (Removed) Outbox archiving is now manual via the portal's "Clear All" button,
-    #    which archives to outbox_history.json before clearing.
+    # 5. Archive inbox.json → inbox_history.json (goal cycles only;
+    #    evolve/self-heal cycles must not touch inbox so pending user commands survive)
+    if opts["type"] == "goal":
+        archived_n = _archive_inbox()
+        if archived_n > 0:
+            print(
+                f"  ✓ inbox archive — {archived_n} item(s) appended to inbox_history.json, inbox cleared"
+            )
+        elif archived_n < 0:
+            print(
+                "  ⚠ inbox archive — FAILED; inbox left intact for next cycle to retry"
+            )
 
     # 6. Stale-count check (always — catches drift from any cycle type)
     check_stale_counts()

@@ -302,19 +302,24 @@ build_task_prompt() {
             echo ""
             echo "<your_inbox_messages>"
             echo "(sorted by priority, 1=highest)"
-            jq 'sort_by(.priority // 3)' /agent/messages/inbox.json 2>/dev/null || cat /agent/messages/inbox.json 2>/dev/null || echo '[]'
+            jq '[.[] | select(.type != "goal")] | sort_by(.priority // 3)' /agent/messages/inbox.json 2>/dev/null || echo '[]'
             echo "</your_inbox_messages>"
             echo ""
-            echo "<your_current_goals>"
-            jq '[.[] | select(.status == "pending" or .status == "in-progress" or .status == "in_progress")] | sort_by(.created_at) | .[0:10]' /agent/memory/goal.json 2>/dev/null || echo '[]'
-            echo "</your_current_goals>"
+            echo "<new_goals_to_start>"
+            echo "(sorted by priority, 1=highest)"
+            jq '[.[] | select(.type == "goal")] | sort_by(.priority // 3)' /agent/messages/inbox.json 2>/dev/null || echo '[]'
+            echo "</new_goals_to_start>"
+            echo ""
+            echo "<previous_unfinished_goals>"
+            jq '[.[] | select(.status == "pending" or .status == "in-progress" or .status == "in_progress")] | sort_by(.created_at) | .[0:5]' /agent/memory/goal.json 2>/dev/null || echo '[]'
+            echo "</previous_unfinished_goals>"
             ;;
         evolve)
             cat /agent/prompts/evolve.md
             echo ""
             echo "<your_past_goals>"
             echo "(completed/failed goals, sorted by created_at)"
-            jq '[.[] | select(.status == "completed" or .status == "failed")] | sort_by(.created_at) | .[0:10]' /agent/memory/goal.json 2>/dev/null || echo '[]'
+            jq '[.[] | select(.status == "completed" or .status == "failed")] | sort_by(.created_at) | .[0:20]' /agent/memory/goal.json 2>/dev/null || echo '[]'
             echo "</your_past_goals>"
             ;;
     esac

@@ -1,4 +1,4 @@
-"""Message loaders — inbox, outbox, outbox_history, history."""
+"""Message loaders — inbox, inbox_history, outbox, outbox_history, history."""
 
 from app.data._cache import _mfile_cache
 from app.shared import MEMORY_DIR, MESSAGES_DIR, HISTORY_PATH
@@ -7,6 +7,12 @@ from app.shared import MEMORY_DIR, MESSAGES_DIR, HISTORY_PATH
 @_mfile_cache(lambda: f"{MESSAGES_DIR}/inbox.json", list)
 def load_inbox(data):
     """Load inbox.json — mtime-cached, 0 reads between user commands."""
+    return data
+
+
+@_mfile_cache(lambda: f"{MESSAGES_DIR}/inbox_history.json", list)
+def load_inbox_history(data):
+    """Load inbox_history.json — mtime-cached, 0 parses between cycle writes."""
     return data
 
 

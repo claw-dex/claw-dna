@@ -295,6 +295,7 @@ def test_data_loaders():
         ("load_state", dict, "state"),
         ("load_goals", list, "goals"),
         ("load_inbox", list, "inbox"),
+        ("load_inbox_history", list, "inbox_history"),
         ("load_outbox", list, "outbox"),
         ("load_cycles", list, "cycles"),
         ("load_journal", dict, "journal"),

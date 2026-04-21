@@ -4,6 +4,7 @@ Tab: Command Center — goal/message form, scheduled tasks, goals, inbox/outbox,
 Enum Reference: See prompts/enum.md → Message Type for valid command types, Goal Status for status values.
 """
 
+import json
 from datetime import datetime, timezone
 
 import streamlit as st
@@ -35,6 +36,7 @@ def render():
     from app.data import (
         load_goals,
         load_inbox,
+        load_inbox_history,
         load_outbox,
         load_outbox_history,
         load_history,
@@ -91,18 +93,51 @@ def render():
             label_visibility="collapsed",
         )
     cmd_history = load_history() or []
+    inbox_hist = load_inbox_history() or []
     outbox_hist = load_outbox_history() or []
 
-    # Merge user commands and agent responses into a unified timeline
+    # Merge user commands and agent responses into a unified timeline.
+    # command_history.json tracks portal-queued commands; inbox_history.json
+    # is the archived inbox from cycle_close and captures items from all
+    # sources (portal, Telegram, etc). Dedupe by (timestamp, content) so
+    # portal-queued items aren't shown twice.
     events = []
+    seen_user_keys = set()
     for cmd in cmd_history:
         ts = cmd.get("timestamp", "")
+        content = cmd.get("content", "")
+        seen_user_keys.add((ts, content))
         events.append(
             {
                 "ts": ts,
                 "role": "user",
                 "type": cmd.get("type", "?"),
-                "content": cmd.get("content", ""),
+                "content": content,
+            }
+        )
+    for item in inbox_hist:
+        ts = item.get("timestamp", "")
+        raw_content = item.get("content", "")
+        # Coerce non-string content (dicts/lists from non-portal producers) so
+        # the render path's len()/slice ops don't crash the whole tab.
+        if isinstance(raw_content, str):
+            content = raw_content
+        elif raw_content is None:
+            content = ""
+        else:
+            try:
+                content = json.dumps(raw_content, default=str)
+            except Exception:
+                content = str(raw_content)
+        if (ts, content) in seen_user_keys:
+            continue
+        events.append(
+            {
+                "ts": ts,
+                "role": "user",
+                "type": item.get("type", "message"),
+                "content": content,
+                "source": item.get("source") or item.get("channel") or "",
             }
         )
     for msg in outbox_hist:
@@ -118,7 +153,7 @@ def render():
                 "content": content,
             }
         )
-    events.sort(key=lambda e: e.get("ts", ""))
+    events.sort(key=lambda e: str(e.get("ts") or ""))
 
     if not events:
         st.caption("No command history yet.")
@@ -127,7 +162,10 @@ def render():
         for ev in reversed(events[-show_n:]):
             ts_str = str(ev.get("ts", ""))[:19].replace("T", " ")
             if ev["role"] == "user":
-                label = f"**You** [{ev['type']}]  ·  {ts_str}"
+                src = ev.get("source", "")
+                label = f"**You** [{ev['type']}]  ·  {ts_str}" + (
+                    f"  ·  _{src}_" if src else ""
+                )
                 with st.chat_message("user"):
                     st.caption(label)
                     st.write(

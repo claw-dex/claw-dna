@@ -33,6 +33,7 @@ from app.data.journal import load_journal  # noqa: F401
 # Messages
 from app.data.message import (  # noqa: F401
     load_inbox,
+    load_inbox_history,
     load_outbox,
     load_outbox_history,
     load_history,

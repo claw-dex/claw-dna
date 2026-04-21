@@ -4,45 +4,48 @@
 
 This prompt is triggered when either:
 
-- **New commands** are waiting in /agent/messages/inbox.json, OR
-- **In-progress goals** exist in /agent/memory/goal.json (inbox may be empty)
+- **New commands** are waiting in `/agent/messages/inbox.json`, OR
+- **In-progress goals** exist in `/agent/memory/goal.json` (inbox may be empty)
+
+Important: do **not** re-parse `inbox.json` to discover new goals or messages. They are already parsed and provided in this prompt.
 
 ## Cycle Start (run this first)
 
 ```bash
-uv run python scripts/cycle_start.py        # status, goals, inbox, recent journal, repair + evolve recommendation
+uv run python scripts/cycle_start.py --mode goal        # status, goals, inbox, recent journal
 ```
 
 Review the output before proceeding. If memory-repair reports any fixes, note them in your journal.
 
 ## Step 0: Determine Mode
 
-Read `/agent/messages/inbox.json` and `/agent/memory/goal.json`.
+Inspect the three pre-extracted sections of this prompt:
 
-- If inbox has items → process them first (see "Processing Rules" below)
-- If inbox is empty but goals are in-progress → skip to "Continue In-Progress Goals"
-- If both have items → process inbox first, then continue goals
+- If `<new_goals_to_start>` has items → process them via "New Goals" rules below
+- If `<your_inbox_messages>` has items → process them via "Inbox Messages" rules below
+- If both `<new_goals_to_start>` and `<your_inbox_messages>` are empty but `<previous_unfinished_goals>` has items → skip to "Continue In-Progress Goals"
+- If multiple sections have items → process new goals first, then messages, then continue in-progress goals
 
 ## Command Schema
 
-Commands arrive via POST /api/command with this schema:
+Commands arrive via the `inbox.json` with this schema:
 
 ```json
 {"type": "<string>", "content": "<string>", "timestamp": "<ISO 8601>"}
 ```
 
-Three command types exist (see `prompts/enum.md` → Message Type):
+The system splits inbox commands by type and delivers them in two prompt sections (see `prompts/enum.md` → Message Type):
 
-- **"goal"** — a trackable objective; queued in /agent/messages/inbox.json.
-  You are responsible for saving it to /agent/memory/goal.json (see Goal Tracking below)
-- **"message"** — a conversational message (question, context, feedback);
-  queued in /agent/messages/inbox.json but NOT tracked in goal.json
+- **"goal"** — a trackable objective; appears in `<new_goals_to_start>`.
+  You are responsible for saving it to `/agent/memory/goal.json` (see Goal Tracking below)
+- **"message"** — a conversational message (question, context, feedback, events, etc);
+  appears in `<your_inbox_messages>` and is NOT tracked in goal.json
 
 ## Processing Rules
 
-Read /agent/messages/inbox.json. For each command:
+### New Goals
 
-### Command: type "goal"
+For each item in `<new_goals_to_start>`:
 
 1. Read the "content" field — this is your new objective
 2. If content starts with "abort", immediately stop any current goal,
@@ -68,12 +71,11 @@ Read /agent/messages/inbox.json. For each command:
       | Start / manage a background service or long-running process | `scripts/service_manager.py start <name> <port> -- <cmd>` |
       | System maintenance / housekeeping | `scripts/maintain.py --fix` |
       | Agent growth summary / milestone report | `scripts/milestone_report.py` |
-      | Unanswered `needs_human` outbox message | Check `callmebot` skill for voice call escalation |
    g. Execute all steps (or as much as fits in one cycle)
    h. Update `state.json` -> `current_goal` with the current goal/task in this format: `{goal-id} A short task description no more than 20 words` (concise and short)
    i. Write journal entry with plan and progress
    j. **If goal is completed:** write a summary to `/agent/messages/outbox.json` so the user knows it's done and where to find results. Then read `/agent/prompts/post-goal-review.md` and add a Review line.
-   k. **If goal failed:** set status to "failed" in goal.json; write explanation to outbox.json; log failure in journal entry with diagnosis and prevention
+   k. **If goal failed:** set status to "failed" in goal.json; write explanation to `outbox.json`; log failure in journal entry with diagnosis and prevention. If goal failed due to an action that requires human intervention, must set `needs_human` to true.
 
 ### Multi-Step Goals (Requiring Multiple Specialist Prompts)
 
@@ -90,7 +92,9 @@ When a goal spans phases:
 - Set goal status to "in_progress" between phases
 - Begin each subsequent cycle by reading journal for last phase's output before continuing
 
-### Command: type "message"
+### Inbox Messages
+
+For each item in `<your_inbox_messages>`:
 
 Messages are conversational — they do NOT create trackable goals.
 
@@ -117,7 +121,7 @@ ask for clarification in the outbox rather than auto-creating a goal.
 
 ## Goal Tracking
 
-You are responsible for managing `/agent/memory/goal.json`. The server does NOT
+You are responsible for managing `/agent/memory/goal.json`. The system does NOT
 write to this file — it only queues goals in the inbox. You must save goals to
 goal.json yourself and manage their lifecycle.
 
@@ -159,17 +163,15 @@ update the `status` and `updated_at` fields, then write the file back.
 
 ## Continue In-Progress Goals
 
-When the inbox is empty (or after processing inbox items), check goal.json
-for goals with status "pending" or "in_progress":
+After processing `<new_goals_to_start>` and `<your_inbox_messages>` (or if both are empty), work through `<previous_unfinished_goals>`:
 
-1. Read `/agent/memory/goal.json`
-2. Find the oldest goal with status "in_progress" (or "pending" if none in-progress)
-3. Read `state.json` -> `last_cycle_summary` — this tells you what was done last cycle
-4. Read journal.json for the most recent entry to understand current progress
-5. Continue working from where you left off
-6. Update `state.json` -> `status` and `current_goal` as you make progress
-7. If the goal is complete, set status to "completed" and `updated_at` to now
-8. After completing a non-trivial goal, read `/agent/prompts/post-goal-review.md` and add a Review line to your journal
+1. Pick the oldest goal with status "in_progress" (or "pending" if none in-progress) from `<previous_unfinished_goals>`
+2. Read `state.json` -> `last_cycle_summary` — this tells you what was done last cycle
+3. Read `journal.json` for the recent entries to understand current progress
+4. Continue working from where you left off
+5. Update `state.json` -> `status` and `current_goal` as you make progress
+6. If the goal is complete, update `/agent/memory/goal.json` to set status to "completed" and `updated_at` to now
+7. After completing a non-trivial goal, read `/agent/prompts/post-goal-review.md` and add a Review line to your journal
 
 **Key principle:** Do not re-plan work that was already planned. Read your
 previous journal entries to understand what phase you're in and continue.
@@ -193,11 +195,7 @@ See the `callmebot` skill for setup instructions and full details.
 
 ## After Processing
 
-IMPORTANT: Clear the inbox after processing all commands:
-
-```bash
-echo '[]' > /agent/messages/inbox.json
-```
+You do **not** need to clear or archive `inbox.json` manually. `scripts/cycle_close.py` (run at the end of every cycle) appends any remaining inbox items to `inbox_history.json` and resets `inbox.json` to `[]` automatically.
 
 Then work on the current goal (if any). Focus on making measurable
 progress in this cycle. If the goal will take multiple cycles, update

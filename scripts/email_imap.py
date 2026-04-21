@@ -116,9 +116,18 @@ def _connect_and_login(timeout=25):
         return None, None
 
 
+def _quote_mailbox(mailbox):
+    """Quote a mailbox name per RFC 3501 if it contains spaces or special characters."""
+    if " " in mailbox or any(c in mailbox for c in '(){}%*"\\'):
+        mailbox = mailbox.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{mailbox}"'
+    return mailbox
+
+
 def _select_mailbox(conn, mailbox, readonly):
     """Select a mailbox and return True on success."""
-    status, _ = conn.select(mailbox, readonly=readonly)
+    quoted = _quote_mailbox(mailbox)
+    status, _ = conn.select(quoted, readonly=readonly)
     if status != "OK":
         _print_json({"error": f"Cannot select mailbox '{mailbox}'"})
         return False
