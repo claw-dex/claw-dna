@@ -633,7 +633,7 @@ def build_chat_context(history: dict, chat_id: str) -> str:
     lines = []
     for m in selected:
         label = "User" if m["role"] == "user" else "Agent"
-        lines.append(f"{label}: {m['text']}")
+        lines.append(f"<message>{label}: {m['text']}</message>")
 
     return "\n".join(lines)
 
@@ -893,7 +893,11 @@ def handle_status_command(
             status, "❓"
         )
 
-        hb_display = escape_markdown_v2(last_hb[:19]) if last_hb and last_hb != "unknown" else "unknown"
+        hb_display = (
+            escape_markdown_v2(last_hb[:19])
+            if last_hb and last_hb != "unknown"
+            else "unknown"
+        )
         lines = [
             f"{status_emoji} *Agent Status*",
             f"Cycle: \\#{cycle_num}  \\|  Status: `{status}`",
@@ -1012,7 +1016,9 @@ def handle_journal_command(
             if len(summary) > 120:
                 summary = summary[:117] + "..."
             ts = (e.get("timestamp", "") or "")[:10]
-            summary_display = escape_markdown_v2(summary) if summary else "\\(no summary\\)"
+            summary_display = (
+                escape_markdown_v2(summary) if summary else "\\(no summary\\)"
+            )
             lines.append(
                 f"{emoji} *\\#{cycle_num}*{cat_label} — {summary_display} _{escape_markdown_v2(ts)}_"
             )
@@ -1169,7 +1175,9 @@ def handle_outbox_command(
             display = subject if subject else content
             if len(display) > 100:
                 display = display[:97] + "..."
-            lines.append(f"{emoji} `{mtype}` — {escape_markdown_v2(display)} _{escape_markdown_v2(ts)}_")
+            lines.append(
+                f"{emoji} `{mtype}` — {escape_markdown_v2(display)} _{escape_markdown_v2(ts)}_"
+            )
 
         response = "\n".join(lines)
         tg(
@@ -1226,7 +1234,9 @@ def handle_cycles_command(
             dur_str = f"{dur}s" if dur is not None else "?"
             label = f"{ctype}/{cat}" if cat else ctype
 
-            lines.append(f"{emoji} *\\#{num}* `{escape_markdown_v2(label, entity_type='code')}` — {escape_markdown_v2(dur_str)}")
+            lines.append(
+                f"{emoji} *\\#{num}* `{escape_markdown_v2(label, entity_type='code')}` — {escape_markdown_v2(dur_str)}"
+            )
             if summary:
                 lines.append(f"   _{escape_markdown_v2(summary)}_")
 
@@ -1291,7 +1301,9 @@ def handle_services_command(
                 escaped_meta = [escape_markdown_v2(m) for m in meta]
                 meta_str = f" _\\({', '.join(escaped_meta)}\\)_" if escaped_meta else ""
 
-                lines.append(f"{status_icon} `{name}` — {escape_markdown_v2(status_label)}{meta_str}")
+                lines.append(
+                    f"{status_icon} `{name}` — {escape_markdown_v2(status_label)}{meta_str}"
+                )
 
             response = "\n".join(lines)
 
@@ -1430,7 +1442,9 @@ def handle_notes_command(
 
     if not notes:
         response = (
-            "No notes found\\." if not args else f"No notes matching _{escape_markdown_v2(' '.join(args))}_\\."
+            "No notes found\\."
+            if not args
+            else f"No notes matching _{escape_markdown_v2(' '.join(args))}_\\."
         )
         tg(
             token,

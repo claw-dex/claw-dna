@@ -55,6 +55,14 @@ def render():
                 if saved:
                     st.success(f"Uploaded {len(saved)} file(s): {', '.join(saved)}")
 
-    components.iframe("/_/agent/workspace/", height=1000, scrolling=True)
+    col1, col2 = st.columns([1, 8])
+    with col1:
+        if st.button("↺ Refresh", key="workspace_refresh"):
+            st.session_state["workspace_iframe_v"] = (
+                st.session_state.get("workspace_iframe_v", 0) + 1
+            )
+    with col2:
+        st.link_button("Open in new tab", "/_/agent/workspace/")
 
-    st.link_button("Open in new tab", "/_/agent/workspace/")
+    v = st.session_state.get("workspace_iframe_v", 0)
+    components.iframe(f"/_/agent/workspace/?v={v}", height=1000, scrolling=True)
