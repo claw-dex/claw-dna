@@ -1,6 +1,6 @@
 #!/bin/bash
 # Memvid Installer for macOS and Linux
-# v1 - System package managers only, install-if-missing
+# Builds memvid from source using the Rush toolchain
 
 set -e
 
@@ -151,52 +151,20 @@ install_system_deps() {
             NEEDS_DEPS=true
             DEPS_TO_INSTALL+=("ca-certificates")
         fi
-        if ! command_exists curl; then
-            NEEDS_DEPS=true
-            DEPS_TO_INSTALL+=("curl")
-        fi
-        if ! dpkg -l | grep -q "^ii.*libssl3"; then
-            NEEDS_DEPS=true
-            DEPS_TO_INSTALL+=("libssl3")
-        fi
     elif [[ "$DISTRO_FAMILY" == "rhel" ]]; then
         if ! rpm -q ca-certificates &>/dev/null; then
             NEEDS_DEPS=true
             DEPS_TO_INSTALL+=("ca-certificates")
-        fi
-        if ! command_exists curl; then
-            NEEDS_DEPS=true
-            DEPS_TO_INSTALL+=("curl")
-        fi
-        if ! rpm -q openssl &>/dev/null; then
-            NEEDS_DEPS=true
-            DEPS_TO_INSTALL+=("openssl")
         fi
     elif [[ "$DISTRO_FAMILY" == "arch" ]]; then
         if ! pacman -Q ca-certificates &>/dev/null; then
             NEEDS_DEPS=true
             DEPS_TO_INSTALL+=("ca-certificates")
         fi
-        if ! command_exists curl; then
-            NEEDS_DEPS=true
-            DEPS_TO_INSTALL+=("curl")
-        fi
-        if ! pacman -Q openssl &>/dev/null; then
-            NEEDS_DEPS=true
-            DEPS_TO_INSTALL+=("openssl")
-        fi
     elif [[ "$DISTRO_FAMILY" == "alpine" ]]; then
         if ! apk info -e ca-certificates &>/dev/null; then
             NEEDS_DEPS=true
             DEPS_TO_INSTALL+=("ca-certificates")
-        fi
-        if ! command_exists curl; then
-            NEEDS_DEPS=true
-            DEPS_TO_INSTALL+=("curl")
-        fi
-        if ! apk info -e openssl &>/dev/null; then
-            NEEDS_DEPS=true
-            DEPS_TO_INSTALL+=("openssl")
         fi
     fi
     
@@ -237,33 +205,6 @@ check_git() {
     fi
 }
 
-# Check for node
-check_node() {
-    if command_exists node; then
-        NODE_VERSION=$(node --version)
-        print_success "node already installed ($NODE_VERSION)"
-        
-        # Check if it's LTS (rough check - version should be even major version)
-        MAJOR_VERSION=$(echo "$NODE_VERSION" | cut -d'v' -f2 | cut -d'.' -f1)
-        if [ "$((MAJOR_VERSION % 2))" -eq 0 ]; then
-            print_info "Node version appears to be LTS-compatible"
-        fi
-        
-        # Check for npm
-        if command_exists npm; then
-            NPM_VERSION=$(npm --version)
-            print_success "npm already installed (version $NPM_VERSION)"
-            return 0
-        else
-            print_error "npm not found (should come with node)"
-            return 1
-        fi
-    else
-        print_error "node not found"
-        return 1
-    fi
-}
-
 # Install git
 install_git() {
     print_info "Installing git using $PKG_MANAGER..."
@@ -295,63 +236,6 @@ install_git() {
     fi
 }
 
-# Install node (LTS)
-install_node() {
-    print_info "Installing node (LTS) using $PKG_MANAGER..."
-    
-    if [[ "$OS" == "macos" ]]; then
-        brew install node@lts
-        # Add to PATH if needed
-        if ! command_exists node; then
-            print_info "Adding node to PATH..."
-            # Detect Homebrew prefix (Apple Silicon vs Intel)
-            if [[ -d "/opt/homebrew" ]]; then
-                BREW_PREFIX="/opt/homebrew"
-            else
-                BREW_PREFIX="/usr/local"
-            fi
-            
-            # Detect shell
-            if [[ "$SHELL" == *"zsh"* ]]; then
-                SHELL_RC="$HOME/.zshrc"
-            else
-                SHELL_RC="$HOME/.bash_profile"
-            fi
-            
-            echo "export PATH=\"$BREW_PREFIX/opt/node@lts/bin:\$PATH\"" >> "$SHELL_RC"
-            export PATH="$BREW_PREFIX/opt/node@lts/bin:$PATH"
-        fi
-    elif [[ "$OS" == "linux" ]]; then
-        if [[ "$DISTRO_FAMILY" == "debian" ]]; then
-            # Install Node.js LTS from NodeSource
-            curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
-            sudo apt-get install -y --no-install-recommends nodejs
-        elif [[ "$DISTRO_FAMILY" == "rhel" ]]; then
-            # Install Node.js LTS from NodeSource
-            curl -fsSL https://rpm.nodesource.com/setup_lts.x | sudo -E bash -
-            sudo dnf install -y nodejs
-        elif [[ "$DISTRO_FAMILY" == "arch" ]]; then
-            sudo pacman -S --noconfirm nodejs npm
-        elif [[ "$DISTRO_FAMILY" == "alpine" ]]; then
-            if command_exists sudo; then
-                sudo apk add --no-cache nodejs npm
-            else
-                apk add --no-cache nodejs npm
-            fi
-        fi
-    fi
-    
-    if command_exists node && command_exists npm; then
-        NODE_VERSION=$(node --version)
-        NPM_VERSION=$(npm --version)
-        print_success "node installed successfully ($NODE_VERSION)"
-        print_success "npm installed successfully (version $NPM_VERSION)"
-    else
-        print_error "node installation failed"
-        exit 1
-    fi
-}
-
 # Check if memvid is already installed
 check_memvid() {
     if command_exists memvid; then
@@ -368,80 +252,105 @@ check_memvid() {
 # Install missing tools
 install_missing() {
     NEEDS_GIT=false
-    NEEDS_NODE=false
     NEEDS_MEMVID=false
-    
+
     if ! check_git; then
         NEEDS_GIT=true
     fi
-    
-    if ! check_node; then
-        NEEDS_NODE=true
-    fi
-    
+
     if ! check_memvid; then
         NEEDS_MEMVID=true
     fi
-    
-    if [[ "$NEEDS_GIT" == false ]] && [[ "$NEEDS_NODE" == false ]] && [[ "$NEEDS_MEMVID" == false ]]; then
+
+    if [[ "$NEEDS_GIT" == false ]] && [[ "$NEEDS_MEMVID" == false ]]; then
         print_info "All dependencies are already installed"
         return 0
     fi
-    
-    # Show what will be installed
-    echo ""
-    print_warning "The following tools will be installed:"
-    [[ "$NEEDS_GIT" == true ]] && echo "  - git"
-    [[ "$NEEDS_NODE" == true ]] && echo "  - node (LTS)"
-    [[ "$NEEDS_MEMVID" == true ]] && echo "  - memvid-cli (latest)"
-    echo ""
-    
-    # Ask for confirmation
-    # Read from /dev/tty to ensure it works when piped via curl | bash
-    if [[ -t 0 ]] && [[ -t 1 ]]; then
-        # Interactive terminal - read normally
-        REPLY="y"
-        echo
-    elif [[ -c /dev/tty ]]; then
-        # Piped input - read from terminal device
-        REPLY="y"
-        echo
-    else
-        # No terminal available - proceed automatically (non-interactive mode)
-        print_info "No terminal detected, proceeding with installation..."
-        REPLY="Y"
-    fi
-    if [[ ! $REPLY =~ ^[Yy]$ ]] && [[ ! $REPLY == "" ]]; then
-        print_info "Installation cancelled"
-        exit 0
-    fi
-    
-    # Install missing tools
+
     [[ "$NEEDS_GIT" == true ]] && install_git
-    [[ "$NEEDS_NODE" == true ]] && install_node
     [[ "$NEEDS_MEMVID" == true ]] && install_memvid
 }
 
-# Install memvid
+# Install memvid from source using Rush
 install_memvid() {
-    print_info "Installing memvid globally..."
-    
-    if [[ "$OS" == "linux" ]]; then
-        # Linux requires sudo for global npm installs
-        if sudo npm install -g memvid-cli@latest; then
-            print_success "memvid installed successfully"
-        else
-            print_error "memvid installation failed"
-            exit 1
-        fi
+    MEMVID_REPO="https://github.com/0xGosu/memvid.git"
+    MEMVID_SRC_DIR="${MEMVID_SRC_DIR:-$HOME/.memvid-src}"
+
+    print_info "Installing memvid from source..."
+    print_info "Repository: $MEMVID_REPO"
+    print_info "Source directory: $MEMVID_SRC_DIR"
+
+    if ! command_exists rush; then
+        print_error "rush not found in PATH"
+        print_info "Rush toolchain is required to build memvid from source"
+        exit 1
+    fi
+
+    # Clone or update the repo
+    if [[ -d "$MEMVID_SRC_DIR/.git" ]]; then
+        print_info "Updating existing clone at $MEMVID_SRC_DIR..."
+        git -C "$MEMVID_SRC_DIR" fetch --all --prune
+        git -C "$MEMVID_SRC_DIR" pull --ff-only
     else
-        # macOS typically doesn't need sudo if npm was installed via Homebrew
-        if npm install -g memvid-cli@latest; then
-            print_success "memvid installed successfully"
-        else
-            print_error "memvid installation failed"
-            exit 1
+        print_info "Cloning $MEMVID_REPO into $MEMVID_SRC_DIR..."
+        rm -rf "$MEMVID_SRC_DIR"
+        git clone "$MEMVID_REPO" "$MEMVID_SRC_DIR"
+    fi
+
+    # Build using Rush
+    (
+        cd "$MEMVID_SRC_DIR"
+        print_info "Running 'rush install'..."
+        rush install
+        print_info "Running 'rush build'..."
+        rush build
+    )
+
+    # Locate the built memvid binary
+    CLI_DIR="$MEMVID_SRC_DIR/packages/memvid-cli"
+    if [[ ! -d "$CLI_DIR" ]]; then
+        CLI_DIR=$(find "$MEMVID_SRC_DIR" -type d -name "memvid-cli" -not -path "*/node_modules/*" | head -n 1)
+    fi
+
+    if [[ -z "$CLI_DIR" ]] || [[ ! -f "$CLI_DIR/package.json" ]]; then
+        print_error "Could not locate memvid-cli package in $MEMVID_SRC_DIR"
+        exit 1
+    fi
+
+    # Resolve the bin entry from package.json (expected to be a file path)
+    MEMVID_BIN=""
+    for candidate in "$CLI_DIR/bin/memvid" "$CLI_DIR/bin/memvid.js" "$CLI_DIR/lib/cli.js" "$CLI_DIR/dist/cli.js"; do
+        if [[ -f "$candidate" ]]; then
+            MEMVID_BIN="$candidate"
+            break
         fi
+    done
+
+    if [[ -z "$MEMVID_BIN" ]]; then
+        print_error "Could not locate built memvid entry point under $CLI_DIR"
+        print_info "Expected one of: bin/memvid, bin/memvid.js, lib/cli.js, dist/cli.js"
+        exit 1
+    fi
+
+    chmod +x "$MEMVID_BIN" 2>/dev/null || true
+
+    # Install a symlink into a directory on PATH
+    TARGET_BIN_DIR="${MEMVID_BIN_DIR:-/usr/local/bin}"
+    TARGET_LINK="$TARGET_BIN_DIR/memvid"
+
+    print_info "Linking $MEMVID_BIN -> $TARGET_LINK..."
+    if [[ -w "$TARGET_BIN_DIR" ]]; then
+        ln -sf "$MEMVID_BIN" "$TARGET_LINK"
+    else
+        sudo ln -sf "$MEMVID_BIN" "$TARGET_LINK"
+    fi
+
+    if command_exists memvid; then
+        print_success "memvid installed successfully from source"
+    else
+        print_error "memvid installation failed (binary not on PATH)"
+        print_info "Ensure $TARGET_BIN_DIR is in your PATH, or set MEMVID_BIN_DIR to a directory that is"
+        exit 1
     fi
 }
 
@@ -452,7 +361,7 @@ verify() {
     if command_exists memvid; then
         # Get version - output format is "memvid 2.0.131"
         MEMVID_VERSION=$(memvid --version 2>&1 | awk '{print $2}')
-        
+
         print_success "memvid is installed and accessible"
         print_info "Version: $MEMVID_VERSION"
         echo ""
@@ -460,8 +369,7 @@ verify() {
     else
         print_error "memvid verification failed"
         print_info "The installation may have completed, but 'memvid' command is not in PATH"
-        print_info "Please check your npm global bin directory and add it to PATH if needed"
-        print_info "Or try: npm list -g memvid-cli"
+        print_info "Ensure the symlink target directory (default /usr/local/bin) is in your PATH"
         exit 1
     fi
 }

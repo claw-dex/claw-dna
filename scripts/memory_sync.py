@@ -266,6 +266,43 @@ def render_goals() -> str:
     return md
 
 
+def render_notes() -> str:
+    data = load_json(MEMORY / "notes.json")
+    if not isinstance(data, list):
+        return ""
+    md = frontmatter(
+        "Notes",
+        "This assistant's personal notes/scratchpad: titles, tags, and content (pinned first)",
+    )
+    if not data:
+        md += "No notes recorded yet.\n"
+        return md
+    # Sort: pinned first, then most-recently-updated first within each group
+    notes = sorted(data, key=lambda n: n.get("updated_at", ""), reverse=True)
+    notes = sorted(notes, key=lambda n: not n.get("pinned", False))
+
+    recent = notes[:25]
+    for n in recent:
+        pin = " [PINNED]" if n.get("pinned") else ""
+        title = n.get("title", "(untitled)")
+        nid = n.get("id", "?")
+        tags = n.get("tags", []) or []
+        updated = (n.get("updated_at", "") or "")[:16].replace("T", " ")
+        md += f"### {title}{pin}\n\n"
+        md += f"- **ID**: {nid}\n"
+        if tags:
+            md += f"- **Tags**: {', '.join(tags)}\n"
+        md += f"- **Updated**: {updated}\n\n"
+        content = n.get("content", "") or ""
+        if content:
+            md += f"{content}\n\n"
+        md += "---\n\n"
+    total = len(data)
+    if total > 25:
+        md += f"\n_{total - 25} earlier notes omitted._\n"
+    return md
+
+
 def _fmt_dur(seconds) -> str:
     if seconds is None:
         return ""
@@ -286,6 +323,7 @@ SYNC_MAP = {
     "cycles": ("cycles_memory.md", render_cycles),
     "journal": ("journal_memory.md", render_journal),
     "goals": ("goals_memory.md", render_goals),
+    "notes": ("notes_memory.md", render_notes),
 }
 
 

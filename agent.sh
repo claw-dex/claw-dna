@@ -167,9 +167,9 @@ claude_run() {
 
     # System prompt with auto-append from claude-system-prompt.md
     local final_system_prompt="$SYSTEM_PROMPT"
-    if [ -f "/home/agent/claude-system-prompt.md" ]; then
+    if [ -f "./claude-system-prompt.md" ]; then
         local claude_system_content
-        claude_system_content=$(cat /home/agent/claude-system-prompt.md)
+        claude_system_content=$(cat ./claude-system-prompt.md)
         local claude_system_block="<claude_system_prompt>
 ${claude_system_content}
 </claude_system_prompt>"
@@ -200,14 +200,37 @@ ${claude_system_block}"
         cmd_args+=("--output-format" "$OUTPUT_FORMAT")
     fi
 
+    # Memory prefix: prepend first 200 lines of ./memory/MEMORY.md to user prompt
+    # (per claude-system-prompt.md: MEMORY.md is always loaded into context, truncated at 200 lines)
+    local memory_block=""
+    if [ -f "./memory/MEMORY.md" ]; then
+        local memory_content
+        memory_content=$(head -n 200 ./memory/MEMORY.md)
+        if [ -n "$memory_content" ]; then
+            memory_block="<memory>
+${memory_content}
+</memory>
+
+"
+        fi
+    fi
+
     # Task prompt: prefer file redirection (avoids ARG_MAX), fall back to -p flag or no prompt
     # claude reads stdin as the user prompt when --output-format is set (non-interactive mode)
     if [ -n "$TASK_PROMPT_FILE" ]; then
-        run_cmd claude "${cmd_args[@]}" < "$TASK_PROMPT_FILE"
+        if [ -n "$memory_block" ]; then
+            { printf '%s' "$memory_block"; cat "$TASK_PROMPT_FILE"; } | run_cmd claude "${cmd_args[@]}"
+        else
+            run_cmd claude "${cmd_args[@]}" < "$TASK_PROMPT_FILE"
+        fi
     elif [ -n "$TASK_PROMPT" ]; then
-        printf '%s' "$TASK_PROMPT" | run_cmd claude "${cmd_args[@]}"
+        printf '%s%s' "$memory_block" "$TASK_PROMPT" | run_cmd claude "${cmd_args[@]}"
     else
-        run_cmd claude "${cmd_args[@]}"
+        if [ -n "$memory_block" ]; then
+            printf '%s' "$memory_block" | run_cmd claude "${cmd_args[@]}"
+        else
+            run_cmd claude "${cmd_args[@]}"
+        fi
     fi
 }
 
