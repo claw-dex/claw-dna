@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-memory_ingest.py — Ingest agent memory into long-term semantic store (memvid CLI).
+memory_ingest.py — Ingest agent memory into long-term semantic store (memvid SDK).
 
 Parses journal.json, cycles.json, and goal.json, chunks them into semantically
-meaningful pieces, and ingests into a .mv2 index via the `memvid` CLI
-(hybrid lexical + semantic search with bge-base embeddings).
+meaningful pieces, and ingests into a .mv2 index via the `memvid_sdk` Python
+package (hybrid lexical + semantic search with bge-base embeddings).
 
 Usage:
     uv run python scripts/memory_ingest.py --build                          # Full rebuild
@@ -33,17 +33,48 @@ Exit codes: 0 = success, 1 = error
 
 import json
 import shutil
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    import memvid_sdk
+except ImportError:
+    memvid_sdk = None
+
+
+def _require_sdk():
+    """Fail fast with a clear error when memvid_sdk is unavailable."""
+    if memvid_sdk is None:
+        print(
+            "ERROR: memvid_sdk not installed (not available on this runtime). "
+            "Install from https://github.com/0xGosu/memvid-sdk",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 MEMORY = Path("/agent/memory")
 DEFAULT_MV2 = MEMORY / "long_term_memory.mv2"
-MEMVID_BIN = "memvid"
 EMBED_MODEL = "bge-base"
 
-# Supported extensions for memvid --input ingestion (used by --append-file)
+# Enable vector compression only once the .mv2 grows past this size.
+# Below the threshold, uncompressed vectors (~270 KB/doc) give the best
+# search quality; above it, compression (~20 KB/doc, 16x savings) keeps
+# the file from growing unbounded.
+COMPRESSION_THRESHOLD_MB = 25
+
+
+def _should_compress(mv2_path) -> bool:
+    """Return True when the .mv2 is large enough to warrant compression."""
+    try:
+        p = Path(mv2_path)
+        return p.exists() and p.stat().st_size > COMPRESSION_THRESHOLD_MB * 1024 * 1024
+    except OSError:
+        return False
+
+
+# Supported extensions for file ingestion (used by --append-file)
 INGESTIBLE_EXTENSIONS = frozenset(
     {
         ".pdf",
@@ -59,15 +90,30 @@ INGESTIBLE_EXTENSIONS = frozenset(
         ".mp4",
     }
 )
-COMPRESSION_THRESHOLD = 1_048_576  # 1 MB
 
 
-def _check_memvid():
-    """Ensure the memvid CLI is available."""
-    if not shutil.which(MEMVID_BIN):
-        print("ERROR: memvid CLI not found. Install with:", file=sys.stderr)
-        print("  npm install -g memvid-cli@latest", file=sys.stderr)
-        sys.exit(1)
+def _open_or_create(mv2: Path):
+    """Open an existing .mv2 for write, or create a new one if missing."""
+    _require_sdk()
+    if mv2.exists():
+        return memvid_sdk.use(
+            "basic",
+            str(mv2),
+            mode="open",
+            enable_vec=True,
+            enable_lex=True,
+        )
+    mv2.parent.mkdir(parents=True, exist_ok=True)
+    return memvid_sdk.create(str(mv2), enable_vec=True, enable_lex=True)
+
+
+def _put_kwargs(compress: bool) -> dict:
+    """Shared kwargs for every `Memvid.put` call."""
+    return {
+        "embedding_model": EMBED_MODEL,
+        "enable_embedding": True,
+        "vector_compression": compress,
+    }
 
 
 def load_json(path: Path):
@@ -102,8 +148,6 @@ def parse_args(argv):
         a = args[i]
         if a in ("-h", "--help"):
             result["help"] = True
-        elif a == "--build":
-            result["build"] = True
         elif a in (
             "--append-json",
             "--append-text",
@@ -114,6 +158,8 @@ def parse_args(argv):
         ) and i + 1 >= len(args):
             print(f"ERROR: {a} requires a value", file=sys.stderr)
             sys.exit(1)
+        elif a == "--build":
+            result["build"] = True
         elif a == "--append-json":
             i += 1
             result["append_json"] = args[i]
@@ -331,20 +377,30 @@ def chunk_goals(goals: list) -> list:
 
 
 def gather_all_chunks(memory_dir: Path) -> list:
-    """Load all memory files and produce a combined list of chunks."""
+    """Load all memory files and produce a combined list of chunks.
+
+    Ordering is intentional: richest semantic sources first, with cycle
+    records (largely redundant with journal data) added last.
+
+      1. journal.json       — current window (richest, most recent)
+      2. journal-archive.json — historical journal (rich, ordered newest-first)
+      3. goal.json          — active/recent goals
+      4. cycles.json        — structured cycle records (lower priority; largely
+                               redundant with journal data and shorter text)
+    """
     all_chunks = []
 
-    # Journal entries — richest source of semantic content
+    # 1. Current journal window — most recent, richest semantic content
     journal = load_json(memory_dir / "journal.json")
     if isinstance(journal, list):
         all_chunks.extend(chunk_journal(journal))
 
-    # Cycle records — structured summaries
-    cycles = load_json(memory_dir / "cycles.json")
-    if isinstance(cycles, list):
-        all_chunks.extend(chunk_cycles(cycles))
+    # 2. Journal archive — historical entries, newest-first ordering preserved
+    archive = load_json(memory_dir / "journal-archive.json")
+    if isinstance(archive, list):
+        all_chunks.extend(chunk_journal(archive))
 
-    # Goals
+    # 3. Goals
     goals_raw = load_json(memory_dir / "goal.json")
     if isinstance(goals_raw, list):
         all_chunks.extend(chunk_goals(goals_raw))
@@ -353,30 +409,24 @@ def gather_all_chunks(memory_dir: Path) -> list:
         if isinstance(goals_list, list):
             all_chunks.extend(chunk_goals(goals_list))
 
+    # 4. Cycle records — lower priority; added last because cycle metadata
+    #    largely duplicates what journal entries already contain.
+    cycles = load_json(memory_dir / "cycles.json")
+    if isinstance(cycles, list):
+        all_chunks.extend(chunk_cycles(cycles))
+
     return all_chunks
 
 
 # ---------------------------------------------------------------------------
-# Build — ingest chunks via memvid CLI
+# Build — ingest chunks via memvid SDK
 # ---------------------------------------------------------------------------
-
-
-def _run_memvid(cmd, input_text=None, timeout=60):
-    """Run a memvid CLI command. Returns (returncode, stdout, stderr)."""
-    result = subprocess.run(
-        cmd,
-        input=input_text,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-    return result.returncode, result.stdout, result.stderr
 
 
 def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
     """Full rebuild: parse all memory files and ingest into .mv2."""
-    _check_memvid()
-
+    if not dry_run:
+        _require_sdk()
     mem_dir = Path(memory_dir)
     mv2 = Path(mv2_path)
 
@@ -425,41 +475,36 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
             print(f"[INGEST] Backed up {mv2.name} → {backup.name}")
         mv2.unlink()
 
-    # Create empty .mv2
-    rc, out, err = _run_memvid([MEMVID_BIN, "create", str(mv2)], timeout=30)
-    if rc != 0:
-        print(f"ERROR: Failed to create {mv2}: {err}", file=sys.stderr)
-        sys.exit(1)
+    mv2.parent.mkdir(parents=True, exist_ok=True)
+    mem = memvid_sdk.create(str(mv2), enable_vec=True, enable_lex=True)
     if not quiet:
         print(f"[INGEST] Created {mv2}")
 
-    # Ingest each text chunk via `memvid put`
+    # Compression threshold is checked per-chunk because the file grows
+    # during the build loop.
+    put_base_kwargs = {"embedding_model": EMBED_MODEL, "enable_embedding": True}
     ok, fail = 0, 0
     for i, ch in enumerate(chunks):
-        cmd = [
-            MEMVID_BIN,
-            "put",
-            str(mv2),
-            "--title",
-            ch["title"],
-            "--label",
-            ch["label"],
-            "--embedding",
-            "-m",
-            EMBED_MODEL,
-        ]
-        for tag in ch["tags"]:
-            cmd.extend(["--tag", f"category={tag}"])
-        if ch.get("metadata"):
-            cmd.extend(["--metadata", json.dumps(ch["metadata"])])
-
-        rc, out, err = _run_memvid(cmd, input_text=ch["text"])
-        if rc == 0:
+        merged_meta = dict(ch.get("metadata") or {})
+        # Fold tags into metadata so they're queryable (SDK accepts tags= too)
+        try:
+            mem.put(
+                title=ch["title"],
+                label=ch["label"],
+                text=ch["text"],
+                tags=ch["tags"],
+                metadata=merged_meta,
+                vector_compression=_should_compress(mv2),
+                **put_base_kwargs,
+            )
             ok += 1
-        else:
+        except Exception as e:
             fail += 1
             if not quiet:
-                print(f"  WARN: chunk {i} failed: {err.strip()[:120]}", file=sys.stderr)
+                print(
+                    f"  WARN: chunk {i} failed: {str(e)[:120]}",
+                    file=sys.stderr,
+                )
         if not quiet and (i + 1) % 20 == 0:
             print(f"[INGEST] Ingested {i + 1}/{len(chunks)} chunks...")
 
@@ -486,7 +531,7 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
 
 
 # ---------------------------------------------------------------------------
-# Append JSON — ingest a single journal/cycle/goal entry via memvid CLI
+# Append JSON — ingest a single journal/cycle/goal entry
 # ---------------------------------------------------------------------------
 
 
@@ -516,8 +561,6 @@ def _detect_and_chunk(entry: dict) -> list:
 
 def append_json(mv2_path, entry_source, quiet=False, json_mode=False):
     """Append a single JSON entry to the existing .mv2 index (journal, cycle, or goal)."""
-    _check_memvid()
-
     mv2 = Path(mv2_path)
     if not mv2.exists():
         print(f"ERROR: {mv2} not found. Run --build first.", file=sys.stderr)
@@ -547,26 +590,18 @@ def append_json(mv2_path, entry_source, quiet=False, json_mode=False):
         sys.exit(1)
 
     ch = chunks[0]
-    cmd = [
-        MEMVID_BIN,
-        "put",
-        str(mv2),
-        "--title",
-        ch["title"],
-        "--label",
-        ch["label"],
-        "--embedding",
-        "-m",
-        EMBED_MODEL,
-    ]
-    for tag in ch["tags"]:
-        cmd.extend(["--tag", f"category={tag}"])
-    if ch.get("metadata"):
-        cmd.extend(["--metadata", json.dumps(ch["metadata"])])
-
-    rc, out, err = _run_memvid(cmd, input_text=ch["text"])
-    if rc != 0:
-        print(f"ERROR: memvid put failed: {err.strip()}", file=sys.stderr)
+    mem = _open_or_create(mv2)
+    try:
+        mem.put(
+            title=ch["title"],
+            label=ch["label"],
+            text=ch["text"],
+            tags=ch["tags"],
+            metadata=dict(ch.get("metadata") or {}),
+            **_put_kwargs(_should_compress(mv2)),
+        )
+    except Exception as e:
+        print(f"ERROR: memvid put failed: {e}", file=sys.stderr)
         sys.exit(1)
 
     cycle = entry.get("cycle", "?")
@@ -593,8 +628,6 @@ def append_json(mv2_path, entry_source, quiet=False, json_mode=False):
 
 def append_text(mv2_path, text, title=None, tags=None, quiet=False, json_mode=False):
     """Ingest raw text directly into the .mv2 index."""
-    _check_memvid()
-
     mv2 = Path(mv2_path)
     if not mv2.exists():
         print(f"ERROR: {mv2} not found. Run --build first.", file=sys.stderr)
@@ -606,31 +639,24 @@ def append_text(mv2_path, text, title=None, tags=None, quiet=False, json_mode=Fa
 
     title = title or text[:100]
     tags = tags or []
-
-    cmd = [
-        MEMVID_BIN,
-        "put",
-        str(mv2),
-        "--title",
-        title,
-        "--label",
-        "text",
-        "--embedding",
-        "-m",
-        EMBED_MODEL,
-    ]
-    all_tags = ["manual-ingest", "text"] + tags
-    for tag in all_tags:
-        cmd.extend(["--tag", f"category={tag}"])
+    all_tags = ["manual-ingest", "text"] + list(tags)
     metadata = {
         "source": "append-text",
         "date": datetime.now(timezone.utc).isoformat(),
     }
-    cmd.extend(["--metadata", json.dumps(metadata)])
 
-    rc, out, err = _run_memvid(cmd, input_text=text)
-    if rc != 0:
-        print(f"ERROR: memvid put failed: {err.strip()}", file=sys.stderr)
+    mem = _open_or_create(mv2)
+    try:
+        mem.put(
+            title=title,
+            label="text",
+            text=text,
+            tags=all_tags,
+            metadata=metadata,
+            **_put_kwargs(_should_compress(mv2)),
+        )
+    except Exception as e:
+        print(f"ERROR: memvid put failed: {e}", file=sys.stderr)
         sys.exit(1)
 
     if json_mode:
@@ -659,8 +685,6 @@ def append_file(
     mv2_path, filepath, title=None, tags=None, quiet=False, json_mode=False
 ):
     """Ingest a file directly into the .mv2 index."""
-    _check_memvid()
-
     mv2 = Path(mv2_path)
     if not mv2.exists():
         print(f"ERROR: {mv2} not found. Run --build first.", file=sys.stderr)
@@ -681,37 +705,24 @@ def append_file(
 
     title = title or fpath.name
     tags = tags or []
-
-    cmd = [
-        MEMVID_BIN,
-        "put",
-        str(mv2),
-        "--input",
-        str(fpath),
-        "--title",
-        title,
-        "--embedding",
-        "-m",
-        EMBED_MODEL,
-    ]
-    try:
-        if fpath.stat().st_size > COMPRESSION_THRESHOLD:
-            cmd.append("--vector-compression")
-    except OSError:
-        pass
-    all_tags = ["manual-ingest", "file", f"ext:{ext}"] + tags
-    for tag in all_tags:
-        cmd.extend(["--tag", f"category={tag}"])
+    all_tags = ["manual-ingest", "file", f"ext:{ext}"] + list(tags)
     metadata = {
         "source": "append-file",
         "filepath": str(fpath),
         "date": datetime.now(timezone.utc).isoformat(),
     }
-    cmd.extend(["--metadata", json.dumps(metadata)])
 
-    rc, out, err = _run_memvid(cmd, timeout=120)
-    if rc != 0:
-        print(f"ERROR: memvid put failed: {err.strip()}", file=sys.stderr)
+    mem = _open_or_create(mv2)
+    try:
+        mem.put(
+            title=title,
+            file=str(fpath),
+            tags=all_tags,
+            metadata=metadata,
+            **_put_kwargs(_should_compress(mv2)),
+        )
+    except Exception as e:
+        print(f"ERROR: memvid put failed: {e}", file=sys.stderr)
         sys.exit(1)
 
     try:

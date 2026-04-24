@@ -35,6 +35,7 @@ BACKUP_FILES = [
     "state.json",
     "cycles.json",
     "goal.json",
+    "notes.json",
     "journal.json",
     "server_errors.json",
     "command_history.json",

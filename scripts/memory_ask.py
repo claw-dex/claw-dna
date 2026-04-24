@@ -2,8 +2,9 @@
 """
 memory_ask.py — RAG-powered question answering over memvid memory files.
 
-Retrieves adaptive context from a .mv2 file via `memvid ask --context-only`,
-then synthesizes an answer using Claude via claude-agent-sdk.
+Retrieves adaptive context from a .mv2 file via the `memvid_sdk` Python
+package (`Memvid.ask(context_only=True)`), then synthesizes an answer using
+Claude via claude-agent-sdk.
 
 Usage:
     uv run python scripts/memory_ask.py "What is the MacBook Pro M5 price?"
@@ -27,12 +28,26 @@ Exit codes: 0 = success, 1 = error
 
 import asyncio
 import json
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 
-MEMVID_BIN = "memvid"
+try:
+    import memvid_sdk
+except ImportError:
+    memvid_sdk = None
+
+
+def _require_sdk():
+    """Fail fast with a clear error when memvid_sdk is unavailable."""
+    if memvid_sdk is None:
+        print(
+            "ERROR: memvid_sdk not installed (not available on this runtime). "
+            "Install from https://github.com/0xGosu/memvid-sdk",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 DEFAULT_MV2 = Path("/agent/memory/long_term_memory.mv2")
 
 SYSTEM_PROMPT = (
@@ -84,72 +99,81 @@ def parse_args(argv):
     return result
 
 
-def retrieve_context(mv2_path, question, k):
-    """Retrieve context from memvid using `memvid ask --context-only --json`."""
-    if not shutil.which(MEMVID_BIN):
-        print("ERROR: memvid CLI not found. Install with:", file=sys.stderr)
-        print(
-            "  curl -fsSL https://raw.githubusercontent.com/memvid/preflight-installer/main/install.sh | bash",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+def _clean_text(text: str) -> str:
+    """Strip any residual internal memvid metadata lines from a snippet."""
+    if not text:
+        return ""
+    lines = []
+    for line in text.splitlines():
+        if line.startswith(
+            (
+                "uri: mv2://",
+                "tags: category",
+                "labels: ",
+                "category: ",
+                "extractous_metadata:",
+                "memvid.",
+                "metadata: {",
+            )
+        ):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
 
+
+def retrieve_context(mv2_path, question, k):
+    """Retrieve context from a .mv2 file via the memvid SDK."""
+    _require_sdk()
     mv2 = Path(mv2_path)
     if not mv2.exists():
         print(f"ERROR: {mv2} not found.", file=sys.stderr)
         sys.exit(1)
 
-    cmd = [
-        MEMVID_BIN,
-        "ask",
-        str(mv2),
-        "--question",
-        question,
-        "--context-only",
-        "--top-k",
-        str(k),
-        "--json",
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    if result.returncode != 0:
-        print(f"ERROR: memvid ask failed: {result.stderr.strip()}", file=sys.stderr)
+    try:
+        mem = memvid_sdk.use(
+            "basic",
+            str(mv2),
+            mode="open",
+            enable_vec=True,
+            enable_lex=True,
+            read_only=True,
+        )
+        result = mem.ask(question, k=k, context_only=True)
+    except Exception as e:
+        print(f"ERROR: memvid ask failed: {e}", file=sys.stderr)
         sys.exit(1)
 
-    data = json.loads(result.stdout)
-    results = data.get("results", [])
-    context_text = data.get("context", "")
-    stats = data.get("stats", {})
-
-    # Build clean context from results
+    hits = list(getattr(result, "hits", []) or [])
     clean_parts = []
-    for r in results:
-        title = r.get("title", "")
-        raw_text = r.get("text", "") or r.get("snippet", "")
-        # Clean internal memvid metadata from text
-        lines = []
-        for line in raw_text.splitlines():
-            if line.startswith(
-                (
-                    "uri: mv2://",
-                    "tags: category",
-                    "labels: ",
-                    "category: ",
-                    "extractous_metadata:",
-                    "memvid.",
-                    "metadata: {",
-                )
-            ):
-                continue
-            lines.append(line)
-        clean_text = "\n".join(lines).strip()
-        if clean_text:
-            clean_parts.append(f"[{title}]\n{clean_text}")
+    results = []
+    for h in hits:
+        title = getattr(h, "title", "") or ""
+        snippet = _clean_text(getattr(h, "snippet", "") or "")
+        score = getattr(h, "score", 0.0)
+        frame_id = getattr(h, "frame_id", None)
+        if snippet:
+            clean_parts.append(f"[{title}]\n{snippet}")
+        results.append(
+            {
+                "title": title,
+                "score": score,
+                "snippet": snippet,
+                "frame_id": frame_id,
+            }
+        )
+
+    sdk_context = getattr(result, "context", "") or ""
+    stats = getattr(result, "stats", {}) or {}
+    total_hits = (
+        stats.get("total_hits", len(hits)) if isinstance(stats, dict) else len(hits)
+    )
+    retrieval_ms = stats.get("took_ms") if isinstance(stats, dict) else None
 
     return {
         "results": results,
-        "context": "\n\n---\n\n".join(clean_parts),
-        "total_hits": data.get("total_hits", len(results)),
-        "stats": stats,
+        "context": "\n\n---\n\n".join(clean_parts) or sdk_context,
+        "total_hits": total_hits,
+        "stats": {"retrieval_ms": retrieval_ms} if retrieval_ms is not None else {},
     }
 
 

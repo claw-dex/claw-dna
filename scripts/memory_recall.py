@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-memory_recall.py — Query long-term semantic memory (memvid CLI).
+memory_recall.py — Query long-term semantic memory (memvid SDK).
 
 Searches the agent's long-term memory store for entries matching a
-natural-language question using the `memvid` CLI (hybrid lexical + semantic).
+natural-language question using the `memvid_sdk` Python package (hybrid
+lexical + semantic search).
 
 Usage:
     uv run python scripts/memory_recall.py "What did I work on last week?"
@@ -23,30 +24,34 @@ Optional:
     --since DATE      Filter entries since DATE (ISO format or unix timestamp)
     --until DATE      Filter entries until DATE (ISO format or unix timestamp)
 
-Exit codes: 0 = success, 1 = error (missing args, file not found, CLI error)
+Exit codes: 0 = success, 1 = error (missing args, file not found, SDK error)
 """
 
 import json
-import shutil
-import subprocess
 import sys
+from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-MEMORY = Path("/agent/memory")
-MV2_PATH = MEMORY / "long_term_memory.mv2"
-MEMVID_BIN = "memvid"
+try:
+    import memvid_sdk
+except ImportError:
+    memvid_sdk = None
 
 
-def _check_memvid():
-    """Ensure the memvid CLI is available."""
-    if not shutil.which(MEMVID_BIN):
-        print("ERROR: memvid CLI not found. Install with:", file=sys.stderr)
+def _require_sdk():
+    """Fail fast with a clear error when memvid_sdk is unavailable."""
+    if memvid_sdk is None:
         print(
-            "  curl -fsSL https://raw.githubusercontent.com/memvid/preflight-installer/main/install.sh | bash",
+            "ERROR: memvid_sdk not installed (not available on this runtime). "
+            "Install from https://github.com/0xGosu/memvid-sdk",
             file=sys.stderr,
         )
         sys.exit(1)
+
+
+MEMORY = Path("/agent/memory")
+MV2_PATH = MEMORY / "long_term_memory.mv2"
 
 
 def parse_args(argv):
@@ -94,32 +99,19 @@ def parse_args(argv):
     return result
 
 
-def _run_cmd(cmd):
-    """Run a memvid CLI command, return parsed JSON output."""
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    if result.returncode != 0:
-        print(
-            f"ERROR: {' '.join(cmd[:3])} failed: {result.stderr.strip()}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    return json.loads(result.stdout)
-
-
 def _parse_date_to_unix(value):
-    """Convert a date string (ISO format) or integer to a unix timestamp string.
-
-    Returns the string representation of the unix timestamp, or exits on error.
-    """
+    """Convert a date string (ISO format) or integer to a unix timestamp int."""
+    if value is None:
+        return None
     try:
-        return str(int(value))
-    except ValueError:
+        return int(value)
+    except (TypeError, ValueError):
         pass
     try:
         dt = datetime.fromisoformat(value)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        return str(int(dt.timestamp()))
+        return int(dt.timestamp())
     except ValueError:
         print(
             f"ERROR: Invalid date format: {value!r}. Use ISO format (2026-03-25) or unix timestamp.",
@@ -129,7 +121,9 @@ def _parse_date_to_unix(value):
 
 
 def _clean_snippet(text):
-    """Strip internal memvid metadata lines from snippet text."""
+    """Strip internal memvid metadata lines from snippet text (safety net)."""
+    if not text:
+        return ""
     lines = []
     for line in text.splitlines():
         if line.startswith(
@@ -146,6 +140,32 @@ def _clean_snippet(text):
             continue
         lines.append(line)
     return "\n".join(lines).strip()
+
+
+def _hit_to_dict(hit, rank: int) -> dict:
+    """Normalize an SDK Hit dataclass into the dict shape used by this script."""
+    snippet = _clean_snippet(getattr(hit, "snippet", None) or "")
+    return {
+        "rank": rank,
+        "score": getattr(hit, "score", 0.0),
+        "title": getattr(hit, "title", "") or "",
+        "snippet": snippet,
+        "tags": list(getattr(hit, "tags", []) or []),
+        "frame_id": getattr(hit, "frame_id", None),
+    }
+
+
+def _open_readonly(mv2: Path):
+    """Open an existing .mv2 read-only via the SDK."""
+    _require_sdk()
+    return memvid_sdk.use(
+        "basic",
+        str(mv2),
+        mode="open",
+        enable_vec=True,
+        enable_lex=True,
+        read_only=True,
+    )
 
 
 def main():
@@ -173,8 +193,6 @@ def main():
         )
         sys.exit(1)
 
-    _check_memvid()
-
     if opts["timeline"]:
         _run_timeline(opts, mv2)
     else:
@@ -182,44 +200,39 @@ def main():
 
 
 def _run_query(opts, mv2):
-    """Run hybrid search via memvid CLI."""
+    """Run hybrid search via the memvid SDK.
+
+    Uses `Memvid.ask(context_only=True)` rather than `find()` because only
+    `ask()` supports the `since`/`until` date filters we expose here.
+    """
     question = opts["question"]
     k = opts["k"]
+    since = _parse_date_to_unix(opts.get("since"))
+    until = _parse_date_to_unix(opts.get("until"))
 
-    cmd = [
-        MEMVID_BIN,
-        "find",
-        str(mv2),
-        "--query",
-        question,
-        "--top-k",
-        str(k),
-        "--json",
-    ]
-    if opts.get("since"):
-        cmd.extend(["--since", _parse_date_to_unix(opts["since"])])
-    if opts.get("until"):
-        cmd.extend(["--until", _parse_date_to_unix(opts["until"])])
-    data = _run_cmd(cmd)
-    hits = data.get("hits", [])
-    total = data.get("metadata", {}).get("total_hits", len(hits))
+    try:
+        mem = _open_readonly(mv2)
+        result = mem.ask(
+            question,
+            k=k,
+            context_only=True,
+            since=since,
+            until=until,
+        )
+    except Exception as e:
+        print(f"ERROR: memvid ask failed: {e}", file=sys.stderr)
+        sys.exit(1)
 
-    # Sort by score descending
-    hits.sort(key=lambda h: h.get("score", 0), reverse=True)
+    raw_hits = list(getattr(result, "hits", []) or [])
+    raw_hits.sort(key=lambda h: getattr(h, "score", 0.0), reverse=True)
+    items = [_hit_to_dict(h, i) for i, h in enumerate(raw_hits, 1)]
+    total = (
+        getattr(result, "stats", {}).get("total_hits", len(items))
+        if isinstance(getattr(result, "stats", None), dict)
+        else len(items)
+    )
 
     if opts["json_mode"]:
-        items = []
-        for i, h in enumerate(hits, 1):
-            items.append(
-                {
-                    "rank": i,
-                    "score": h.get("score"),
-                    "title": h.get("title", ""),
-                    "snippet": _clean_snippet(h.get("text", "")),
-                    "tags": h.get("metadata", {}).get("tags", []),
-                    "frame_id": h.get("frame_id"),
-                }
-            )
         print(
             json.dumps(
                 {
@@ -233,19 +246,19 @@ def _run_query(opts, mv2):
         )
     else:
         print(f'[MEMORY RECALL] "{question}" (k={k})\n')
-        if not hits:
+        if not items:
             print("No matching memories found.")
         else:
-            for i, h in enumerate(hits, 1):
-                score = h.get("score", 0)
-                title = h.get("title", "untitled")
-                snippet = _clean_snippet(h.get("text", ""))
-                tags = h.get("metadata", {}).get("tags", [])
+            for item in items:
+                score = item["score"] or 0
+                title = item["title"] or "untitled"
+                snippet = item["snippet"]
+                tags = item["tags"]
 
                 cycle_tag = next((t for t in tags if t.startswith("cycle:")), "")
                 date_tag = next((t for t in tags if t.startswith("date:")), "")
 
-                header = f"── Result {i}/{len(hits)} (score: {score:.4f})"
+                header = f"── Result {item['rank']}/{len(items)} (score: {score:.4f})"
                 if cycle_tag:
                     header += f" | {cycle_tag}"
                 if date_tag:
@@ -260,25 +273,45 @@ def _run_query(opts, mv2):
                         print(f"    ... ({len(lines) - 4} more lines)")
                 print()
         print(
-            f"[MEMORY RECALL] {len(hits)} result(s) returned (total matches: {total})."
+            f"[MEMORY RECALL] {len(items)} result(s) returned (total matches: {total})."
         )
 
 
+def _entry_to_dict(entry) -> dict:
+    """Normalize an SDK TimelineEntry dataclass into a dict for JSON output."""
+    if is_dataclass(entry):
+        return asdict(entry)
+    if isinstance(entry, dict):
+        return entry
+    # Fallback: pull known attributes
+    return {
+        "frame_id": getattr(entry, "frame_id", None),
+        "timestamp": getattr(entry, "timestamp", None),
+        "preview": getattr(entry, "preview", ""),
+        "uri": getattr(entry, "uri", None),
+        "child_frames": list(getattr(entry, "child_frames", []) or []),
+    }
+
+
 def _run_timeline(opts, mv2):
-    """Show timeline entries via memvid CLI."""
+    """Show timeline entries via the memvid SDK."""
     k = opts["k"]
     since = opts["since"]
+    since_unix = _parse_date_to_unix(since)
+    until_unix = _parse_date_to_unix(opts.get("until"))
 
-    cmd = [MEMVID_BIN, "timeline", str(mv2), "--json", "--limit", str(k)]
-    if since:
-        cmd.extend(["--since", _parse_date_to_unix(since)])
-    if opts.get("until"):
-        cmd.extend(["--until", _parse_date_to_unix(opts["until"])])
+    try:
+        mem = _open_readonly(mv2)
+        entries = mem.timeline(
+            limit=k,
+            since=since_unix,
+            until=until_unix,
+        )
+    except Exception as e:
+        print(f"ERROR: memvid timeline failed: {e}", file=sys.stderr)
+        sys.exit(1)
 
-    items = _run_cmd(cmd)
-    # CLI returns a JSON array for timeline
-    if isinstance(items, dict):
-        items = items.get("entries", [])
+    items = [_entry_to_dict(e) for e in (entries or [])]
 
     if opts["json_mode"]:
         print(
@@ -302,8 +335,7 @@ def _run_timeline(opts, mv2):
         for entry in items:
             ts = entry.get("timestamp", "")
             frame_id = entry.get("frame_id", "?")
-            preview = entry.get("preview", "")[:80]
-            uri = entry.get("uri", "")
+            preview = (entry.get("preview") or "")[:80]
             print(f"  [ts={ts}] Frame {frame_id}: {preview}")
         print(f"\n[MEMORY TIMELINE] Done.")
 
@@ -312,45 +344,32 @@ def recall(query: str, k: int = 5, until=None, json_mode: bool = False) -> list:
     """Query long-term memory and return results as a list of dicts.
 
     Returns a list of result dicts (rank, score, title, snippet, tags, frame_id).
-    Returns empty list on any error (file not found, memvid unavailable, etc.).
+    Returns empty list on any error (file not found, SDK unavailable, etc.).
     Does not print or call sys.exit().
     """
-    if not MV2_PATH.exists():
+    if memvid_sdk is None or not MV2_PATH.exists():
         return []
-    if not shutil.which(MEMVID_BIN):
-        return []
-    cmd = [
-        MEMVID_BIN,
-        "find",
-        str(MV2_PATH),
-        "--query",
-        query,
-        "--top-k",
-        str(k),
-        "--json",
-    ]
-    if until:
-        cmd.extend(["--until", _parse_date_to_unix(until)])
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        if result.returncode != 0:
-            return []
-        data = json.loads(result.stdout)
+        until_unix = None
+        if until is not None:
+            try:
+                until_unix = int(until)
+            except (TypeError, ValueError):
+                try:
+                    dt = datetime.fromisoformat(str(until))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    until_unix = int(dt.timestamp())
+                except ValueError:
+                    until_unix = None
+
+        mem = _open_readonly(MV2_PATH)
+        result = mem.ask(query, k=k, context_only=True, until=until_unix)
+        raw_hits = list(getattr(result, "hits", []) or [])
+        raw_hits.sort(key=lambda h: getattr(h, "score", 0.0), reverse=True)
+        return [_hit_to_dict(h, i) for i, h in enumerate(raw_hits, 1)]
     except Exception:
         return []
-    hits = data.get("hits", [])
-    hits.sort(key=lambda h: h.get("score", 0), reverse=True)
-    return [
-        {
-            "rank": i,
-            "score": h.get("score"),
-            "title": h.get("title", ""),
-            "snippet": _clean_snippet(h.get("text", "")),
-            "tags": h.get("metadata", {}).get("tags", []),
-            "frame_id": h.get("frame_id"),
-        }
-        for i, h in enumerate(hits, 1)
-    ]
 
 
 if __name__ == "__main__":

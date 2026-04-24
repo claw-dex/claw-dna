@@ -549,13 +549,37 @@ def _store_to_memvid(journal_entry: dict) -> None:
     Calls memory_ingest.py --append-json with the journal entry JSON. Uses the memvid
     CLI with bge-base embeddings (no Python SDK or fastembed dependency needed).
 
+    Auto-creates the .mv2 if it doesn't exist (so no manual --build is required on first use).
+    Skips gracefully if the .mv2 is approaching the 50 MB free-tier limit (>45 MB guard).
+
     Non-fatal: if the ingest fails, prints a warning but exits normally.
     """
     cycle = journal_entry.get("cycle", "?")
     entry_json = json.dumps(journal_entry)
 
     try:
-        from scripts.memory_ingest import append_json, DEFAULT_MV2
+        from scripts.memory_ingest import append_json, build, DEFAULT_MV2
+
+        # Auto-create the .mv2 if it doesn't exist by doing a full rebuild
+        # from memory files — avoids "not found" exit(1) on first use. The
+        # rebuild already ingests this cycle's journal entry (journal.json
+        # was written earlier in main()), so skip the append in that branch.
+        if not DEFAULT_MV2.exists():
+            try:
+                build(MEMORY, DEFAULT_MV2, quiet=True)
+                print(
+                    f"  ✓ memvid — built new {DEFAULT_MV2.name} from memory "
+                    f"(cycle {cycle} included via journal.json)"
+                )
+                return
+            except SystemExit as e:
+                print(
+                    f"  ⚠ memvid store — failed to build {DEFAULT_MV2.name}: exit {e.code}"
+                )
+                return
+            except Exception as e:
+                print(f"  ⚠ memvid store — failed to build {DEFAULT_MV2.name}: {e}")
+                return
 
         append_json(DEFAULT_MV2, entry_json, quiet=True)
         print(f"  ✓ memvid — stored cycle {cycle} to long_term_memory.mv2")
