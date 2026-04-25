@@ -9,9 +9,14 @@
 #    2. Portal unhealthy                → SELF-HEAL prompt (fix portal)
 #    3. User command in inbox           → GOAL prompt (do user's task)
 #    4. Active goal in progress         → GOAL prompt (continue working)
-#    5. No evolve in last 5 cycles      → EVOLVE prompt (prevent starvation)
-#    6. Last N evolves in a row         → SKIP cycle (prevent evolve loop)
-#    7. Otherwise                       → EVOLVE prompt (self-improve)
+#    5. No idle-cycle in last 5 cycles  → IDLE prompt (prevent starvation)
+#    6. Last N idle-cycles in a row     → SKIP cycle (prevent idle loop)
+#    7. Otherwise                       → IDLE prompt (self-improve / consolidate)
+#
+#  The "idle" prompt is EVOLVE by default; with --agent-sleep it becomes DREAM
+#  (nightly reflection/consolidation, see prompts/dream.md). The consecutive
+#  cap is --max-evolve (default 5) for evolve and --max-dream (default 3) for
+#  dream.
 #
 #  Uses:
 #    --system-prompt         → fixed context (constitution, memory, container info)
@@ -31,14 +36,26 @@ fi
 
 # ── Parse arguments ──────────────────────────────────────────
 AGENT_SLEEP=false
-MAX_CONSECUTIVE_EVOLVE=5
+MAX_EVOLVE=5
+MAX_DREAM=3
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --agent-sleep) AGENT_SLEEP=true; shift ;;
-        --max-evolve) MAX_CONSECUTIVE_EVOLVE="$2"; shift 2 ;;
+        --max-evolve) MAX_EVOLVE="$2"; shift 2 ;;
+        --max-dream) MAX_DREAM="$2"; shift 2 ;;
         *) shift ;;
     esac
 done
+
+# When --agent-sleep is set, the "idle" prompt becomes dream instead of evolve.
+# IDLE_MODE drives both the prompt selection and the consecutive-cap check.
+if $AGENT_SLEEP; then
+    IDLE_MODE="dream"
+    MAX_CONSECUTIVE_IDLE="$MAX_DREAM"
+else
+    IDLE_MODE="evolve"
+    MAX_CONSECUTIVE_IDLE="$MAX_EVOLVE"
+fi
 
 # ── Guard: kill stale agent process from a previous crashed heartbeat ──
 # If a previous heartbeat was killed (e.g., OOM, signal) without cleanup,
@@ -105,7 +122,8 @@ trap cleanup_cycle_lock EXIT
 
 echo "[$TIMESTAMP] ════════ Cycle #${CYCLE_NUM} ════════"
 
-# ── Scheduled Tasks (inject due tasks into inbox before prompt selection) ──
+# ── Scheduled Tasks (fallback: scheduler_daemon owns this normally; this
+#    in-line check ensures reminders still fire if the daemon is down) ──
 if [ -f /agent/memory/scheduled_tasks.json ]; then
     uv run python /agent/scripts/scheduler.py --check 2>/dev/null || true
 fi
@@ -175,32 +193,32 @@ select_prompt() {
         return
     fi
 
-    # 5. Force evolve if none in the last 5 cycles (prevents starvation when idle)
-    #    Only reached when inbox is empty and no active goals exist.
-    local cycles_since_evolve
-    cycles_since_evolve=$(jq '
-        [.[] | select(.type == "evolve")] | last | .cycle // 0
+    # 5. Force the idle prompt if none in the last 5 cycles (prevents starvation
+    #    when idle). IDLE_MODE = "evolve" normally, "dream" when --agent-sleep.
+    local cycles_since_idle
+    cycles_since_idle=$(jq --arg m "$IDLE_MODE" '
+        [.[] | select(.type == $m)] | last | .cycle // 0
     ' /agent/memory/cycles.json 2>/dev/null || echo 0)
     local current_cycle
     current_cycle=$(jq -r '.cycle_number // 0' /agent/memory/state.json 2>/dev/null || echo 0)
-    local gap=$(( current_cycle - cycles_since_evolve ))
+    local gap=$(( current_cycle - cycles_since_idle ))
     if [ "$gap" -ge 5 ]; then
-        echo "evolve"
+        echo "$IDLE_MODE"
         return
     fi
 
-    # 6. All clear — self-evolve (skip if consecutive evolve limit reached)
-    local all_evolve
-    all_evolve=$(jq -r --argjson n "$MAX_CONSECUTIVE_EVOLVE" '
+    # 6. All clear — run the idle prompt (skip if consecutive idle limit reached).
+    local all_idle
+    all_idle=$(jq -r --argjson n "$MAX_CONSECUTIVE_IDLE" --arg m "$IDLE_MODE" '
         if length < $n then false
-        else (. | reverse | .[0:$n] | all(.type == "evolve"))
+        else (. | reverse | .[0:$n] | all(.type == $m))
         end
     ' /agent/memory/cycles.json 2>/dev/null || echo false)
-    if [ "$all_evolve" = "true" ]; then
+    if [ "$all_idle" = "true" ]; then
         echo "skip"
         return
     fi
-    echo "evolve"
+    echo "$IDLE_MODE"
 }
 
 PROMPT_MODE=$(select_prompt)
@@ -208,7 +226,7 @@ echo "[$TIMESTAMP] Prompt mode: ${PROMPT_MODE}"
 
 # ── Skip mode: consecutive evolve limit reached ──────────────
 if [ "$PROMPT_MODE" = "skip" ]; then
-    echo "[$TIMESTAMP] Last ${MAX_CONSECUTIVE_EVOLVE} cycles were all evolve. Skipping cycle."
+    echo "[$TIMESTAMP] Last ${MAX_CONSECUTIVE_IDLE} cycles were all ${IDLE_MODE}. Skipping cycle."
     exit 0
 fi
 
@@ -330,6 +348,18 @@ build_task_prompt() {
                 | sort_by(.created_at)
             ' /agent/memory/goal.json /agent/memory/goal_history.json 2>/dev/null || echo '[]'
             echo "</your_past_goals>"
+            ;;
+        dream)
+            cat /agent/prompts/dream.md
+            echo ""
+            echo "<your_past_failed_goals>"
+            echo "(all failed goals from goal.json + goal_history.json, sorted by created_at)"
+            jq -s '
+                (((.[0] // []) + (.[1] // []))
+                 | map(select(.status == "failed"))
+                 | sort_by(.created_at))
+            ' /agent/memory/goal.json /agent/memory/goal_history.json 2>/dev/null || echo '[]'
+            echo "</your_past_failed_goals>"
             ;;
     esac
 }

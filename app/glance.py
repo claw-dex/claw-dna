@@ -315,9 +315,14 @@ def _collect_reminder_rows():
     return rows
 
 
-def _render_reminders():
-    """Render the 🔔 Reminders section with a Done button per row."""
-    rows = _collect_reminder_rows()
+def _render_reminders(rows=None):
+    """Render the 🔔 Reminders section with a Done button per row.
+
+    Accepts pre-computed *rows* to avoid re-running the join when the caller
+    already needed the count (e.g. for the header counter).
+    """
+    if rows is None:
+        rows = _collect_reminder_rows()
     st.markdown("**🔔 Reminders**")
     if not rows:
         st.caption("No active reminders.")
@@ -351,6 +356,7 @@ def render():
     goals = load_goals() or []
     inbox = load_inbox() or []
     outbox = load_outbox() or []
+    reminder_rows = _collect_reminder_rows()
 
     active_goals = [g for g in goals if g.get("status") in ("in_progress", "pending")]
     needs_human = [o for o in outbox if o.get("type") == "needs_human"]
@@ -359,7 +365,7 @@ def render():
     col_title, col_filter = st.columns([2, 3])
     with col_title:
         parts = [
-            f"**Quick Glance** &nbsp; 🎯 {len(active_goals)} &nbsp; 📥 {len(inbox)} &nbsp; 📤 {len(outbox)}"
+            f"**Quick Glance** &nbsp; 🎯 {len(active_goals)} &nbsp; 📥 {len(inbox)} &nbsp; 📤 {len(outbox)} &nbsp; ⏰ {len(reminder_rows)}"
         ]
         if needs_human:
             parts.append(f"&nbsp; 🔔 {len(needs_human)}")
@@ -367,7 +373,7 @@ def render():
     with col_filter:
         filter_cat = st.segmented_control(
             "Filter",
-            ["All", "Goals", "Inbox", "Outbox", "Upcoming"],
+            ["All", "Goals", "Inbox", "Outbox", "Upcoming", "Reminders"],
             default="All",
             key="glance_filter",
             label_visibility="collapsed",
@@ -375,10 +381,14 @@ def render():
         if filter_cat is None:
             filter_cat = "All"
 
-    _render_reminders()
-
     if filter_cat == "Upcoming":
         _render_upcoming_tasks()
+        return
+
+    if filter_cat in ("All", "Reminders"):
+        _render_reminders(reminder_rows)
+
+    if filter_cat == "Reminders":
         return
 
     items = _build_items(goals, inbox, outbox, filter_cat)

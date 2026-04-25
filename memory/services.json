@@ -14,6 +14,20 @@
     "stdout_log": "/agent/memory/logs/service-webhook_receiver.stdout.log",
     "stderr_log": "/agent/memory/logs/service-webhook_receiver.stderr.log"
   },
+  "scheduler_daemon": {
+    "pid": null,
+    "port": null,
+    "auto_start": true,
+    "command": [
+      "uv",
+      "run",
+      "python",
+      "/agent/services/scheduler_daemon.py"
+    ],
+    "started": null,
+    "stdout_log": "/agent/memory/logs/service-scheduler_daemon.stdout.log",
+    "stderr_log": "/agent/memory/logs/service-scheduler_daemon.stderr.log"
+  },
   "telegram_bridge": {
     "pid": null,
     "port": null,

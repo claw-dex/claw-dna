@@ -11,6 +11,8 @@ reminders (interval-based or cron-based).
 
 Usage:
     uv run python scripts/reminder.py add --text "Call dentist" --at "2026-03-27T15:00"
+    uv run python scripts/reminder.py add --text "Stretch" --in 30m       # one-shot, 30 min from now
+    uv run python scripts/reminder.py add --text "Tea" --in 2h            # one-shot, 2 hours from now
     uv run python scripts/reminder.py add --text "Stand up" --every 60
     uv run python scripts/reminder.py add --text "Weekly review" --cron "0 9 * * 1"
     uv run python scripts/reminder.py list
@@ -22,6 +24,7 @@ Options for 'add':
     --text TEXT        Reminder message (required)
     --at DATETIME      Fire once at this time (ISO 8601, e.g. 2026-03-27T15:00)
                        Interpreted in agent's configured timezone if no offset given
+    --in DURATION      Fire once N from now. Format: Nm | Nh | Nd (minutes/hours/days)
     --every MINUTES    Fire every N minutes (recurring)
     --cron PATTERN     Fire on cron schedule (min hour dom mon dow)
     --priority N       Priority 1-5 (default 1 = highest)
@@ -34,9 +37,45 @@ import json
 import os
 import sys
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from scheduler import TASKS_PATH, _load_tasks, timed_flock, write_atomic
+
+
+def _parse_duration_to_minutes(value: str) -> int:
+    """Parse '30m' / '2h' / '1d' (or bare integer = minutes) into minutes.
+
+    Raises ValueError on bad input or non-positive durations.
+    """
+    if not value:
+        raise ValueError("empty duration")
+    v = value.strip().lower()
+    if v.endswith("m"):
+        n = int(v[:-1])
+    elif v.endswith("h"):
+        n = int(v[:-1]) * 60
+    elif v.endswith("d"):
+        n = int(v[:-1]) * 1440
+    else:
+        n = int(v)
+    if n <= 0:
+        raise ValueError(f"duration must be positive: {value!r}")
+    return n
+
+
+def _resolve_in_to_isoformat(duration: str) -> str:
+    """Convert a relative duration (e.g. '30m', '2h') to an absolute ISO datetime.
+
+    Anchored to now() in the agent's configured timezone when available, else UTC.
+    """
+    minutes = _parse_duration_to_minutes(duration)
+    try:
+        import zoneinfo
+
+        tz = zoneinfo.ZoneInfo(os.environ.get("TZ", "UTC"))
+    except Exception:
+        tz = timezone.utc
+    return (datetime.now(tz) + timedelta(minutes=minutes)).isoformat()
 
 
 @contextmanager
@@ -73,6 +112,7 @@ def parse_datetime(s: str) -> str:
 def cmd_add(args: list) -> int:
     text = None
     at_time = None
+    in_duration = None
     every_min = None
     cron_pat = None
     priority = 1
@@ -84,6 +124,9 @@ def cmd_add(args: list) -> int:
             i += 2
         elif args[i] == "--at" and i + 1 < len(args):
             at_time = args[i + 1]
+            i += 2
+        elif args[i] == "--in" and i + 1 < len(args):
+            in_duration = args[i + 1]
             i += 2
         elif args[i] == "--every" and i + 1 < len(args):
             every_min = int(args[i + 1])
@@ -102,10 +145,25 @@ def cmd_add(args: list) -> int:
         print("Error: --text is required", file=sys.stderr)
         return 1
 
+    # --in is just a relative spelling of --at; resolve it now.
+    if in_duration is not None:
+        if at_time is not None:
+            print("Error: --in and --at are mutually exclusive", file=sys.stderr)
+            return 1
+        try:
+            at_time = _resolve_in_to_isoformat(in_duration)
+        except ValueError as e:
+            print(
+                f"Error: invalid --in value {in_duration!r} ({e}). "
+                "Use Nm, Nh, or Nd (e.g. 30m, 2h, 1d).",
+                file=sys.stderr,
+            )
+            return 1
+
     # Exactly one schedule type required
     schedule_count = sum(1 for x in [at_time, every_min, cron_pat] if x is not None)
     if schedule_count == 0:
-        print("Error: specify --at, --every, or --cron", file=sys.stderr)
+        print("Error: specify --at, --in, --every, or --cron", file=sys.stderr)
         return 1
     if schedule_count > 1:
         print("Error: specify only one of --at, --every, --cron", file=sys.stderr)
@@ -267,16 +325,25 @@ def add_reminder(
     text: str,
     *,
     at: str | None = None,
+    in_: str | None = None,
     every: int | None = None,
     cron: str | None = None,
     priority: int = 1,
 ) -> str | None:
     """Add a reminder programmatically. Returns the reminder ID on success, None on error.
 
-    Exactly one of *at* (ISO datetime string), *every* (minutes), or *cron* (pattern)
-    must be provided.
+    Exactly one of *at* (ISO datetime string), *in_* (relative duration like '30m',
+    '2h', '1d'), *every* (minutes), or *cron* (pattern) must be provided. *in_* is
+    a one-shot reminder resolved to an absolute datetime relative to now.
     """
     try:
+        if in_ is not None:
+            if at is not None:
+                return None
+            try:
+                at = _resolve_in_to_isoformat(in_)
+            except ValueError:
+                return None
         schedule_count = sum(1 for x in [at, every, cron] if x is not None)
         if not text or schedule_count != 1:
             return None

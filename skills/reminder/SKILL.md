@@ -15,6 +15,11 @@ description: Create, list, and manage personal reminders. Reminders fire as inbo
 # One-time reminder at a specific time
 uv run python scripts/reminder.py add --text "Call dentist" --at "2026-03-27T15:00"
 
+# One-time reminder N from now (Nm | Nh | Nd)
+uv run python scripts/reminder.py add --text "Stretch" --in 30m
+uv run python scripts/reminder.py add --text "Tea break" --in 2h
+uv run python scripts/reminder.py add --text "Follow up" --in 1d
+
 # Recurring reminder every N minutes
 uv run python scripts/reminder.py add --text "Stand up and stretch" --every 60
 
@@ -24,6 +29,13 @@ uv run python scripts/reminder.py add --text "Weekly review" --cron "0 9 * * 1"
 # With priority (1=highest, 5=lowest, default 1)
 uv run python scripts/reminder.py add --text "Important meeting" --at "2026-03-27T14:00" --priority 1
 ```
+
+**Schedule flags (exactly one required):**
+
+- `--at <ISO datetime>` — fire once at an absolute time
+- `--in <Nm|Nh|Nd>` — fire once N minutes / hours / days from now (resolved to an absolute datetime in the agent's TZ)
+- `--every <minutes>` — recurring interval
+- `--cron "<min hour dom mon dow>"` — cron pattern
 
 ### list — Show all reminders
 
@@ -47,11 +59,12 @@ uv run python scripts/reminder.py clear
 ## How It Works
 
 Reminders are stored as entries in `/agent/memory/scheduled_tasks.json` with:
+
 - ID prefix `reminder-` and `"source": "reminder"` for filtering
 - `"type": "message"` so they appear as inbox messages when fired
-- The existing scheduler (`scripts/scheduler.py --check`) evaluates them each heartbeat
 
 When a reminder fires, it injects a message into `inbox.json` like:
+
 ```
 [Scheduled: reminder-abc12345] Reminder: Call dentist
 ```
