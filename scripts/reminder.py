@@ -29,70 +29,23 @@ Options for 'add':
 Exit codes: 0 = success, 1 = error
 """
 
-import fcntl
 import hashlib
 import json
 import os
 import sys
-import tempfile
-import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from pathlib import Path
 
-TASKS_PATH = Path("/agent/memory/scheduled_tasks.json")
-LOCK_PATH = str(TASKS_PATH) + ".lock"
-LOCK_TIMEOUT_SECONDS = 10
+from scheduler import TASKS_PATH, _load_tasks, timed_flock, write_atomic
 
 
 @contextmanager
 def _tasks_lock():
-    """Acquire the same flock scheduler.py uses for scheduled_tasks.json.
-
-    Uses LOCK_NB + busy-wait (safe in multi-threaded callers, unlike SIGALRM).
-    """
-    with open(LOCK_PATH, "a+") as lock_f:
-        try:
-            deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
-            while True:
-                try:
-                    fcntl.flock(lock_f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError:
-                    if time.monotonic() >= deadline:
-                        raise TimeoutError(
-                            f"Could not acquire tasks lock within {LOCK_TIMEOUT_SECONDS}s"
-                        )
-                    time.sleep(0.05)
+    """Acquire the scheduled_tasks.json flock using scheduler's timed_flock."""
+    lock_path = str(TASKS_PATH) + ".lock"
+    with open(lock_path, "a+") as lock_f:
+        with timed_flock(lock_f):
             yield
-        finally:
-            try:
-                fcntl.flock(lock_f, fcntl.LOCK_UN)
-            except (OSError, ValueError):
-                pass
-
-
-def load_tasks() -> list:
-    try:
-        return json.loads(TASKS_PATH.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
-
-
-def save_tasks(tasks: list):
-    tmp_fd, tmp_path = tempfile.mkstemp(dir=str(TASKS_PATH.parent), suffix=".tmp")
-    try:
-        with os.fdopen(tmp_fd, "w") as f:
-            json.dump(tasks, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, str(TASKS_PATH))
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
 
 
 def generate_id(text: str) -> str:
@@ -180,9 +133,9 @@ def cmd_add(args: list) -> int:
         task["schedule"] = cron_pat
 
     with _tasks_lock():
-        tasks = load_tasks()
+        tasks = _load_tasks()
         tasks.append(task)
-        save_tasks(tasks)
+        write_atomic(TASKS_PATH, tasks)
 
     print(f"Created reminder: {rid}")
     print(f"  Text: {text}")
@@ -197,7 +150,7 @@ def cmd_add(args: list) -> int:
 
 def cmd_list(args: list) -> int:
     as_json = "--json" in args
-    tasks = load_tasks()
+    tasks = _load_tasks()
     reminders = [
         t
         for t in tasks
@@ -249,7 +202,7 @@ def cmd_delete(args: list) -> int:
         return 1
 
     with _tasks_lock():
-        tasks = load_tasks()
+        tasks = _load_tasks()
         original_len = len(tasks)
         tasks = [t for t in tasks if t.get("id") != rid]
 
@@ -257,7 +210,7 @@ def cmd_delete(args: list) -> int:
             print(f"Reminder not found: {rid}", file=sys.stderr)
             return 1
 
-        save_tasks(tasks)
+        write_atomic(TASKS_PATH, tasks)
     print(f"Deleted: {rid}")
     return 0
 
@@ -265,7 +218,7 @@ def cmd_delete(args: list) -> int:
 def cmd_clear(args: list) -> int:
     """Remove all fired/disabled reminders."""
     with _tasks_lock():
-        tasks = load_tasks()
+        tasks = _load_tasks()
         before = len(tasks)
         tasks = [
             t
@@ -279,7 +232,7 @@ def cmd_clear(args: list) -> int:
             )
         ]
         removed = before - len(tasks)
-        save_tasks(tasks)
+        write_atomic(TASKS_PATH, tasks)
     print(f"Cleared {removed} fired reminder(s)")
     return 0
 
@@ -349,9 +302,9 @@ def add_reminder(
             task["schedule"] = cron
 
         with _tasks_lock():
-            tasks = load_tasks()
+            tasks = _load_tasks()
             tasks.append(task)
-            save_tasks(tasks)
+            write_atomic(TASKS_PATH, tasks)
         return rid
     except Exception:
         return None

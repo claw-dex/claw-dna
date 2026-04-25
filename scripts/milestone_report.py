@@ -76,6 +76,18 @@ def _load_journal():
     return _load_json(MEMORY_DIR / "journal.json", [])
 
 
+def _load_notes():
+    return _load_json(MEMORY_DIR / "notes.json", [])
+
+
+def _load_command_history():
+    return _load_json(MEMORY_DIR / "command_history.json", [])
+
+
+def _load_server_errors():
+    return _load_json(MEMORY_DIR / "server_errors.json", [])
+
+
 def _list_scripts():
     try:
         return sorted(
@@ -119,7 +131,48 @@ def _format_duration(seconds):
     return f"{int(seconds)//3600}h {(int(seconds)%3600)//60}m"
 
 
-def build_report(target_cycle, all_cycles, all_goals, caps, journal_entries):
+def _summarize_notes(notes):
+    if not isinstance(notes, list):
+        return {
+            "total": 0,
+            "pinned": 0,
+            "unique_tags": 0,
+            "top_tags": [],
+            "latest": None,
+        }
+    pinned = sum(1 for n in notes if n.get("pinned"))
+    tag_counts = {}
+    for n in notes:
+        for t in n.get("tags", []) or []:
+            tag_counts[t] = tag_counts.get(t, 0) + 1
+    top_tags = sorted(tag_counts.items(), key=lambda x: -x[1])[:5]
+    latest = None
+    if notes:
+        latest_n = max(notes, key=lambda n: n.get("updated_at", ""))
+        latest = {
+            "id": latest_n.get("id"),
+            "title": (latest_n.get("title") or "")[:80],
+            "updated_at": latest_n.get("updated_at", ""),
+        }
+    return {
+        "total": len(notes),
+        "pinned": pinned,
+        "unique_tags": len(tag_counts),
+        "top_tags": top_tags,
+        "latest": latest,
+    }
+
+
+def build_report(
+    target_cycle,
+    all_cycles,
+    all_goals,
+    caps,
+    journal_entries,
+    notes=None,
+    command_history=None,
+    server_errors=None,
+):
     """Build milestone report data for a given target cycle number."""
     subset = _cycles_up_to(all_cycles, target_cycle)
     completed = [c for c in subset if c.get("status") == "completed"]
@@ -226,6 +279,13 @@ def build_report(target_cycle, all_cycles, all_goals, caps, journal_entries):
         "skills_count": len(skills),
         "commands_count": len(commands),
         "core_capabilities_count": len(core_caps),
+        "notes": _summarize_notes(notes or []),
+        "command_history_total": (
+            len(command_history or []) if isinstance(command_history, list) else 0
+        ),
+        "server_errors_total": (
+            len(server_errors or []) if isinstance(server_errors, list) else 0
+        ),
         "last_10_highlights": highlights[-10:],
     }
 
@@ -264,6 +324,9 @@ def render_markdown(report):
         f"| Agent skills | {report['skills_count']} |",
         f"| Slash commands | {report['commands_count']} |",
         f"| Core capabilities | {report['core_capabilities_count']} |",
+        f"| Notes (pinned) | {report['notes']['total']} ({report['notes']['pinned']}) |",
+        f"| Command history entries | {report['command_history_total']} |",
+        f"| Server errors logged | {report['server_errors_total']} |",
         f"",
         f"## Goal Performance",
         f"",
@@ -302,6 +365,19 @@ def render_markdown(report):
         icon = _CATEGORY_ICONS.get(cat, "•")
         pct = f"{round(count/total_evolve*100)}%" if total_evolve else "—"
         lines.append(f"- {icon} **{cat.replace('_', ' ')}**: {count} ({pct})")
+
+    notes = report.get("notes", {})
+    if notes.get("total"):
+        lines += ["", "## Notes", ""]
+        lines.append(
+            f"- Total: **{notes['total']}**  |  Pinned: {notes['pinned']}  |  Unique tags: {notes['unique_tags']}"
+        )
+        if notes.get("top_tags"):
+            tags_str = ", ".join(f"`{t}` ({c})" for t, c in notes["top_tags"])
+            lines.append(f"- Top tags: {tags_str}")
+        if notes.get("latest"):
+            lt = notes["latest"]
+            lines.append(f"- Latest: **{lt.get('title', '')}** _({lt.get('id', '')})_")
 
     highlights = report["last_10_highlights"]
     if highlights:
@@ -350,6 +426,9 @@ def main():
     all_goals = _load_goals()
     caps = _load_capabilities()
     journal_entries = _load_journal()
+    notes = _load_notes()
+    command_history = _load_command_history()
+    server_errors = _load_server_errors()
 
     current_cycle = state.get("cycle_number") or len(all_cycles)
 
@@ -364,7 +443,16 @@ def main():
 
     target = args.cycle if args.cycle is not None else current_cycle
 
-    report = build_report(target, all_cycles, all_goals, caps, journal_entries)
+    report = build_report(
+        target,
+        all_cycles,
+        all_goals,
+        caps,
+        journal_entries,
+        notes=notes,
+        command_history=command_history,
+        server_errors=server_errors,
+    )
 
     if args.json:
         print(json.dumps(report, indent=2))

@@ -5,7 +5,14 @@ from datetime import datetime, timedelta, timezone
 
 import streamlit as st
 
-from app.data import load_goals, load_inbox, load_outbox, load_scheduled_tasks
+from app.data import (
+    load_goals,
+    load_inbox,
+    load_inbox_history,
+    load_outbox,
+    load_scheduled_tasks,
+)
+from app.data.write import delete_scheduled_task
 from app.shared import _badge, _STATUS_COLORS, _TYPE_COLORS, parse_dt
 
 MAX_ITEMS = 10
@@ -260,6 +267,86 @@ def _render_upcoming_tasks():
     )
 
 
+def _collect_reminder_rows():
+    """Build the deduped reminder list shown in the Reminders section.
+
+    Joins inbox + inbox_history entries (by task_id) against
+    scheduled_tasks.json entries with source=='reminder'. Only reminders
+    that have at least one matching inbox/history entry are returned —
+    pending reminders that have not yet fired are omitted by design.
+    Returns one row per task_id, carrying the most recent fire timestamp.
+    """
+    tasks = load_scheduled_tasks() or []
+    reminder_tasks = {
+        t.get("id"): t
+        for t in tasks
+        if isinstance(t, dict) and t.get("source") == "reminder" and t.get("id")
+    }
+    if not reminder_tasks:
+        return []
+
+    latest = {}  # task_id -> (sort_key_dt, raw_ts, entry)
+    epoch = datetime.min.replace(tzinfo=timezone.utc)
+    for src in (load_inbox() or [], load_inbox_history() or []):
+        for it in src:
+            if not isinstance(it, dict):
+                continue
+            tid = it.get("task_id")
+            if tid not in reminder_tasks:
+                continue
+            raw_ts = it.get("timestamp") or ""
+            sort_dt = parse_dt(raw_ts) or epoch
+            if tid not in latest or sort_dt > latest[tid][0]:
+                latest[tid] = (sort_dt, raw_ts, it)
+
+    rows = []
+    for tid, (sort_dt, raw_ts, entry) in latest.items():
+        task = reminder_tasks[tid]
+        rows.append(
+            {
+                "task_id": tid,
+                "content": task.get("content") or entry.get("content") or "",
+                "ts": raw_ts,
+                "sort_dt": sort_dt,
+                "schedule_type": task.get("schedule_type", ""),
+            }
+        )
+    rows.sort(key=lambda r: r["sort_dt"], reverse=True)
+    return rows
+
+
+def _render_reminders():
+    """Render the 🔔 Reminders section with a Done button per row."""
+    rows = _collect_reminder_rows()
+    st.markdown("**🔔 Reminders**")
+    if not rows:
+        st.caption("No active reminders.")
+        return
+    for r in rows:
+        col_text, col_btn = st.columns([5, 1])
+        with col_text:
+            raw_preview = r["content"][:100] + (
+                "..." if len(r["content"]) > 100 else ""
+            )
+            preview = _html.escape(raw_preview)
+            time_str = _html.escape(_time_ago(r["ts"]))
+            st.markdown(
+                f"{preview} &nbsp; · &nbsp; <em>{time_str}</em>",
+                unsafe_allow_html=True,
+            )
+        with col_btn:
+            if st.button("Done", key=f"rem_done_{r['task_id']}"):
+                result = delete_scheduled_task(r["task_id"]) or {}
+                if result.get("ok"):
+                    st.toast(f"Reminder cleared: {r['task_id']}")
+                else:
+                    st.toast(
+                        f"Failed to clear reminder: {result.get('error', 'unknown error')}",
+                        icon="⚠️",
+                    )
+                st.rerun()
+
+
 def render():
     goals = load_goals() or []
     inbox = load_inbox() or []
@@ -287,6 +374,8 @@ def render():
         )
         if filter_cat is None:
             filter_cat = "All"
+
+    _render_reminders()
 
     if filter_cat == "Upcoming":
         _render_upcoming_tasks()

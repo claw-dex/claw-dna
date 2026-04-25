@@ -100,24 +100,49 @@ def parse_args(argv):
 
 
 def _clean_text(text: str) -> str:
-    """Strip any residual internal memvid metadata lines from a snippet."""
+    """Strip internal memvid metadata from a snippet.
+
+    The SDK appends frame metadata **inline** (no newlines) after the actual
+    content text, using a pattern like:
+        <content> title: <title> tags: <tags> labels: <labels> category: "..." ...
+
+    We truncate at the first inline metadata marker (`` title: `` with a
+    leading space) to remove the appended metadata block.  A newline-based
+    fallback handles cases where the SDK does use line breaks.
+    """
     if not text:
         return ""
-    lines = []
-    for line in text.splitlines():
-        if line.startswith(
-            (
-                "uri: mv2://",
-                "tags: category",
-                "labels: ",
-                "category: ",
-                "extractous_metadata:",
-                "memvid.",
-                "metadata: {",
-            )
-        ):
-            continue
-        lines.append(line)
+    # Inline separator (SDK appends metadata as " title: ... tags: ...")
+    for sep in (" title: ", " tags: ", " labels: ", " category: "):
+        idx = text.find(sep)
+        if idx != -1:
+            text = text[:idx]
+            break
+    # Newline-based fallback
+    for sep in ("\ntitle: ", "\ntags: ", "\nlabels: ", "\ncategory: "):
+        idx = text.find(sep)
+        if idx != -1:
+            text = text[:idx]
+            break
+    _METADATA_PREFIXES = (
+        "uri: mv2://",
+        "tags: ",
+        "labels: ",
+        "category: ",
+        "title: ",
+        "extractous_metadata:",
+        "memvid.",
+        "metadata: {",
+        "source: ",
+        "status: ",
+        "type: ",
+        "cycle: ",
+        "date: ",
+        "id: ",
+    )
+    lines = [
+        line for line in text.splitlines() if not line.startswith(_METADATA_PREFIXES)
+    ]
     return "\n".join(lines).strip()
 
 
