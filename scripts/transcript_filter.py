@@ -573,7 +573,21 @@ def main(argv):
         if explicit or in_window(ts, since, until):
             kept.append((p, ts))
 
-    kept.sort(key=lambda pt: pt[1] or datetime.max.replace(tzinfo=timezone.utc))
+    # Sort primarily by cycle number (the canonical ordering — cycles are
+    # produced sequentially) and only fall back to timestamp for files that
+    # don't match the `cycle-<N>.jsonl` pattern. Files missing both signals
+    # are pushed to the end. This guarantees the rendered digest follows
+    # cycle-number order even if a transcript's first JSON timestamp is
+    # out of order with its filename.
+    def _sort_key(pt):
+        path, ts = pt
+        cn = cycle_number(path)
+        ts_fallback = ts or datetime.max.replace(tzinfo=timezone.utc)
+        if cn is None:
+            return (1, 0, ts_fallback)
+        return (0, cn, ts_fallback)
+
+    kept.sort(key=_sort_key)
 
     mode = args["mode"]
     if mode == "paths":
