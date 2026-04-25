@@ -33,6 +33,7 @@ bash /agent/scripts/server_restart.sh --verify
 ```
 
 If `server_restart.sh` fails, do it manually:
+
 ```bash
 # Find and kill stale streamlit/server processes (never kill PID 1)
 ps aux | grep -E "streamlit.*server|python.*server\.py" | grep -v grep | awk 'NR>1 && $2 != 1 {print $2}' | xargs -r kill
@@ -58,6 +59,7 @@ every boot — it backs up corrupt files as `.corrupt` and recreates defaults.
 **A server restart (Fix A) usually resolves this automatically.**
 
 If you still need to check manually:
+
 ```bash
 uv run python scripts/maintain.py --fix
 ```
@@ -74,12 +76,14 @@ uv sync
 ```
 
 If the module is not yet listed in `pyproject.toml`, add it first:
+
 ```bash
 uv add <package-name>
 # uv add automatically runs uv sync after updating pyproject.toml
 ```
 
 Then verify the import works:
+
 ```bash
 uv run python -c "import xxx; print('OK')"
 ```
@@ -91,6 +95,7 @@ uv run python -c "import xxx; print('OK')"
 - Run self-test to identify specific failures: `uv run python scripts/self_test.py --record`
 - Check for Python tracebacks via Streamlit logs or: `journalctl -u streamlit 2>/dev/null`
 - Verify all app modules import cleanly (use dynamic list — hardcoded lists go stale):
+
   ```bash
   uv run python -c "
   import os, importlib
@@ -100,6 +105,7 @@ uv run python -c "import xxx; print('OK')"
       except Exception as e: print(f'  FAIL app.{m}: {e}')
   "
   ```
+
 - If a specific tab is broken, check the corresponding `app/*.py` module
 - Restore from backup if you recently modified app files (look for `*.backup` files)
 
@@ -110,6 +116,7 @@ during headless rendering. The `/_stcore/health` endpoint still returned "ok"
 because the Streamlit process is alive — but the Python app itself is broken.
 
 Diagnostic commands:
+
 ```bash
 # Reproduce the error
 cd /agent && uv run python scripts/app_check.py
@@ -131,6 +138,7 @@ for m in mods:
 ```
 
 Common causes:
+
 - **Missing dependency** → `uv sync` (or `uv add <package>` then `uv sync`)
 - **Broken import chain** → a module in `app/` imports something that no longer exists
 - **Error in `_startup_check()`** → the init routine in `app/shared.py` is failing
@@ -180,7 +188,8 @@ All checks must pass before this cycle is complete.
 
 ## Step 5: Record the Failure
 
-Follow the `/agent/prompts/cycle-close.md` checklist. Record the failure in your journal entry (via `cycle_close.py`) and update auto memory `failures.md` with:
+Follow the `/agent/prompts/cycle-close.md` checklist. Record the failure in your journal entry (via `cycle_close.py`) and update `/agent/memory/failures.json` with:
+
 - Symptom: what health check found
 - Diagnosis: actual root cause
 - Fix: what you did

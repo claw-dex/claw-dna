@@ -37,7 +37,7 @@ fi
 # ── Parse arguments ──────────────────────────────────────────
 AGENT_SLEEP=false
 MAX_EVOLVE=5
-MAX_DREAM=3
+MAX_DREAM=5
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --agent-sleep) AGENT_SLEEP=true; shift ;;
@@ -95,21 +95,6 @@ USER_TIME=$(TZ="$USER_TZ" date "+%Y-%m-%d %H:%M:%S %Z")
 HEARTBEAT_TS=$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")
 TMP_STATE=$(mktemp /agent/memory/state.json.XXXXXX)
 jq --arg ts "$HEARTBEAT_TS" '.last_heartbeat = $ts' /agent/memory/state.json > "$TMP_STATE" 2>/dev/null && mv "$TMP_STATE" /agent/memory/state.json || rm -f "$TMP_STATE"
-
-# ── Sleep mode: skip cycle during 00:00–08:00 unless inbox has items ──
-if $AGENT_SLEEP; then
-    CURRENT_HOUR=$(TZ="$USER_TZ" date "+%H")
-    CURRENT_HOUR=${CURRENT_HOUR#0}  # strip leading zero for arithmetic
-    if [ "$CURRENT_HOUR" -lt 8 ]; then
-        inbox_count=$(jq 'length // 0' /agent/messages/inbox.json 2>/dev/null || echo 0)
-        [[ "$inbox_count" =~ ^[0-9]+$ ]] || inbox_count=0
-        if [ "$inbox_count" -eq 0 ]; then
-            echo "[$(date -Is)] Agent is sleeping (${USER_TIME}). No inbox items. Skipping cycle."
-            exit 0
-        fi
-        echo "[$(date -Is)] Agent is sleeping but inbox has ${inbox_count} item(s). Waking up."
-    fi
-fi
 
 CYCLE_NUM=$((CYCLE_NUM + 1))
 

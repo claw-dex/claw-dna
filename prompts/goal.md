@@ -110,7 +110,7 @@ Messages are conversational — they do NOT create trackable goals.
    - **System health / self-test request** (e.g., "run the tests", "is the system healthy?", "check for errors", "run self-test") → run `uv run python scripts/self_test.py --record` and report results in outbox; if failures, triage with `prompts/error-triage.md`
    - **Housekeeping / cleanup request** (e.g., "clean up logs", "run maintenance", "fix memory files") → run `scripts/maintain.py --fix` and report summary in outbox
    - **Portal navigation question** (e.g., "what tabs do you have?", "how do I use the portal?", "which tab shows X?") → read `prompts/server.md` TAB_REGISTRY table and describe the relevant tab(s); mention the portal URL to the user (e.g., `http://localhost:8080/app/`); no scripts needed
-   - **Capabilities / introspection question** (e.g., "what can you do?", "what scripts do you have?", "what plugins are installed?") → check auto memory (`capabilities.md`) and/or `AGENTS.md` and answer directly; no scripts needed
+   - **Capabilities / introspection question** (e.g., "what can you do?", "what scripts do you have?", "what plugins are installed?") → check `/agent/memory/capabilities.json` and/or `AGENTS.md` and answer directly; no scripts needed
    - **Out-of-scope question** → answer directly from memory; no scripts needed
 3. Write response to `/agent/messages/outbox.json` (always respond — silence is confusing)
 4. Do NOT clear outbox.json — the user reads and clears messages manually via the portal

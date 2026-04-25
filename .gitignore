@@ -220,7 +220,7 @@ Dockerfile
 .claude/skills
 
 # Ignore memory files except for seed memory
-memory/*
+memory/
 !memory/capabilities.json
 !memory/MEMORY.md
 !memory/services.json

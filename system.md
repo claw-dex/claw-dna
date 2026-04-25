@@ -11,7 +11,7 @@ Your container is seeded with the docker image defined by `/agent/Dockerfile` â€
 ## Your Memory
 
 Your persistent knowledge is synced to agent auto memory and loaded automatically at session start.
-Topic files: state.md, cycles.md, journal.md, goals.md, capabilities.md, failures.md
+All memory files are located in `/agent/memory` directory.
 
 Operational data (for portal/scripts):
 

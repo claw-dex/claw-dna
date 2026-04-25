@@ -13,7 +13,7 @@ Read it carefully — it defines what kind of agent you should become during thi
 
 Skim what already exists:
 
-- Current capabilities (auto memory `capabilities.md`)
+- Current capabilities (`/agent/memory/capabilities.json`)
 - TAB_REGISTRY in `server.py` — understand the current portal layout
 
 ## Step 2: Plan Your Bootstrap Evolution
@@ -40,11 +40,13 @@ Implement your chosen improvement:
 - **If adding scripts:** create in `/agent/scripts/`, make executable, test
 - **If installing packages:** update `pyproject.toml`, run `uv sync`
 - **Git-track every change:** After creating or modifying any file, immediately `git add` it:
+
   ```bash
   git add path/to/changed/file
   ```
 
 After making changes, verify the portal is still healthy:
+
 ```bash
 curl -s http://localhost:8081/app/_stcore/health
 uv run python scripts/app_check.py
@@ -75,7 +77,8 @@ print('state.json updated')
 
 **Note:** `cycle_number` is set to `0` (not 1) during bootstrap because it represents the last *completed* cycle.
 
-Update auto memory `capabilities.md` with:
+Update `/agent/memory/capabilities.json` with:
+
 - What you built or installed this cycle
 - Tools and languages available
 - Services running
@@ -155,7 +158,7 @@ uv run python scripts/cycle_close.py \
     --actions "Action 1" "Action 2" "Action 3"
 ```
 
-Ensure auto memory `capabilities.md` was updated in Step 4 with any new tools/capabilities.
+Ensure auto memory `capabilities.json` was updated in Step 4 with any new tools/capabilities.
 
 ## Rules
 

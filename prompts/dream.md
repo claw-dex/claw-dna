@@ -59,6 +59,11 @@ Your memory files are located in `/agent/memory` directory. The rest of the path
   - Use `--since ISO --until ISO` instead of `--hours` for an explicit window, or pass explicit FILES… to bypass the time filter entirely.
   - **Pagination contract:** at most `--page-size` chars (default 25000) per page. Page boundaries fall between JSONL entries — a single entry larger than the page budget still gets its own page intact (so a few pages may exceed the budget by a small margin; this is by design). The page-1 header line always reports the total page count when more than one page exists.
 
+- **Skip prior dream cycles.** A dream that reviews itself (or a sibling dream) just produces noise — those cycles contain housekeeping, not work-doing. Identify dream cycles and ignore their content entirely:
+  - The authoritative source is `/agent/memory/cycles.json` — any entry whose `type == "dream"` is a dream cycle. Build a set of those `cycle` numbers and skip transcripts named `cycle-<N>.jsonl` for any `N` in that set.
+  - As a fallback, you can recognize a dream cycle directly in the rendered digest: its `### User` block starts with `# Dream: Nightly reflection and consolidation of all memories…`. If you encounter that header inside a `## Cycle <N>` section, treat the whole `## Cycle <N>` block as a no-op for Phases 2–4 (no topics, no learnings extracted from it).
+  - Do **not** count skipped dream cycles against the 100-page batch budget — they don't add to topics/learnings, so reading past them is essentially free.
+
 - **Per-dream batch limit — process at most 100 pages in one dream cycle.**
   - Compute `END_PAGE = min(START_PAGE + 99, TOTAL_PAGES)` (where `TOTAL_PAGES` is read from the page-1 header) and only read pages `START_PAGE..END_PAGE` in this dream.
   - If `END_PAGE < TOTAL_PAGES`, the dream is **not finished** — there are more pages to digest in a future dream. After completing Phases 2–4 on what you have, jump to **Phase 5** and write `Status: in_progress` to `dream/remark.md` with `Next page: END_PAGE + 1`. Do **not** spend further effort trying to cover the rest in this cycle.

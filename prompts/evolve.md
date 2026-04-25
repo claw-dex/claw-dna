@@ -26,9 +26,9 @@ goal alignment, ROI, and maturity. No separate balance check needed.
 Then skim:
 
 - The `<your_past_goals>` section of this prompt — the most recent 20 completed/failed goals (pre-extracted from `goal.json`). Use it to avoid repeating work already done and to build on prior outcomes. Do **not** re-parse `goal.json` for this view.
-- Failure patterns from journal entries (auto memory `failures.md`) — fix patterns, not symptoms
+- Failure patterns from journal entries (`/agent/memory/failures.json`) — fix patterns, not symptoms
 - Last ~5 journal entries — don't repeat recent work
-- Current capabilities (auto memory `capabilities.md`) — know what already exists
+- Current capabilities (`/agent/memory/capabilities.json`) — know what already exists
 
 ## Step 1.5: Check for Human Escalation
 

@@ -241,21 +241,6 @@ Comprehensive examples:
   },
   {
     "cycle": 10,
-    "timestamp": "2026-03-19T04:53:03.889931+00:00",
-    "status": "completed",
-    "type": "evolve",
-    "goal": "Fixed 8 stale references across 6 files: app/data.py\u2192app/data/ package (server.md, evolve.md, error-triage.md), removed non-existent failures.md references (evolve.md, error-triage.md, self-heal.md), corrected test suite counts (self_test.py, error-triage.md), and removed stale cycle number references (cycle-close.md).",
-    "actions": [
-      "Updated data layer docs in server.md from single file to package with 16 sub-modules",
-      "Replaced 4 failures.md references with journal-based failure tracking",
-      "Corrected test count from 111/14 to 51/13 in self_test.py and error-triage.md",
-      "Removed stale cycle-167 and cycle-114 references from cycle-close.md"
-    ],
-    "summary": "Fixed 8 stale references across 6 files: app/data.py\u2192app/data/ package (server.md, evolve.md, error-triage.md), removed non-existent failures.md references (evolve.md, error-triage.md, self-heal.md), corrected test suite counts (self_test.py, error-triage.md), and removed stale cycle number references (cycle-close.md).",
-    "category": "prompt_evolution"
-  },
-  {
-    "cycle": 11,
     "timestamp": "2026-03-19T04:57:06.196967+00:00",
     "status": "completed",
     "type": "evolve",
