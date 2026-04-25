@@ -17,15 +17,8 @@ npx playwright install-deps     || ok_agent_browser=false
 npm install -g agent-browser    || ok_agent_browser=false
 su -c "agent-browser install" agent || ok_agent_browser=false
 
-# ── Memvid CLI ────────────────────────────────────────────────
-echo "==> Installing Memvid CLI"
-chmod +x "$SCRIPT_DIR/install_memvid.sh"
-ok_memvid=true
-"$SCRIPT_DIR/install_memvid.sh" || ok_memvid=false
-
 # ── Summary ───────────────────────────────────────────────────
 echo ""
 echo "==> Installation summary:"
 _status() { $1 && echo "OK" || echo "FAILED"; }
 echo "    agent-browser       : $(_status $ok_agent_browser)"
-echo "    memvid              : $(_status $ok_memvid)"

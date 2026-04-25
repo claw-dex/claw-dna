@@ -15,6 +15,7 @@ dependencies = [
     "claude-agent-sdk",
     "pykeepass",
     "psutil",
+    "memvid-sdk-free==2.0.159",
 ]
 
 [build-system]
