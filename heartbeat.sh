@@ -317,9 +317,18 @@ build_task_prompt() {
         evolve)
             cat /agent/prompts/evolve.md
             echo ""
+            echo "<your_current_goals>"
+            echo "(active goals from goal.json — pending/in-progress)"
+            jq '[.[] | select(.status == "pending" or .status == "in-progress" or .status == "in_progress")]' /agent/memory/goal.json 2>/dev/null || echo '[]'
+            echo "</your_current_goals>"
+            echo ""
             echo "<your_past_goals>"
-            echo "(completed/failed goals, sorted by created_at)"
-            jq '[.[] | select(.status == "completed" or .status == "failed")] | sort_by(.created_at) | .[0:20]' /agent/memory/goal.json 2>/dev/null || echo '[]'
+            echo "(all completed/failed from goal.json + up to 20 most recent from goal_history.json, sorted by created_at)"
+            jq -s '
+                ((.[0] // []) | map(select(.status == "completed" or .status == "failed")))
+                + ((.[1] // []) | sort_by(.created_at) | .[-20:])
+                | sort_by(.created_at)
+            ' /agent/memory/goal.json /agent/memory/goal_history.json 2>/dev/null || echo '[]'
             echo "</your_past_goals>"
             ;;
     esac

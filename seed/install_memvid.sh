@@ -1,7 +1,10 @@
 #!/bin/bash
 # Memvid SDK Installer for macOS and Linux
 # Clones the memvid-sdk repo and builds the Python SDK (Rust extension via
-# maturin) using the SDK's own scripts/build_sdk.sh.
+# maturin) using the SDK's own scripts/build_sdk.sh — which now includes the
+# `fastembed` Cargo feature so local embedding models (bge-base, etc.) work
+# without an external API key. Then builds a wheel and installs it into the
+# project venv.
 
 set -e
 
@@ -95,15 +98,56 @@ install_memvid_sdk() {
         exit 1
     fi
 
-    print_info "Running $build_script..."
-    bash "$build_script"
+    print_info "Running $build_script --wheel..."
+    bash "$build_script" --wheel
 
-    print_success "memvid-sdk built successfully"
-    print_info "SDK venv:         $MEMVID_SDK_SRC_DIR/.venv"
-    print_info "To use the SDK in another project, either:"
-    print_info "  - activate the SDK venv: source $MEMVID_SDK_SRC_DIR/.venv/bin/activate"
-    print_info "  - or install editably into your project venv:"
-    print_info "      uv pip install -e $MEMVID_SDK_SRC_DIR"
+    print_success "memvid-sdk built successfully (with fastembed + wheel)"
+}
+
+# Locate the wheel produced by build_sdk.sh --wheel and install it into the
+# project venv. No re-compile happens here — we just pip-install the prebuilt
+# wheel (uv pip install -e would trigger a fresh maturin build without the
+# ORT env vars, which fails with a 504, so we deliberately use the wheel).
+install_wheel_to_project_venv() {
+    local src_dir="${MEMVID_SDK_SRC_DIR:-$HOME/.memvid-sdk-src}"
+    local wheel_dir="${src_dir}/.wheels"
+
+    local wheel
+    wheel="$(ls -t "${wheel_dir}"/memvid*.whl 2>/dev/null | head -1)"
+    if [[ -z "${wheel}" ]]; then
+        print_error "No wheel found in ${wheel_dir} — did build_sdk.sh --wheel succeed?"
+        exit 1
+    fi
+    print_success "Wheel: $(basename "${wheel}")"
+
+    local script_dir project_root
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    project_root="$(cd "${script_dir}/.." && pwd)"
+
+    if [[ ! -f "${project_root}/pyproject.toml" ]]; then
+        print_warning "No pyproject.toml at ${project_root} — skipping project venv install"
+        print_info "Install the wheel manually: pip install ${wheel}"
+        return 0
+    fi
+
+    if command_exists uv; then
+        (cd "${project_root}" && uv sync --quiet) || true
+        if (cd "${project_root}" && uv pip install --force-reinstall "${wheel}"); then
+            print_success "memvid_sdk (fastembed) installed into ${project_root}/.venv"
+        else
+            print_error "uv pip install failed for wheel ${wheel}"
+            exit 1
+        fi
+    else
+        local project_pip="${project_root}/.venv/bin/pip"
+        if [[ -x "${project_pip}" ]]; then
+            "${project_pip}" install --force-reinstall "${wheel}" && \
+                print_success "memvid_sdk (fastembed) installed into ${project_root}/.venv"
+        else
+            print_warning "Neither uv nor project pip found — install the wheel manually:"
+            print_info "  pip install ${wheel}"
+        fi
+    fi
 }
 
 # Verify installation by importing the SDK from its own venv
@@ -122,53 +166,48 @@ verify() {
     fi
 }
 
-# Install the built SDK editably into the claw-dna project venv so that
-# `uv run python scripts/memory_*.py` can `import memvid_sdk` directly.
-install_into_project_venv() {
-    local script_dir project_root
+# Verify that fastembed embedding works end-to-end in the project venv
+verify_embedding() {
+    local script_dir project_root project_python
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     project_root="$(cd "${script_dir}/.." && pwd)"
+    project_python="${project_root}/.venv/bin/python3"
 
-    if [[ ! -f "${project_root}/pyproject.toml" ]]; then
-        print_warning "No pyproject.toml at ${project_root} — skipping project venv install"
+    if [[ ! -x "${project_python}" ]]; then
+        print_warning "Project venv python not found — skipping embedding verification"
         return 0
     fi
 
-    print_info "Installing memvid_sdk editably into claw-dna project venv..."
-    print_info "  project:  ${project_root}"
-    print_info "  source:   ${MEMVID_SDK_SRC_DIR}"
+    print_info "Verifying fastembed embedding in project venv..."
+    if "${project_python}" - <<'EOF'
+import memvid_sdk, tempfile, os, sys
 
-    if ! command_exists uv; then
-        print_warning "uv not found on PATH — skipping project venv install"
-        print_info "To install manually later:"
-        print_info "  cd ${project_root} && uv pip install -e ${MEMVID_SDK_SRC_DIR}"
-        return 0
-    fi
-
-    # Ensure the project has a venv to install into
-    (cd "${project_root}" && uv sync --quiet) || {
-        print_warning "uv sync failed at ${project_root} — skipping editable install"
-        return 0
-    }
-
-    if (cd "${project_root}" && uv pip install -e "${MEMVID_SDK_SRC_DIR}"); then
-        print_success "memvid_sdk installed editably into ${project_root}/.venv"
+# Create a tiny temp .mv2 and try to put() with local embeddings
+with tempfile.TemporaryDirectory() as d:
+    mv2 = os.path.join(d, "test.mv2")
+    try:
+        mem = memvid_sdk.create(mv2, enable_vec=True, enable_lex=True)
+        mem.put(
+            title="fastembed test",
+            label="test",
+            text="Testing local embeddings with fastembed bge-base model.",
+            enable_embedding=True,
+            embedding_model="bge-base",
+        )
+        print("fastembed put() OK")
+    except Exception as e:
+        print(f"fastembed put() FAILED: {e}", file=sys.stderr)
+        sys.exit(1)
+EOF
+    then
+        print_success "fastembed embedding verified — local models work"
     else
-        print_error "Failed to install memvid_sdk into project venv"
-        exit 1
-    fi
-
-    # Verify import from the project venv
-    local project_python="${project_root}/.venv/bin/python3"
-    if [[ -x "$project_python" ]] && "$project_python" -c "import memvid_sdk" 2>/dev/null; then
-        print_success "memvid_sdk imports cleanly from project venv"
-    else
-        print_warning "memvid_sdk installed but import check failed — investigate manually"
+        print_warning "fastembed embedding check failed (model download may be needed on first use)"
     fi
 }
 
 main() {
-    echo "Memvid SDK Installer"
+    echo "Memvid SDK Installer (with fastembed local embeddings)"
     echo "Checking prerequisites…"
     echo ""
 
@@ -178,16 +217,25 @@ main() {
     check_rust
     echo ""
 
+    # Step 1: Build SDK + wheel (upstream build_sdk.sh --wheel)
     install_memvid_sdk
     echo ""
 
+    # Step 2: Verify build
     verify
     echo ""
 
-    install_into_project_venv
+    # Step 3: Install the prebuilt wheel into the project venv (no recompile)
+    install_wheel_to_project_venv
+    echo ""
+
+    # Step 4: Verify fastembed works end-to-end
+    verify_embedding
     echo ""
 
     print_success "Installation complete."
+    print_info "Local embedding models (bge-base, etc.) are now available."
+    print_info "Use embedding_model=\"bge-base\" in put() calls."
 }
 
 main

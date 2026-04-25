@@ -158,13 +158,68 @@ def _run_normalize_inlined(cycles_path: Path, verbose: bool = True) -> int:
 # ── Inbox archiving ─────────────────────────────────────────────────────────
 
 
+def _store_inbox_to_memvid(items: list) -> int:
+    """Ingest each inbox message into long-term semantic memory.
+
+    Returns the count of messages successfully ingested. Non-fatal: a missing
+    SDK, build failure, or per-message error prints a warning and continues.
+    """
+    if not items:
+        return 0
+    try:
+        from scripts.memory_ingest import DEFAULT_MV2, append_text, build
+    except Exception as e:
+        print(f"  ⚠ inbox memvid — import skipped: {e}")
+        return 0
+
+    # Ensure the .mv2 exists; build from memory files if this is the first run.
+    if not DEFAULT_MV2.exists():
+        try:
+            build(MEMORY, DEFAULT_MV2, quiet=True)
+        except SystemExit as e:
+            print(f"  ⚠ inbox memvid — build failed (exit {e.code}); skipping ingest")
+            return 0
+        except Exception as e:
+            print(f"  ⚠ inbox memvid — build failed: {e}; skipping ingest")
+            return 0
+
+    ok = 0
+    for i, msg in enumerate(items):
+        if not isinstance(msg, dict):
+            continue
+        content = str(msg.get("content", "")).strip()
+        if len(content) < 5:
+            continue
+        msg_type = str(msg.get("type", "message"))
+        ts = str(msg.get("timestamp") or msg.get("date") or "")
+        date_part = ts[:10] if ts else ""
+        title = f"Inbox {msg_type}: {content[:80]}"
+        tags = ["inbox", f"type:{msg_type}"]
+        if date_part:
+            tags.append(f"date:{date_part}")
+        msg_id = msg.get("id")
+        if msg_id:
+            tags.append(f"id:{msg_id}")
+        try:
+            append_text(DEFAULT_MV2, content, title=title, tags=tags, quiet=True)
+            ok += 1
+        except SystemExit as e:
+            print(f"  ⚠ inbox memvid — msg {i} exit {e.code}")
+        except Exception as e:
+            print(f"  ⚠ inbox memvid — msg {i} failed: {e}")
+    return ok
+
+
 def _archive_inbox() -> int:
     """Archive /agent/messages/inbox.json to inbox_history.json, then clear inbox.
 
-    Appends current inbox items to inbox_history.json (created as [] if missing),
-    then writes [] back to inbox.json. Returns the number of items archived,
-    or -1 on failure (caller can distinguish "nothing to do" from "data at risk").
-    Returns 0 when inbox is missing or already empty.
+    Before archival, each inbox message is ingested into long-term semantic
+    memory (best-effort, non-fatal). Then the items are appended to
+    inbox_history.json (created as [] if missing) and inbox.json is cleared.
+
+    Returns the number of items archived, or -1 on failure (caller can
+    distinguish "nothing to do" from "data at risk"). Returns 0 when inbox is
+    missing or already empty.
     """
     inbox_path = Path("/agent/messages/inbox.json")
     history_path = Path("/agent/messages/inbox_history.json")
@@ -178,6 +233,11 @@ def _archive_inbox() -> int:
         return -1
     if not isinstance(items, list) or not items:
         return 0
+
+    # Ingest each message into long-term memory before archival.
+    ingested = _store_inbox_to_memvid(items)
+    if ingested > 0:
+        print(f"  ✓ inbox memvid — ingested {ingested}/{len(items)} message(s)")
 
     history = []
     if history_path.exists():
@@ -543,6 +603,49 @@ def _sync_auto_memory() -> None:
 # ── Long-term memory (memvid via memory_ingest.py) ───────────────────────────
 
 
+def _store_cycle_to_memvid(cycle_entry: dict) -> bool:
+    """Ingest a cycles.json entry into long-term semantic memory.
+
+    Routes through `memory_ingest.append_json` whose `_detect_and_chunk`
+    recognises cycle records (presence of start/end/duration_seconds) and
+    sends them through `chunk_cycles`. Best-effort and non-fatal: a missing
+    SDK or per-call error prints a warning and returns False.
+    """
+    cycle = cycle_entry.get("cycle", "?")
+    try:
+        from scripts.memory_ingest import DEFAULT_MV2, append_json, build
+    except Exception as e:
+        print(f"  ⚠ cycle memvid — import skipped: {e}")
+        return False
+
+    if not DEFAULT_MV2.exists():
+        try:
+            build(MEMORY, DEFAULT_MV2, quiet=True)
+            # build() ingested journal.json + cycles.json wholesale — this
+            # cycle's record is already included via that pass.
+            print(
+                f"  ✓ cycle memvid — built new {DEFAULT_MV2.name} "
+                f"(cycle {cycle} included via cycles.json)"
+            )
+            return True
+        except SystemExit as e:
+            print(f"  ⚠ cycle memvid — build failed (exit {e.code}); skipping ingest")
+            return False
+        except Exception as e:
+            print(f"  ⚠ cycle memvid — build failed: {e}; skipping ingest")
+            return False
+
+    try:
+        append_json(DEFAULT_MV2, json.dumps(cycle_entry), quiet=True)
+        return True
+    except SystemExit as e:
+        print(f"  ⚠ cycle memvid — append exit {e.code}")
+        return False
+    except Exception as e:
+        print(f"  ⚠ cycle memvid — append failed: {e}")
+        return False
+
+
 def _store_to_memvid(journal_entry: dict) -> None:
     """Store a journal entry into long-term semantic memory via memory_ingest.py.
 
@@ -767,6 +870,10 @@ def main():
     cycle_entry.update(cycle_update)
     write_atomic(cycles_path, cycles)
     print(f"\n  ✓ cycles.json updated (cycle {cycle_n})")
+
+    # 1a. Ingest the finalized cycle record into long-term semantic memory.
+    if _store_cycle_to_memvid(cycle_entry):
+        print(f"  ✓ cycle memvid — stored cycle {cycle_n} record")
 
     # 2. Update state.json
     state.update(state_update)

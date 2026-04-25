@@ -93,7 +93,7 @@ def render_services() -> str:
         port = info.get("port")
         status = "running" if pid else "stopped"
         cmd = " ".join(info.get("command", [])) if info.get("command") else "N/A"
-        md += f"### {name}\n\n"
+        md += f"- **Name**: {name}\n"
         md += f"- **Status**: {status}\n"
         if pid:
             md += f"- **PID**: {pid}\n"
@@ -288,7 +288,7 @@ def render_notes() -> str:
         nid = n.get("id", "?")
         tags = n.get("tags", []) or []
         updated = (n.get("updated_at", "") or "")[:16].replace("T", " ")
-        md += f"### {title}{pin}\n\n"
+        md += f"- **Title**:{title}{pin}\n"
         md += f"- **ID**: {nid}\n"
         if tags:
             md += f"- **Tags**: {', '.join(tags)}\n"

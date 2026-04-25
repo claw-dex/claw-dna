@@ -56,7 +56,11 @@ def _require_sdk():
 
 MEMORY = Path("/agent/memory")
 DEFAULT_MV2 = MEMORY / "long_term_memory.mv2"
-EMBED_MODEL = "bge-base"
+# Local embedding model — uses fastembed (compiled into the Rust SDK binary).
+# Requires the SDK to be built with `-F fastembed` (see seed/install_memvid.sh).
+# Set to None to disable embedding and use lex-only indexing.
+ENABLE_EMBEDDING = True
+EMBED_MODEL = "bge-base"  # BAAI/bge-base-en-v1.5 via fastembed
 
 # Enable vector compression only once the .mv2 grows past this size.
 # Below the threshold, uncompressed vectors (~270 KB/doc) give the best
@@ -109,11 +113,13 @@ def _open_or_create(mv2: Path):
 
 def _put_kwargs(compress: bool) -> dict:
     """Shared kwargs for every `Memvid.put` call."""
-    return {
-        "embedding_model": EMBED_MODEL,
-        "enable_embedding": True,
+    kwargs: dict = {
+        "enable_embedding": ENABLE_EMBEDDING,
         "vector_compression": compress,
     }
+    if EMBED_MODEL is not None:
+        kwargs["embedding_model"] = EMBED_MODEL
+    return kwargs
 
 
 def load_json(path: Path):
@@ -384,9 +390,12 @@ def gather_all_chunks(memory_dir: Path) -> list:
 
       1. journal.json       — current window (richest, most recent)
       2. journal-archive.json — historical journal (rich, ordered newest-first)
-      3. goal.json          — active/recent goals
-      4. cycles.json        — structured cycle records (lower priority; largely
+      3. cycles.json        — structured cycle records (lower priority; largely
                                redundant with journal data and shorter text)
+      4. cycles-archive.json — historical cycle records
+
+    Goals (goal.json, goal_history.json) are intentionally excluded from
+    long-term memory.
     """
     all_chunks = []
 
@@ -400,20 +409,16 @@ def gather_all_chunks(memory_dir: Path) -> list:
     if isinstance(archive, list):
         all_chunks.extend(chunk_journal(archive))
 
-    # 3. Goals
-    goals_raw = load_json(memory_dir / "goal.json")
-    if isinstance(goals_raw, list):
-        all_chunks.extend(chunk_goals(goals_raw))
-    elif isinstance(goals_raw, dict):
-        goals_list = goals_raw.get("goals", [])
-        if isinstance(goals_list, list):
-            all_chunks.extend(chunk_goals(goals_list))
-
-    # 4. Cycle records — lower priority; added last because cycle metadata
+    # 3. Cycle records — lower priority; added last because cycle metadata
     #    largely duplicates what journal entries already contain.
     cycles = load_json(memory_dir / "cycles.json")
     if isinstance(cycles, list):
         all_chunks.extend(chunk_cycles(cycles))
+
+    # 4. Cycles archive — historical cycle records
+    cycles_archive = load_json(memory_dir / "cycles-archive.json")
+    if isinstance(cycles_archive, list):
+        all_chunks.extend(chunk_cycles(cycles_archive))
 
     return all_chunks
 
@@ -431,7 +436,7 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
     mv2 = Path(mv2_path)
 
     chunks = gather_all_chunks(mem_dir)
-    if not quiet:
+    if not quiet and not json_mode:
         print(f"[INGEST] Parsed {len(chunks)} chunks from memory files")
 
     if not chunks:
@@ -482,7 +487,9 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
 
     # Compression threshold is checked per-chunk because the file grows
     # during the build loop.
-    put_base_kwargs = {"embedding_model": EMBED_MODEL, "enable_embedding": True}
+    put_base_kwargs: dict = {"enable_embedding": ENABLE_EMBEDDING}
+    if EMBED_MODEL is not None:
+        put_base_kwargs["embedding_model"] = EMBED_MODEL
     ok, fail = 0, 0
     for i, ch in enumerate(chunks):
         merged_meta = dict(ch.get("metadata") or {})

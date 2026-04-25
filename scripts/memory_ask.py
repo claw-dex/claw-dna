@@ -140,17 +140,34 @@ def retrieve_context(mv2_path, question, k):
         )
         result = mem.ask(question, k=k, context_only=True)
     except Exception as e:
-        print(f"ERROR: memvid ask failed: {e}", file=sys.stderr)
-        sys.exit(1)
+        err = str(e)
+        # MV004: no lex hits → SDK tried vec fallback → fastembed not compiled in.
+        # Treat as zero results rather than a hard failure.
+        if "MV004" in err or "Lexical index is not enabled" in err:
+            result = {}
+        else:
+            print(f"ERROR: memvid ask failed: {e}", file=sys.stderr)
+            sys.exit(1)
 
-    hits = list(getattr(result, "hits", []) or [])
+    # SDK returns plain dicts, not dataclasses — use .get() not getattr()
+    _rget = (
+        (lambda k_, d=None: result.get(k_, d))
+        if isinstance(result, dict)
+        else (lambda k_, d=None: getattr(result, k_, d))
+    )
+    hits = list(_rget("hits") or [])
     clean_parts = []
     results = []
     for h in hits:
-        title = getattr(h, "title", "") or ""
-        snippet = _clean_text(getattr(h, "snippet", "") or "")
-        score = getattr(h, "score", 0.0)
-        frame_id = getattr(h, "frame_id", None)
+        _hget = (
+            (lambda k_, d=None: h.get(k_, d))
+            if isinstance(h, dict)
+            else (lambda k_, d=None: getattr(h, k_, d))
+        )
+        title = _hget("title", "") or ""
+        snippet = _clean_text(_hget("snippet", "") or "")
+        score = _hget("score", 0.0)
+        frame_id = _hget("frame_id")
         if snippet:
             clean_parts.append(f"[{title}]\n{snippet}")
         results.append(
@@ -162,8 +179,8 @@ def retrieve_context(mv2_path, question, k):
             }
         )
 
-    sdk_context = getattr(result, "context", "") or ""
-    stats = getattr(result, "stats", {}) or {}
+    sdk_context = _rget("context", "") or ""
+    stats = _rget("stats", {}) or {}
     total_hits = (
         stats.get("total_hits", len(hits)) if isinstance(stats, dict) else len(hits)
     )

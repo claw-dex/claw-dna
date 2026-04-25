@@ -143,15 +143,21 @@ def _clean_snippet(text):
 
 
 def _hit_to_dict(hit, rank: int) -> dict:
-    """Normalize an SDK Hit dataclass into the dict shape used by this script."""
-    snippet = _clean_snippet(getattr(hit, "snippet", None) or "")
+    """Normalize an SDK Hit dict (or dataclass) into the dict shape used by this script."""
+    # SDK returns plain dicts, not dataclasses — use .get() with getattr fallback
+    _g = (
+        (lambda k, d=None: hit.get(k, d))
+        if isinstance(hit, dict)
+        else (lambda k, d=None: getattr(hit, k, d))
+    )
+    snippet = _clean_snippet(_g("snippet") or "")
     return {
         "rank": rank,
-        "score": getattr(hit, "score", 0.0),
-        "title": getattr(hit, "title", "") or "",
+        "score": _g("score", 0.0),
+        "title": _g("title", "") or "",
         "snippet": snippet,
-        "tags": list(getattr(hit, "tags", []) or []),
-        "frame_id": getattr(hit, "frame_id", None),
+        "tags": list(_g("tags", []) or []),
+        "frame_id": _g("frame_id"),
     }
 
 
@@ -220,16 +226,38 @@ def _run_query(opts, mv2):
             until=until,
         )
     except Exception as e:
-        print(f"ERROR: memvid ask failed: {e}", file=sys.stderr)
-        sys.exit(1)
+        err = str(e)
+        # MV004 = no lex hits → SDK tried vec fallback → fastembed not compiled in.
+        # Treat as zero results rather than a hard failure.
+        if "MV004" in err or "Lexical index is not enabled" in err:
+            result = {}
+        else:
+            print(f"ERROR: memvid ask failed: {e}", file=sys.stderr)
+            sys.exit(1)
 
-    raw_hits = list(getattr(result, "hits", []) or [])
-    raw_hits.sort(key=lambda h: getattr(h, "score", 0.0), reverse=True)
+    # SDK returns a plain dict, not a dataclass — use .get() not getattr()
+    raw_hits = list(
+        (
+            result.get("hits")
+            if isinstance(result, dict)
+            else getattr(result, "hits", None)
+        )
+        or []
+    )
+    raw_hits.sort(
+        key=lambda h: (
+            h.get("score", 0.0) if isinstance(h, dict) else getattr(h, "score", 0.0)
+        ),
+        reverse=True,
+    )
     items = [_hit_to_dict(h, i) for i, h in enumerate(raw_hits, 1)]
+    stats = (
+        result.get("stats")
+        if isinstance(result, dict)
+        else getattr(result, "stats", None)
+    )
     total = (
-        getattr(result, "stats", {}).get("total_hits", len(items))
-        if isinstance(getattr(result, "stats", None), dict)
-        else len(items)
+        stats.get("total_hits", len(items)) if isinstance(stats, dict) else len(items)
     )
 
     if opts["json_mode"]:
@@ -365,8 +393,20 @@ def recall(query: str, k: int = 5, until=None, json_mode: bool = False) -> list:
 
         mem = _open_readonly(MV2_PATH)
         result = mem.ask(query, k=k, context_only=True, until=until_unix)
-        raw_hits = list(getattr(result, "hits", []) or [])
-        raw_hits.sort(key=lambda h: getattr(h, "score", 0.0), reverse=True)
+        raw_hits = list(
+            (
+                result.get("hits")
+                if isinstance(result, dict)
+                else getattr(result, "hits", None)
+            )
+            or []
+        )
+        raw_hits.sort(
+            key=lambda h: (
+                h.get("score", 0.0) if isinstance(h, dict) else getattr(h, "score", 0.0)
+            ),
+            reverse=True,
+        )
         return [_hit_to_dict(h, i) for i, h in enumerate(raw_hits, 1)]
     except Exception:
         return []
