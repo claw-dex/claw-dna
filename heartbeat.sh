@@ -15,9 +15,9 @@
 #
 #  The "idle" prompt is EVOLVE by default; with --agent-sleep it becomes DREAM
 #  (nightly reflection/consolidation, see prompts/dream.md) only between
-#  20:00 and 08:00 in the user's timezone — during the day the idle prompt
-#  stays EVOLVE even when --agent-sleep is set. The consecutive cap is
-#  --max-evolve (default 5) for evolve and --max-dream (default 5) for dream.
+#  00:00 and 08:00 in the user's timezone — outside that window the idle
+#  prompt stays EVOLVE even when --agent-sleep is set. The consecutive cap
+#  is --max-evolve (default 5) for evolve and --max-dream (default 5) for dream.
 #
 #  Uses:
 #    --system-prompt         → fixed context (constitution, memory, container info)
@@ -86,13 +86,13 @@ fi
 USER_TIME=$(TZ="$USER_TZ" date "+%Y-%m-%d %H:%M:%S %Z")
 
 # ── Idle mode selection (dream only at night when --agent-sleep is set) ──
-# Dream window: 20:00–08:00 in the user's timezone. Outside that window, even
+# Dream window: 00:00–08:00 in the user's timezone. Outside that window, even
 # with --agent-sleep on, the idle prompt falls back to evolve.
 if $AGENT_SLEEP; then
     CURRENT_HOUR=$(TZ="$USER_TZ" date "+%H")
     CURRENT_HOUR=${CURRENT_HOUR#0}  # strip leading zero for arithmetic
     : "${CURRENT_HOUR:=0}"
-    if [ "$CURRENT_HOUR" -ge 20 ] || [ "$CURRENT_HOUR" -lt 8 ]; then
+    if [ "$CURRENT_HOUR" -lt 8 ]; then
         IDLE_MODE="dream"
         MAX_CONSECUTIVE_IDLE="$MAX_DREAM"
     else

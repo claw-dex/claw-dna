@@ -79,6 +79,9 @@ INBOX_PATH = MESSAGES / "inbox.json"
 
 LOCK_TIMEOUT_SECONDS = 10
 EXEC_HISTORY_MAX = 20  # max entries per task in execution_history ring buffer
+INBOX_DEDUP_WINDOW_SECONDS = (
+    60  # suppress re-inject if task_id already in inbox within this window
+)
 
 
 @contextmanager
@@ -150,6 +153,42 @@ def _record_execution(task: dict, status: str, note: str = ""):
     )
     # Trim to ring buffer max
     task["execution_history"] = history[-EXEC_HISTORY_MAX:]
+
+
+def _recent_inbox_task_ids(now: datetime, window_seconds: int) -> set[str]:
+    """Return task_ids that already appear in inbox.json within *window_seconds*.
+
+    Used as belt-and-suspenders dedup so a task can't be injected twice in quick
+    succession even if some external caller (manual --check, stale daemon, etc.)
+    bypasses or races the flock-based primary mechanism.
+
+    Best-effort: read without a lock. A stale read just means we *might* fail to
+    suppress a duplicate — the flock-protected last_run check remains primary.
+    """
+    try:
+        inbox = load_json(INBOX_PATH, [])
+    except Exception:
+        return set()
+    if not isinstance(inbox, list):
+        return set()
+    cutoff = now - timedelta(seconds=window_seconds)
+    recent: set[str] = set()
+    for it in inbox:
+        if not isinstance(it, dict):
+            continue
+        tid = it.get("task_id")
+        if not tid:
+            continue
+        ts_str = it.get("timestamp") or it.get("received_at") or ""
+        try:
+            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        except (ValueError, TypeError, AttributeError):
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts >= cutoff:
+            recent.add(tid)
+    return recent
 
 
 def _parse_cron_field(field: str, min_val: int, max_val: int):
@@ -404,7 +443,15 @@ def check_and_inject():
                 if not tasks:
                     return 0
 
+                # Belt-and-suspenders dedup: any task_id already in inbox within
+                # the dedup window is suppressed even if _is_due says it should
+                # fire. Read inbox once here (no lock — best-effort).
+                recent_inbox_ids = _recent_inbox_task_ids(
+                    now, INBOX_DEDUP_WINDOW_SECONDS
+                )
+
                 due_entries = []
+                tasks_dirty = False  # tracks whether we mutated any task state
                 # Save original task state for rollback if inbox write fails
                 original_state = {}
                 for task in tasks:
@@ -414,6 +461,30 @@ def check_and_inject():
                     task_id = task.get("id", "unknown")
                     content_text = task.get("content", "")
                     if not content_text:
+                        continue
+
+                    # Save original state before modifying (for rollback or audit)
+                    original_state[id(task)] = {
+                        "last_run": task.get("last_run"),
+                        "enabled": task.get("enabled", True),
+                    }
+                    # Always advance task state — the schedule has fired even if
+                    # we suppress the inbox append below.
+                    task["last_run"] = now.isoformat()
+                    if task.get("schedule_type") == "once":
+                        task["enabled"] = False
+                    tasks_dirty = True
+
+                    if task_id in recent_inbox_ids:
+                        _record_execution(
+                            task,
+                            "skipped_dup",
+                            f"task_id present in inbox within {INBOX_DEDUP_WINDOW_SECONDS}s",
+                        )
+                        print(
+                            f"  [scheduler] suppressed duplicate: {task_id} "
+                            f"(already in inbox within {INBOX_DEDUP_WINDOW_SECONDS}s)"
+                        )
                         continue
 
                     entry = {
@@ -432,15 +503,6 @@ def check_and_inject():
                             pass  # skip invalid priority, use default
                     due_entries.append(entry)
 
-                    # Save original state before modifying (for rollback)
-                    original_state[id(task)] = {
-                        "last_run": task.get("last_run"),
-                        "enabled": task.get("enabled", True),
-                    }
-                    # Update task state optimistically
-                    task["last_run"] = now.isoformat()
-                    if task.get("schedule_type") == "once":
-                        task["enabled"] = False
                     _record_execution(task, "injected", content_text[:80])
                     injected += 1
                     print(f"  [scheduler] injected: {task_id} — {content_text[:80]}")
@@ -450,7 +512,9 @@ def check_and_inject():
                 # the task won't re-fire next cycle (last_run is set) — at worst
                 # a single injection is lost and fires next interval. The reverse
                 # (inbox succeeds, tasks fails) causes duplicates every cycle.
-                if due_entries:
+                # Suppressed-as-duplicate tasks also need the tasks write so the
+                # schedule advances; only the inbox append is skipped.
+                if due_entries or tasks_dirty:
                     try:
                         write_atomic(TASKS_PATH, tasks)
                     except Exception as e:
