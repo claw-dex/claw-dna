@@ -14,9 +14,10 @@
 #    7. Otherwise                       → IDLE prompt (self-improve / consolidate)
 #
 #  The "idle" prompt is EVOLVE by default; with --agent-sleep it becomes DREAM
-#  (nightly reflection/consolidation, see prompts/dream.md). The consecutive
-#  cap is --max-evolve (default 5) for evolve and --max-dream (default 3) for
-#  dream.
+#  (nightly reflection/consolidation, see prompts/dream.md) only between
+#  20:00 and 08:00 in the user's timezone — during the day the idle prompt
+#  stays EVOLVE even when --agent-sleep is set. The consecutive cap is
+#  --max-evolve (default 5) for evolve and --max-dream (default 5) for dream.
 #
 #  Uses:
 #    --system-prompt         → fixed context (constitution, memory, container info)
@@ -47,15 +48,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# When --agent-sleep is set, the "idle" prompt becomes dream instead of evolve.
-# IDLE_MODE drives both the prompt selection and the consecutive-cap check.
-if $AGENT_SLEEP; then
-    IDLE_MODE="dream"
-    MAX_CONSECUTIVE_IDLE="$MAX_DREAM"
-else
-    IDLE_MODE="evolve"
-    MAX_CONSECUTIVE_IDLE="$MAX_EVOLVE"
-fi
+# IDLE_MODE is set after USER_TZ is read below, since the dream window
+# (20:00–08:00) is evaluated in the user's local timezone.
 
 # ── Guard: kill stale agent process from a previous crashed heartbeat ──
 # If a previous heartbeat was killed (e.g., OOM, signal) without cleanup,
@@ -90,6 +84,25 @@ if [ -f /agent/memory/portal_config.json ]; then
     [ -n "$_tz" ] && [ "$_tz" != "null" ] && USER_TZ="$_tz"
 fi
 USER_TIME=$(TZ="$USER_TZ" date "+%Y-%m-%d %H:%M:%S %Z")
+
+# ── Idle mode selection (dream only at night when --agent-sleep is set) ──
+# Dream window: 20:00–08:00 in the user's timezone. Outside that window, even
+# with --agent-sleep on, the idle prompt falls back to evolve.
+if $AGENT_SLEEP; then
+    CURRENT_HOUR=$(TZ="$USER_TZ" date "+%H")
+    CURRENT_HOUR=${CURRENT_HOUR#0}  # strip leading zero for arithmetic
+    : "${CURRENT_HOUR:=0}"
+    if [ "$CURRENT_HOUR" -ge 20 ] || [ "$CURRENT_HOUR" -lt 8 ]; then
+        IDLE_MODE="dream"
+        MAX_CONSECUTIVE_IDLE="$MAX_DREAM"
+    else
+        IDLE_MODE="evolve"
+        MAX_CONSECUTIVE_IDLE="$MAX_EVOLVE"
+    fi
+else
+    IDLE_MODE="evolve"
+    MAX_CONSECUTIVE_IDLE="$MAX_EVOLVE"
+fi
 
 # ── Update last_heartbeat in state.json (fires every invocation, even during sleep) ──
 HEARTBEAT_TS=$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")

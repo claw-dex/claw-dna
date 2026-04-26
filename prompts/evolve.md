@@ -26,9 +26,10 @@ goal alignment, ROI, and maturity. No separate balance check needed.
 Then skim:
 
 - The `<your_past_goals>` section of this prompt — the most recent 20 completed/failed goals (pre-extracted from `goal.json`). Use it to avoid repeating work already done and to build on prior outcomes. Do **not** re-parse `goal.json` for this view.
-- Failure patterns from journal entries (`/agent/memory/failures.json`) — fix patterns, not symptoms
-- Last ~5 journal entries — don't repeat recent work
+- Failure patterns from journal entries — fix patterns, not symptoms
+- Avoid repeating work in recent journal entries — they maybe be part of evolve cycles
 - Current capabilities (`/agent/memory/capabilities.json`) — know what already exists
+- The `[RECENT MEMORY FILES]` section of the cycle-start output — paths to topic/learning files written by last night's dream (`/agent/memory/dream/{learnings,topics}/`). Read any whose slug looks relevant to the failures or category you're weighing. Together with `[LONG-TERM MEMORY]` (>24h), this is your full memory window.
 
 ## Step 1.5: Check for Human Escalation
 

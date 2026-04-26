@@ -36,6 +36,7 @@ MEMORY = Path("/agent/memory")
 MESSAGES = Path("/agent/messages")
 MV2_PATH = MEMORY / "long_term_memory.mv2"
 SCRIPTS = Path("/agent/scripts")
+DREAM_DIR = MEMORY / "dream"
 
 from scripts.memory_repair import run_repair as _run_memory_repair  # noqa: E402
 
@@ -317,6 +318,7 @@ GOAL_CATEGORY_KEYWORDS = {
         "script",
         "tool",
         "support",
+        "skill",
     ],
     "efficiency": [
         "speed",
@@ -327,7 +329,15 @@ GOAL_CATEGORY_KEYWORDS = {
         "slow",
         "performance",
     ],
-    "prompt_evolution": ["prompt", "instruction", "wording", "template", "guide"],
+    "prompt_evolution": [
+        "prompt",
+        "instruction",
+        "wording",
+        "template",
+        "guide",
+        "md",
+        "markdown",
+    ],
 }
 
 
@@ -634,6 +644,49 @@ def _fetch_old_memories(limit: int = 50, inbox=None, goals=None) -> list:
         return []
 
 
+def _list_recent_dream_files(hours: int = 24) -> list:
+    """Return dream/learnings/*.md and dream/topics/*.md whose mtime is within
+    the last `hours` hours.
+
+    Each item: {"path": str, "kind": "learning"|"topic", "mtime": ISO str}.
+    Sorted by mtime desc.
+
+    Pairs with `_fetch_old_memories` (which returns memvid entries OLDER than
+    24h) — together they cover the full memory timeline.
+
+    Does NOT touch dream/remark.md (internal dream-process state).
+    """
+    out = []
+    cutoff = datetime.datetime.now(datetime.timezone.utc).timestamp() - hours * 3600
+    for kind, sub in (("learning", "learnings"), ("topic", "topics")):
+        sub_dir = DREAM_DIR / sub
+        if not sub_dir.is_dir():
+            continue
+        try:
+            for p in sub_dir.iterdir():
+                if not p.is_file() or p.suffix != ".md":
+                    continue
+                try:
+                    mt = p.stat().st_mtime
+                except Exception:
+                    continue
+                if mt < cutoff:
+                    continue
+                out.append(
+                    {
+                        "path": str(p),
+                        "kind": kind,
+                        "mtime": datetime.datetime.fromtimestamp(
+                            mt, datetime.timezone.utc
+                        ).isoformat(),
+                    }
+                )
+        except Exception:
+            continue
+    out.sort(key=lambda x: x["mtime"], reverse=True)
+    return out
+
+
 # ── Output Modes ────────────────────────────────────────────────────────────────
 
 
@@ -650,6 +703,7 @@ def print_full(
     server_errors=None,
     cycles=None,
     old_memories=None,
+    recent_dream_files=None,
 ):
     now_str = datetime.datetime.now(datetime.timezone.utc).strftime(
         "%Y-%m-%d %H:%M UTC"
@@ -870,6 +924,14 @@ def print_full(
     else:
         print(f"\n[BACKUP]  no backups dir — run memory_backup.py")
 
+    # ── Recent Memory Files (<24h) ────────────────────────────────
+    if recent_dream_files:
+        print(
+            f"\n[RECENT MEMORY FILES]  {len(recent_dream_files)} file(s) updated in last 24h:"
+        )
+        for f in recent_dream_files:
+            print(f"  • {f['path']}  ({ago(f['mtime'])})")
+
     # ── Long-Term Memory Recall ───────────────────────────────────
     if old_memories:
         print(f"\n[LONG-TERM MEMORY]  {len(old_memories)} recalled (>24h old):")
@@ -921,7 +983,9 @@ def print_full(
     print(f"\n{'='*62}\n")
 
 
-def print_short(repair, state, goals, cycles_info, failures, inbox, portal):
+def print_short(
+    repair, state, goals, cycles_info, failures, inbox, portal, recent_dream_files=None
+):
     hb = (
         ago(state.get("last_heartbeat", "")) if state.get("last_heartbeat") else "never"
     )
@@ -937,6 +1001,8 @@ def print_short(repair, state, goals, cycles_info, failures, inbox, portal):
         issues.append(f"{len(failures)} failures")
     if isinstance(inbox, list) and inbox:
         issues.append(f"inbox:{len(inbox)}")
+    if recent_dream_files:
+        issues.append(f"recent_memory={len(recent_dream_files)}")
 
     status = " | ".join(issues) if issues else "all clear"
     print(
@@ -956,6 +1022,7 @@ def print_json_output(
     portal,
     cycles=None,
     old_memories=None,
+    recent_dream_files=None,
 ):
     suggested = None
     if EVOLVE_MODE:
@@ -1031,6 +1098,7 @@ def print_json_output(
                     }
                     for m in (old_memories or [])
                 ],
+                "recent_memory_files": list(recent_dream_files or []),
             },
             indent=2,
         )
@@ -1161,6 +1229,10 @@ def main():
     # Step 3b: Fetch long-term memories (once, shared across output modes)
     old_memories = _fetch_old_memories(limit=50, inbox=inbox, goals=goals)
 
+    # Step 3c: List dream learning/topic files updated in the last 24h.
+    # Pairs with old_memories (>24h via memvid) for a complete memory window.
+    recent_dream_files = _list_recent_dream_files(hours=24)
+
     # Step 4: Output
     if JSON_MODE:
         print_json_output(
@@ -1175,9 +1247,19 @@ def main():
             portal,
             cycles=cycles,
             old_memories=old_memories,
+            recent_dream_files=recent_dream_files,
         )
     elif SHORT:
-        print_short(repair, state, goals, cycles_info, failures, inbox, portal)
+        print_short(
+            repair,
+            state,
+            goals,
+            cycles_info,
+            failures,
+            inbox,
+            portal,
+            recent_dream_files=recent_dream_files,
+        )
     else:
         print_full(
             repair,
@@ -1192,6 +1274,7 @@ def main():
             server_errors,
             cycles=cycles,
             old_memories=old_memories,
+            recent_dream_files=recent_dream_files,
         )
 
     sys.exit(1 if repair["failed"] > 0 else 0)

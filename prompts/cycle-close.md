@@ -26,6 +26,7 @@ Use `--dry-run` to preview before writing. Still do steps 4 and 9 manually (port
 **No manual action needed** unless you explicitly want a stub at cycle start for long-running cycles.
 
 If you do need a manual start stub (rare):
+
 ```bash
 # Just run cycle_close.py at the end — it creates + completes the entry in one step
 uv run python scripts/cycle_close.py --cycle <N> --type evolve --category <CAT> --summary "..."
@@ -65,6 +66,7 @@ Use `--no-normalize` to skip if needed.
 ## 2. Update state.json
 
 Set these fields:
+
 - `cycle_number`: current cycle number
 - `status`: "idle" (or "working" if goal continues next cycle)
 - `current_goal`: what you worked on (or null)
@@ -114,6 +116,7 @@ it to `/agent/messages/outbox.json` **before** running `cycle_close.py`.
 via the portal's "Clear All" button (which archives to `outbox_history.json` first).
 
 **Required outbox content for completed goals:**
+
 - What was done (1-2 sentences)
 - Where to find outputs (file paths, portal tab, or URL)
 - Next steps the user should take (if any)
@@ -127,6 +130,7 @@ this step keeps that warning quiet and protects against data loss.
 **No manual action needed** — the backup status is reported in cycle_close.py output.
 
 If you need to run manually (e.g., cycle_close.py is unavailable):
+
 ```bash
 uv run python scripts/memory_backup.py
 ```
@@ -143,6 +147,7 @@ is found. Silent when everything matches.
 **No manual action needed** unless cycle_close.py reports a mismatch.
 
 If you need to check manually (e.g., cycle_close.py is unavailable):
+
 ```bash
 # Tab count
 python3 -c "src=open('/agent/server.py').read(); idx=src.find('TAB_REGISTRY = ['); body=src[idx:]; n=body[:body.find(']')].count('('); print(f'{n} tabs')"
@@ -158,8 +163,7 @@ If you added scripts, portal modules, or commands/skills this cycle:
 
 1. Add the new script/module to the **Utility Scripts** section in `AGENTS.md`
    so future cycles can discover it via the briefing.
-2. Update `capabilities.md` in auto memory if needed (auto memory is synced
-   automatically by `cycle_close.py` for state, cycles, journal, and goals).
+2. Update `/agent/memory/capabilities.json` if needed.
 
 ## 9. Clear resolved tab errors (optional)
 
