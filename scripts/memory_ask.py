@@ -36,6 +36,10 @@ try:
 except ImportError:
     memvid_sdk = None
 
+# Single source of truth — vectors built with one model are not comparable to
+# queries embedded with another, so always use the ingest-time model name.
+from scripts.memory_ingest import EMBED_MODEL  # noqa: E402
+
 
 def _require_sdk():
     """Fail fast with a clear error when memvid_sdk is unavailable."""
@@ -165,11 +169,17 @@ def retrieve_context(mv2_path, question, k):
         )
         # allow up to 2x initial k hits during search with adaptive strategy "relative"
         # Keep hits whose score is at least 0.5 × top_score. E.g. top score is 0.3, drop hits with score < 0.15
+        # mode="hybrid" + query_embedding_model="bge-base" forces semantic
+        # search using the in-mv2 fastembed vectors. Without this the Python
+        # wrapper's mode="auto" silently falls back to lex when no
+        # OPENAI_API_KEY is set, ignoring the bge-base vectors from ingestion.
         result = mem.ask(
             question,
             k=k,
             context_only=True,
             show_chunks=True,
+            mode="hybrid",
+            query_embedding_model=EMBED_MODEL,
             adaptive=True,
             max_k=k * 2,
             min_relevancy=0.5,

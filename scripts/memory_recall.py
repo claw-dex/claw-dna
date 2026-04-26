@@ -52,6 +52,9 @@ def _require_sdk():
 
 MEMORY = Path("/agent/memory")
 MV2_PATH = MEMORY / "long_term_memory.mv2"
+# Single source of truth — vectors built with one model are not comparable to
+# queries embedded with another, so always use the ingest-time model name.
+from scripts.memory_ingest import EMBED_MODEL  # noqa: E402
 
 
 def parse_args(argv):
@@ -212,8 +215,10 @@ def _ask_normalized(mv2: Path, query: str, k: int, since=None, until=None):
     """
     mem = _open_readonly(mv2)
     try:
-        # search up to k results with minimum score of 0.1
-        # this will filtering out noise hits with low score
+        # mode="hybrid" + query_embedding_model=EMBED_MODEL forces semantic
+        # search using the in-mv2 fastembed vectors. The Python wrapper's
+        # mode="auto" silently falls back to lex when no OPENAI_API_KEY is set,
+        # which would ignore the bge-base vectors built during ingestion.
         result = mem.ask(
             query,
             k=k,
@@ -221,6 +226,8 @@ def _ask_normalized(mv2: Path, query: str, k: int, since=None, until=None):
             since=since,
             until=until,
             show_chunks=True,
+            mode="hybrid",
+            query_embedding_model=EMBED_MODEL,
             adaptive=True,
             max_k=k,
             min_relevancy=0.1,
