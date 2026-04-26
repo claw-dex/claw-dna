@@ -143,6 +143,7 @@ class ClaudeChat:
         self._ready = threading.Event()
         self._error: Exception | None = None
         self._lock = threading.Lock()
+        self._submit_lock = threading.Lock()
         self._closed = False
         self._resume_session_id = resume_session_id
         self._chat_history = chat_history or []
@@ -237,11 +238,35 @@ class ClaudeChat:
     async def _async_stream(
         self, prompt: str, chunk_q: queue.Queue, done_event: threading.Event
     ) -> None:
-        """Send prompt, push typed event dicts to *chunk_q*, set done_event when complete."""
+        """Send prompt, push typed event dicts to *chunk_q*, set done_event when complete.
+
+        Iterates `receive_messages()` directly (rather than `receive_response()`)
+        so that after the turn's `ResultMessage` we can keep pulling on the
+        *same* iterator for a short drain window — catching any late-arriving
+        messages so they do not leak into the next turn. Opening a parallel
+        iterator on the SDK's shared receive stream would steal messages and
+        race the next turn, so the drain must reuse this iterator.
+        """
         try:
             await self._sdk.query(prompt)
             streamed_any = False
-            async for msg in self._sdk.receive_response():
+            result_seen = False
+            it = self._sdk.receive_messages().__aiter__()
+            while True:
+                if result_seen:
+                    try:
+                        msg = await asyncio.wait_for(it.__anext__(), timeout=0.05)
+                    except (asyncio.TimeoutError, StopAsyncIteration):
+                        break
+                else:
+                    try:
+                        msg = await it.__anext__()
+                    except StopAsyncIteration:
+                        break
+                if result_seen:
+                    # Late-arriving message after this turn's ResultMessage —
+                    # discard so it doesn't appear as the next turn's response.
+                    continue
                 if isinstance(msg, StreamEvent):
                     event = msg.event
                     sid = getattr(msg, "session_id", None)
@@ -298,7 +323,9 @@ class ClaudeChat:
                             "session_id": self._session_id,
                         }
                     )
-                    break
+                    result_seen = True
+                    # Continue iterating in drain mode to catch any late
+                    # post-Result messages on this same iterator.
         except Exception as exc:
             chunk_q.put({"type": "error", "error": str(exc)})
         finally:
@@ -320,20 +347,45 @@ class ClaudeChat:
 
         Call poll() on subsequent reruns to drain results.
         Call is_streaming() to check if the stream has finished.
-        """
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("ClaudeChat session is closed")
-            # Cancel any existing in-flight stream
-            if self._stream_future is not None and not self._stream_future.done():
-                self._stream_future.cancel()
 
-            self._chunk_q = queue.Queue()
-            self._done_event = threading.Event()
-            self._stream_future = asyncio.run_coroutine_threadsafe(
-                self._async_stream(prompt, self._chunk_q, self._done_event),
-                self._loop,
-            )
+        Serialized via _submit_lock so that if a previous turn is still
+        in-flight, this call interrupts it and waits for its consumer to
+        finish (consuming the resulting ResultMessage and draining any tail)
+        before issuing the new query. That ordering is what prevents stale
+        SDK messages from surfacing as the next turn's response.
+        """
+        with self._submit_lock:
+            with self._lock:
+                if self._closed:
+                    raise RuntimeError("ClaudeChat session is closed")
+                prev_future = self._stream_future
+                prev_done = self._done_event
+
+            if prev_future is not None and not prev_future.done():
+                # Ask the SDK to end the in-flight turn cleanly so the
+                # consumer can drain the tail and exit on its own.
+                try:
+                    int_fut = asyncio.run_coroutine_threadsafe(
+                        self._sdk.interrupt(), self._loop
+                    )
+                    try:
+                        int_fut.result(timeout=2)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                settled = prev_done.wait(timeout=5) if prev_done is not None else False
+                if not settled and not prev_future.done():
+                    # Interrupt didn't take — fall back to hard cancel.
+                    prev_future.cancel()
+
+            with self._lock:
+                self._chunk_q = queue.Queue()
+                self._done_event = threading.Event()
+                self._stream_future = asyncio.run_coroutine_threadsafe(
+                    self._async_stream(prompt, self._chunk_q, self._done_event),
+                    self._loop,
+                )
 
     def poll(self) -> list[dict]:
         """Non-blocking: drain all available events from the queue right now.

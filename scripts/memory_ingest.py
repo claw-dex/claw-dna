@@ -514,6 +514,18 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
                 )
         if not quiet and (i + 1) % 20 == 0:
             print(f"[INGEST] Ingested {i + 1}/{len(chunks)} chunks...")
+        if (i + 1) % 500 == 0:
+            mem.commit()
+
+    # Commit WAL → searchable index (REQUIRED — without this, put() calls are
+    # buffered in the WAL and never appear in find()/ask() results).
+    try:
+        mem.seal()  # same as commit() in memvid_sdk
+        if not quiet:
+            print(f"[INGEST] Committed {ok} frames to index")
+    except Exception as e:
+        if not quiet:
+            print(f"  WARN: commit failed: {e}", file=sys.stderr)
 
     size_kb = mv2.stat().st_size / 1024 if mv2.exists() else 0
 
@@ -611,6 +623,11 @@ def append_json(mv2_path, entry_source, quiet=False, json_mode=False):
         print(f"ERROR: memvid put failed: {e}", file=sys.stderr)
         sys.exit(1)
 
+    try:
+        mem.commit()
+    except Exception as e:
+        print(f"WARN: commit failed: {e}", file=sys.stderr)
+
     cycle = entry.get("cycle", "?")
     if json_mode:
         print(
@@ -665,6 +682,11 @@ def append_text(mv2_path, text, title=None, tags=None, quiet=False, json_mode=Fa
     except Exception as e:
         print(f"ERROR: memvid put failed: {e}", file=sys.stderr)
         sys.exit(1)
+
+    try:
+        mem.commit()
+    except Exception as e:
+        print(f"WARN: commit failed: {e}", file=sys.stderr)
 
     if json_mode:
         print(
@@ -731,6 +753,11 @@ def append_file(
     except Exception as e:
         print(f"ERROR: memvid put failed: {e}", file=sys.stderr)
         sys.exit(1)
+
+    try:
+        mem.commit()
+    except Exception as e:
+        print(f"WARN: commit failed: {e}", file=sys.stderr)
 
     try:
         size_kb = fpath.stat().st_size / 1024

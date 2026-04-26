@@ -99,8 +99,11 @@ def parse_args(argv):
     return result
 
 
-def _parse_date_to_unix(value):
-    """Convert a date string (ISO format) or integer to a unix timestamp int."""
+def _parse_date_to_unix(value, strict: bool = True):
+    """Convert a date string (ISO format) or integer to a unix timestamp int.
+
+    strict=True (CLI): exit on invalid input. strict=False (library): return None.
+    """
     if value is None:
         return None
     try:
@@ -108,16 +111,18 @@ def _parse_date_to_unix(value):
     except (TypeError, ValueError):
         pass
     try:
-        dt = datetime.fromisoformat(value)
+        dt = datetime.fromisoformat(str(value))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return int(dt.timestamp())
     except ValueError:
-        print(
-            f"ERROR: Invalid date format: {value!r}. Use ISO format (2026-03-25) or unix timestamp.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        if strict:
+            print(
+                f"ERROR: Invalid date format: {value!r}. Use ISO format (2026-03-25) or unix timestamp.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        return None
 
 
 def _clean_snippet(text):
@@ -199,6 +204,59 @@ def _open_readonly(mv2: Path):
     )
 
 
+def _ask_normalized(mv2: Path, query: str, k: int, since=None, until=None):
+    """Run mem.ask and return (items, total_hits).
+
+    Items are score-sorted dicts produced by `_hit_to_dict`. MV004 / "lex not
+    enabled" is treated as zero results; other SDK errors propagate.
+    """
+    mem = _open_readonly(mv2)
+    try:
+        # search up to k results with minimum score of 0.1
+        # this will filtering out noise hits with low score
+        result = mem.ask(
+            query,
+            k=k,
+            context_only=True,
+            since=since,
+            until=until,
+            show_chunks=True,
+            adaptive=True,
+            max_k=k,
+            min_relevancy=0.1,
+            adaptive_strategy="absolute",
+        )
+    except Exception as e:
+        err = str(e)
+        if "MV004" in err or "Lexical index is not enabled" in err:
+            result = {}
+        else:
+            raise
+
+    # `chunks` (show_chunks=True) returns all k retrieved results.
+    # `hits` only returns the single top-ranked result — always 1 regardless of k.
+    if isinstance(result, dict):
+        raw_hits = list(result.get("chunks") or result.get("hits") or [])
+        stats = result.get("stats")
+    else:
+        raw_hits = list(
+            getattr(result, "chunks", None) or getattr(result, "hits", None) or []
+        )
+        stats = getattr(result, "stats", None)
+
+    raw_hits.sort(
+        key=lambda h: (
+            h.get("score", 0.0) if isinstance(h, dict) else getattr(h, "score", 0.0)
+        ),
+        reverse=True,
+    )
+    items = [_hit_to_dict(h, i) for i, h in enumerate(raw_hits, 1)]
+    total = (
+        stats.get("total_hits", len(items)) if isinstance(stats, dict) else len(items)
+    )
+    return items, total
+
+
 def main():
     opts = parse_args(sys.argv)
 
@@ -242,48 +300,10 @@ def _run_query(opts, mv2):
     until = _parse_date_to_unix(opts.get("until"))
 
     try:
-        mem = _open_readonly(mv2)
-        result = mem.ask(
-            question,
-            k=k,
-            context_only=True,
-            since=since,
-            until=until,
-        )
+        items, total = _ask_normalized(mv2, question, k, since=since, until=until)
     except Exception as e:
-        err = str(e)
-        # MV004 = no lex hits → SDK tried vec fallback → fastembed not compiled in.
-        # Treat as zero results rather than a hard failure.
-        if "MV004" in err or "Lexical index is not enabled" in err:
-            result = {}
-        else:
-            print(f"ERROR: memvid ask failed: {e}", file=sys.stderr)
-            sys.exit(1)
-
-    # SDK returns a plain dict, not a dataclass — use .get() not getattr()
-    raw_hits = list(
-        (
-            result.get("hits")
-            if isinstance(result, dict)
-            else getattr(result, "hits", None)
-        )
-        or []
-    )
-    raw_hits.sort(
-        key=lambda h: (
-            h.get("score", 0.0) if isinstance(h, dict) else getattr(h, "score", 0.0)
-        ),
-        reverse=True,
-    )
-    items = [_hit_to_dict(h, i) for i, h in enumerate(raw_hits, 1)]
-    stats = (
-        result.get("stats")
-        if isinstance(result, dict)
-        else getattr(result, "stats", None)
-    )
-    total = (
-        stats.get("total_hits", len(items)) if isinstance(stats, dict) else len(items)
-    )
+        print(f"ERROR: memvid ask failed: {e}", file=sys.stderr)
+        sys.exit(1)
 
     if opts["json_mode"]:
         print(
@@ -403,36 +423,9 @@ def recall(query: str, k: int = 5, until=None, json_mode: bool = False) -> list:
     if memvid_sdk is None or not MV2_PATH.exists():
         return []
     try:
-        until_unix = None
-        if until is not None:
-            try:
-                until_unix = int(until)
-            except (TypeError, ValueError):
-                try:
-                    dt = datetime.fromisoformat(str(until))
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    until_unix = int(dt.timestamp())
-                except ValueError:
-                    until_unix = None
-
-        mem = _open_readonly(MV2_PATH)
-        result = mem.ask(query, k=k, context_only=True, until=until_unix)
-        raw_hits = list(
-            (
-                result.get("hits")
-                if isinstance(result, dict)
-                else getattr(result, "hits", None)
-            )
-            or []
-        )
-        raw_hits.sort(
-            key=lambda h: (
-                h.get("score", 0.0) if isinstance(h, dict) else getattr(h, "score", 0.0)
-            ),
-            reverse=True,
-        )
-        return [_hit_to_dict(h, i) for i, h in enumerate(raw_hits, 1)]
+        until_unix = _parse_date_to_unix(until, strict=False)
+        items, _ = _ask_normalized(MV2_PATH, query, k, until=until_unix)
+        return items
     except Exception:
         return []
 

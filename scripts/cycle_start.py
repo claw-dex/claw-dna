@@ -602,46 +602,76 @@ def _check_constitution() -> list:
 # ── Long-Term Memory (memvid) ──────────────────────────────────────────────────
 
 
-def _build_recall_query(inbox, goals) -> str:
-    """Build a search query from inbox messages or the latest non-completed goal."""
-    # 1. Try inbox messages first
-    if isinstance(inbox, list) and inbox:
-        contents = [str(m.get("content", "")) for m in inbox if m.get("content")]
-        if contents:
-            return " ".join(contents)[:500]
-    # 2. Fall back to the latest non-completed goal
+def _build_recall_queries(inbox, goals) -> list:
+    """Build an ordered, deduped list of recall queries.
+
+    One query per inbox message, plus one for the most recent in-progress or
+    pending goal. Each is stripped, capped at 500 chars, and deduped by string.
+    """
+    queries: list = []
+    if isinstance(inbox, list):
+        for m in inbox:
+            text = str(m.get("content", "") or "").strip()
+            if text:
+                queries.append(text[:500])
     if isinstance(goals, list):
         for g in reversed(goals):
-            status = g.get("status", "")
-            if status not in ("completed", "failed"):
-                text = g.get("content") or g.get("goal") or ""
+            if g.get("status") in ("in_progress", "pending"):
+                text = (g.get("content") or g.get("goal") or "").strip()
                 if text:
-                    return str(text)[:500]
-    return ""
+                    queries.append(str(text)[:500])
+                break
+    seen: set = set()
+    unique: list = []
+    for q in queries:
+        if q not in seen:
+            seen.add(q)
+            unique.append(q)
+    return unique
 
 
 def _fetch_old_memories(limit: int = 50, inbox=None, goals=None) -> list:
-    """Fetch memories older than 24h from long-term semantic memory via memory_recall.py.
+    """Fetch memories older than 24h from long-term semantic memory.
 
-    Imports memory_recall.recall() directly for hybrid search.
-    Query is derived from inbox messages or the latest non-completed goal.
-    Returns a list of result dicts with keys: rank, score, title, snippet, tags.
-    Returns [] on any error or if memory_recall.py / .mv2 file is missing.
+    Issues one recall() per inbox message + most recent in-progress/pending goal,
+    dedupes hits by frame_id (fallback: title+snippet), and stops once the
+    combined result count reaches `limit`.
     """
     if not MV2_PATH.exists():
         return []
-    query = _build_recall_query(inbox, goals)
-    if not query:
+    queries = _build_recall_queries(inbox, goals)
+    if not queries:
         return []
-    # Only recall entries older than 24 hours
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
     until_ts = str(int(cutoff.timestamp()))
     try:
         from scripts.memory_recall import recall
-
-        return recall(query, k=limit, until=until_ts)
     except Exception:
         return []
+
+    combined: list = []
+    seen_keys: set = set()
+    for q in queries:
+        if len(combined) >= limit:
+            break
+        try:
+            # get only 5 results (default) to save memory for other queries
+            hits = recall(q, until=until_ts)
+        except Exception:
+            continue
+        for h in hits:
+            fid = h.get("frame_id")
+            key = ("fid", fid) if fid else ("ts", h.get("title"), h.get("snippet"))
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            combined.append(h)
+            if len(combined) >= limit:
+                break
+    combined.sort(key=lambda h: h.get("score", 0.0), reverse=True)
+    for i, h in enumerate(combined, 1):
+        h["rank"] = i
+    return combined
 
 
 def _list_recent_dream_files(hours: int = 24) -> list:

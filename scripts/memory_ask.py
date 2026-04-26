@@ -163,7 +163,17 @@ def retrieve_context(mv2_path, question, k):
             enable_lex=True,
             read_only=True,
         )
-        result = mem.ask(question, k=k, context_only=True)
+        # allow up to 2x initial k hits during search with adaptive strategy "relative"
+        # Keep hits whose score is at least 0.5 × top_score. E.g. top score is 0.3, drop hits with score < 0.15
+        result = mem.ask(
+            question,
+            k=k,
+            context_only=True,
+            show_chunks=True,
+            adaptive=True,
+            max_k=k * 2,
+            min_relevancy=0.5,
+        )
     except Exception as e:
         err = str(e)
         # MV004: no lex hits → SDK tried vec fallback → fastembed not compiled in.
@@ -180,7 +190,9 @@ def retrieve_context(mv2_path, question, k):
         if isinstance(result, dict)
         else (lambda k_, d=None: getattr(result, k_, d))
     )
-    hits = list(_rget("hits") or [])
+    # `chunks` (show_chunks=True) returns all k retrieved results.
+    # `hits` only returns the single top-ranked result — always 1 regardless of k.
+    hits = list(_rget("chunks") or _rget("hits") or [])
     clean_parts = []
     results = []
     for h in hits:
