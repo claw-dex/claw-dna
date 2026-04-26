@@ -8,7 +8,17 @@ Your memory files are located in `/agent/memory` directory. The rest of the path
 
 **Phase 0: Resume Check**
 
-- First thing, get today's date (UTC, formatted `YYYY-MM-DD` — for example `date -u +%Y-%m-%d`). Call it `TODAY`.
+- First thing, determine today's date in the **user's local timezone** and call it `TODAY`. Do **not** use bare `date -u` — the system clock runs in UTC and the calendar day may already differ from the user's local date. Use the `get-current-date-time` script:
+
+  ```bash
+  DT=$(uv run python scripts/get_current_date_time.py --json)
+  TODAY=$(echo "$DT"    | jq -r '.date')
+  USER_TZ=$(echo "$DT"  | jq -r '.timezone')
+  echo "User timezone: $USER_TZ  |  Today (local): $TODAY"
+  ```
+
+  Store both `USER_TZ` and `TODAY` — use `TODAY` everywhere a calendar date is needed throughout all phases, and record `USER_TZ` in the remark so future dreams know which timezone was used.
+
 - Read `dream/remark.md`. This file is your hand-off note from the previous dream.
 
 | Remark state | Meaning | Action |
@@ -21,7 +31,7 @@ Your memory files are located in `/agent/memory` directory. The rest of the path
 
 - Treat the previous remark's `Topics touched:` / `Learnings touched:` lists as already-handled when resuming a `light_sleep_dreaming` remark — do not re-extract from pages 1..(START_PAGE-1) in this dream; trust the prior pass.
 
-> **Deep-sleep short-circuit.** When the table above tells you to exit (deep_sleep on the same date), output a single line acknowledging it — e.g. `All transcripts for date <TODAY> are already processed. You are in deep sleep.` — and stop. Do not run any phase below. The remark file already has the right state; rewriting it would just churn the file timestamp without changing content.
+> **Deep-sleep short-circuit.** When the table above tells you to exit (deep_sleep on the same date), output a single line acknowledging it — e.g. `All transcripts for date <TODAY> (<USER_TZ>) are already processed. You are in deep sleep.` — and stop. Do not run any phase below. The remark file already has the right state; rewriting it would just churn the file timestamp without changing content.
 
 **Phase 1: Preparation**
 
@@ -107,8 +117,9 @@ Your memory files are located in `/agent/memory` directory. The rest of the path
 
   ```markdown
   # Dream remark
-  Updated: <ISO 8601 UTC timestamp>
-  Date: <TODAY — YYYY-MM-DD UTC>
+  Updated: <ISO 8601 timestamp in user local timezone>
+  Date: <TODAY — YYYY-MM-DD in USER_TZ>
+  Timezone: <USER_TZ>
   Status: light_sleep_dreaming | deep_sleep
   Window: 24h transcripts as of <YYYY MonthName DD (Weekday)>
   Total pages: <TOTAL_PAGES>
@@ -131,12 +142,15 @@ Your memory files are located in `/agent/memory` directory. The rest of the path
   - <anything noteworthy that the next dream — or you in a future cycle — should be aware of; leave the section empty if nothing>
 
   ---
-  All transcripts for date <TODAY> are now completed. You are in deep sleep.
-  # ↑ This trailing line is REQUIRED when Status: deep_sleep, OMITTED when Status: light_sleep_dreaming.
+  All transcripts for date <TODAY> (<USER_TZ>) are now completed. You are in deep sleep.
   ```
 
+Note: The trailing line in remark regarding completion status is REQUIRED only when Status: deep_sleep, OMITTED when Status: light_sleep_dreaming.
+
 - Field rules:
-  - `Date:` is `TODAY` (UTC `YYYY-MM-DD`) — the calendar day on which this dream ran. The next dream uses this to decide whether deep-sleep applies (same date → skip) or has rolled over (new date → fresh start).
+  - `Date:` is `TODAY` (`YYYY-MM-DD` in the user's local timezone, not UTC) — the calendar day on which this dream ran. The next dream computes its own `TODAY` using the same timezone logic and compares it against this field to decide whether deep-sleep applies (same date → skip) or has rolled over (new date → fresh start).
+  - `Timezone:` is `USER_TZ` (IANA name, e.g. `Asia/Singapore`). Stored for auditability; future dreams always re-derive `TODAY` from the live `portal_config.json`, so this field is informational only.
+  - `Updated:` is the wall-clock timestamp of when this remark was written, expressed in the user's local timezone (e.g. `2026-04-27T00:30:00+08:00`).
   - `Status: light_sleep_dreaming` ⇔ `Next page:` line is present and points to the first un-processed page **and** the trailing "deep sleep" line is **omitted**. The next dream MUST resume from `Next page` even on the same date.
   - `Status: deep_sleep` ⇔ no `Next page:` line **and** the trailing "deep sleep" line is present. This is the terminal state for the current `Date`. Any further dream invocation on the same `Date` must short-circuit per Phase 0.
   - `Topics touched` / `Learnings touched` are **cumulative across the current 24h window**, not just this batch — when resuming a `light_sleep_dreaming` remark, copy forward the lists from the previous remark and append your new entries, so the final remark (when Status flips to `deep_sleep`) reflects everything done over the whole window.
