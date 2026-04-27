@@ -167,7 +167,7 @@ def _store_inbox_to_memvid(items: list) -> int:
     if not items:
         return 0
     try:
-        from scripts.memory_ingest import DEFAULT_MV2, append_text, build
+        from scripts.memory_ingest import DEFAULT_MV2, append_inbox_message, build
     except Exception as e:
         print(f"  ⚠ inbox memvid — import skipped: {e}")
         return 0
@@ -185,24 +185,9 @@ def _store_inbox_to_memvid(items: list) -> int:
 
     ok = 0
     for i, msg in enumerate(items):
-        if not isinstance(msg, dict):
-            continue
-        content = str(msg.get("content", "")).strip()
-        if len(content) < 5:
-            continue
-        msg_type = str(msg.get("type", "message"))
-        ts = str(msg.get("timestamp") or msg.get("date") or "")
-        date_part = ts[:10] if ts else ""
-        title = f"Inbox {msg_type}: {content[:80]}"
-        tags = ["inbox", f"type:{msg_type}"]
-        if date_part:
-            tags.append(f"date:{date_part}")
-        msg_id = msg.get("id")
-        if msg_id:
-            tags.append(f"id:{msg_id}")
         try:
-            append_text(DEFAULT_MV2, content, title=title, tags=tags, quiet=True)
-            ok += 1
+            if append_inbox_message(DEFAULT_MV2, msg, quiet=True):
+                ok += 1
         except SystemExit as e:
             print(f"  ⚠ inbox memvid — msg {i} exit {e.code}")
         except Exception as e:

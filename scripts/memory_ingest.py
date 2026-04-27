@@ -2,7 +2,8 @@
 """
 memory_ingest.py — Ingest agent memory into long-term semantic store (memvid SDK).
 
-Parses journal.json, cycles.json, and goal.json, chunks them into semantically
+Parses journal.json, cycles.json, and messages/inbox_history.json (sibling of
+the memory dir), chunks them into semantically
 meaningful pieces, and ingests into a .mv2 index via the `memvid_sdk` Python
 package (hybrid lexical + semantic search with bge-base embeddings).
 
@@ -341,7 +342,7 @@ def chunk_cycles(cycles: list) -> list:
                     "type": ctype,
                     "status": status,
                     "category": category,
-                    "date": start[:10] if start else "",
+                    "date": start,
                 },
             }
         )
@@ -382,17 +383,77 @@ def chunk_goals(goals: list) -> list:
     return chunks
 
 
+def chunk_inbox_entry(entry: dict) -> dict | None:
+    """Convert a single inbox message dict into an ingest chunk.
+
+    Shared by rebuild (chunk_inbox) and live ingestion
+    (cycle_close._store_inbox_to_memvid) so both paths produce identical
+    records. The timestamp always comes from the entry — never datetime.now()
+    — so rebuilds preserve original message times.
+
+    Returns None if the entry is unusable (non-dict or content too short).
+    """
+    if not isinstance(entry, dict):
+        return None
+    content = str(entry.get("content") or "").strip()
+    if len(content) < 5:
+        return None
+    msg_type = str(entry.get("type") or "message")
+    source = str(entry.get("source") or "")
+    ts = str(
+        entry.get("timestamp") or entry.get("received_at") or entry.get("date") or ""
+    )
+    date_part = ts[:10] if ts else ""
+    msg_id = entry.get("id")
+
+    tags = ["inbox", f"type:{msg_type}"]
+    if source:
+        tags.append(f"inbox_source:{source}")
+    if date_part:
+        tags.append(f"date:{date_part}")
+    if msg_id:
+        tags.append(f"id:{msg_id}")
+
+    return {
+        "title": f"Inbox {msg_type}: {content[:80]}",
+        "label": "inbox",
+        "text": content,
+        "tags": tags,
+        "metadata": {
+            "source": "inbox",
+            "message_type": msg_type,
+            "inbox_source": source,
+            "id": str(msg_id) if msg_id else "",
+            "date": ts,
+        },
+    }
+
+
+def chunk_inbox(messages: list) -> list:
+    """Convert archived inbox messages into ingestible chunks (rebuild path)."""
+    chunks = []
+    for entry in messages:
+        chunk = chunk_inbox_entry(entry)
+        if chunk is not None:
+            chunks.append(chunk)
+    return chunks
+
+
 def gather_all_chunks(memory_dir: Path) -> list:
     """Load all memory files and produce a combined list of chunks.
 
     Ordering is intentional: richest semantic sources first, with cycle
     records (largely redundant with journal data) added last.
 
-      1. journal.json       — current window (richest, most recent)
+      1. journal.json        — current window (richest, most recent)
       2. journal-archive.json — historical journal (rich, ordered newest-first)
-      3. cycles.json        — structured cycle records (lower priority; largely
-                               redundant with journal data and shorter text)
-      4. cycles-archive.json — historical cycle records
+      3. messages/inbox_history.json — archived inbox messages (sibling dir)
+      4. cycles.json         — structured cycle records (lower priority; largely
+                                redundant with journal data and shorter text)
+      5. cycles-archive.json — historical cycle records
+
+    All chunkers preserve the source-recorded timestamp in metadata["date"];
+    rebuild never substitutes datetime.now().
 
     Goals (goal.json, goal_history.json) are intentionally excluded from
     long-term memory.
@@ -409,13 +470,22 @@ def gather_all_chunks(memory_dir: Path) -> list:
     if isinstance(archive, list):
         all_chunks.extend(chunk_journal(archive))
 
-    # 3. Cycle records — lower priority; added last because cycle metadata
+    # 3. Inbox history — archived messages live in the sibling messages/ dir.
+    #    Each message was also live-ingested at arrival; rebuild reconstructs
+    #    them from JSON with original timestamps.
+    inbox_history = load_json(
+        Path(memory_dir).resolve().parent / "messages" / "inbox_history.json"
+    )
+    if isinstance(inbox_history, list):
+        all_chunks.extend(chunk_inbox(inbox_history))
+
+    # 4. Cycle records — lower priority; added last because cycle metadata
     #    largely duplicates what journal entries already contain.
     cycles = load_json(memory_dir / "cycles.json")
     if isinstance(cycles, list):
         all_chunks.extend(chunk_cycles(cycles))
 
-    # 4. Cycles archive — historical cycle records
+    # 5. Cycles archive — historical cycle records
     cycles_archive = load_json(memory_dir / "cycles-archive.json")
     if isinstance(cycles_archive, list):
         all_chunks.extend(chunk_cycles(cycles_archive))
@@ -643,6 +713,44 @@ def append_json(mv2_path, entry_source, quiet=False, json_mode=False):
         )
     elif not quiet:
         print(f"[INGEST] Appended cycle {cycle} to {mv2.name}")
+
+
+# ---------------------------------------------------------------------------
+# Append Inbox — ingest one inbox message using shared chunk schema
+# ---------------------------------------------------------------------------
+
+
+def append_inbox_message(mv2_path, message: dict, quiet: bool = True) -> bool:
+    """Ingest a single inbox message into the .mv2 using the shared chunk
+    schema. The message's own timestamp field is used (never datetime.now()),
+    so live ingestion and rebuild produce identical records.
+
+    Returns True on success, False if the message was skipped (too short /
+    not a dict) or the put failed.
+    """
+    _require_sdk()
+    mv2 = Path(mv2_path)
+    if not mv2.exists():
+        return False
+    chunk = chunk_inbox_entry(message)
+    if chunk is None:
+        return False
+    mem = _open_or_create(mv2)
+    try:
+        mem.put(
+            title=chunk["title"],
+            label=chunk["label"],
+            text=chunk["text"],
+            tags=chunk["tags"],
+            metadata=chunk["metadata"],
+            **_put_kwargs(_should_compress(mv2)),
+        )
+        mem.commit()
+        return True
+    except Exception as e:
+        if not quiet:
+            print(f"WARN: inbox put failed: {e}", file=sys.stderr)
+        return False
 
 
 # ---------------------------------------------------------------------------
