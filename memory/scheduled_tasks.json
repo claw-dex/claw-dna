@@ -4,7 +4,7 @@
     "schedule_type": "interval",
     "interval_minutes": 360,
     "type": "message",
-    "content": "Check system health, resource usage and provide a brief summary to your outbox. If any critical issues detected, alert me immediately.",
+    "content": "Run the system check defined in prompts/system-check.md.",
     "enabled": true,
     "last_run": null,
     "priority": 3

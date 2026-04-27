@@ -1,5 +1,7 @@
 # Dream: Nightly reflection and consolidation of all memories to learn and grow
 
+> **Enum Reference:** See `prompts/enum.md` for all valid values of `Status` (dream remark) and any other enum fields used in this prompt.
+
 This is a housekeeping job — you should not need to message the user unless you find something noteworthy.
 
 ---

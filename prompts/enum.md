@@ -22,6 +22,7 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 | `failed` | Goal could not be completed | Set when goal fails; requires failure reason in journal |
 
 **Notes:**
+
 - Legacy form `in-progress` (with hyphen) is normalized to `in_progress` (with underscore)
 - Only one goal should be `in_progress` at a time
 - See `prompts/goal.md` for goal lifecycle details
@@ -45,6 +46,7 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 | `in_progress` | Cycle currently running | Used in journal entries during execution |
 
 **Notes:**
+
 - Set by `scripts/cycle_close.py` at end of each cycle
 - Failures should be documented in journal with root cause
 
@@ -65,9 +67,11 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 | `self-heal` | Recovery/healing cycle | Fixing broken services, corrupt memory, or system errors |
 
 **Alternate Forms:**
+
 - `self_heal` (with underscore) is an alternate form of `self-heal`
 
 **Notes:**
+
 - Type determines which prompt the agent receives
 - Evolve cycles require a `category` field (see below)
 
@@ -90,6 +94,7 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 | `prompt_evolution` | Refine prompts, create new ones, remove outdated instructions | Prompts have stale info or missing guidance | No penalty |
 
 **Notes:**
+
 - **REQUIRED** for `type: evolve` cycles; omit for `goal` and `self-heal` types
 - Category is chosen via evolve recommendation scoring system (see `prompts/evolve.md`)
 - Maturity penalties gradually deprioritize well-developed areas
@@ -117,6 +122,7 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 | `waiting_for_human` | 🟠 | Waiting for user input/escalation | Task requires human intervention (see `prompts/goal.md` tasks requiring human help) |
 
 **Notes:**
+
 - Icons displayed in portal header (see `server.py` line 221)
 - `waiting_for_human` triggers escalation via CallMeBot if configured
 - Most common states: `idle` (between cycles) and `running` (during cycles)
@@ -151,10 +157,33 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 | `goal_failed` | Goal failure notification | When goal status → `failed` |
 
 **Notes:**
+
 - Inbox messages with `type: goal` create persistent goal.json entries
 - `type: message` is conversational-only; always gets a response but no goal tracking
 - Outbox `needs_human` messages are highlighted distinctly in the portal
 - See `prompts/goal.md` for message handling rules
+
+---
+
+## Dream Enums
+
+### Dream Remark Status
+
+**Location:** `/agent/memory/dream/remark.md`
+
+**Field:** `Status:` (Markdown front-matter style line)
+
+**Description:** Tracks the state of nightly dream (memory consolidation) processing across batches and days.
+
+| Value | Meaning | When Used |
+|-------|---------|-----------|
+| `light_sleep_dreaming` | A dream stopped mid-window at the 100-page batch limit; more pages remain | Set when `END_PAGE < TOTAL_PAGES`; remark must include `Next page:` and **omit** the trailing "deep sleep" line |
+| `deep_sleep` | All transcripts in the 24h window for the current `Date:` are processed | Set when `END_PAGE == TOTAL_PAGES`; remark must include the trailing "All transcripts for date … are now completed. You are in deep sleep." line; subsequent dreams on the same `Date:` short-circuit |
+
+**Notes:**
+
+- `light_sleep_dreaming` ⇔ `Next page:` line present and trailing deep-sleep line absent
+- `deep_sleep` ⇔ no `Next page:` line and trailing deep-sleep line present
 
 ---
 
@@ -176,6 +205,7 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 | `failed` | Command failed | Non-zero exit code |
 
 **Notes:**
+
 - Log files are named `bash-<cycle_number>.json`
 - Used in Memory tab for bash command history display
 
@@ -202,6 +232,7 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 | `portal` | 5 | File upload, command center, memory viewer, system diagnostics, overview |
 
 **Notes:**
+
 - Total 33 capabilities tracked
 - Categories align with evolve categories for planning improvements
 - Used in `app/data/suggest.py` for capability counting
@@ -222,6 +253,7 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 | `false` | Capability is disabled or optional | `portal_auth`, `telegram_bridge` |
 
 **Notes:**
+
 - Disabled capabilities: `portal_auth` (optional security), `telegram_bridge` (requires setup)
 - Disabled capabilities can be enabled by user configuration
 
@@ -244,6 +276,7 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 | `low` | Nice to have; low urgency | Gray/💡 |
 
 **Notes:**
+
 - High priority: unfinished goals, recent failures, stale backups
 - Medium priority: evolve suggestions, efficiency opportunities
 - Low priority: general improvements, documentation updates
@@ -266,6 +299,7 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 | `evolve` | Evolution recommendation | Time for self-improvement |
 
 **Notes:**
+
 - Used for color-coding and filtering in Agent Overview tab
 - Aligns with evolve categories for consistency
 
@@ -288,6 +322,7 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 | `cycle_end` | ✅ Cycle End | Cycle completion events |
 
 **Notes:**
+
 - `message` and `bash` from history normalize to `bash_cmd` in activity feed
 - Used in Memory tab activity timeline
 
@@ -309,6 +344,7 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 | `history` | `/agent/memory/command_history.json` | 📜 History |
 
 **Notes:**
+
 - Used in Memory tab search feature
 - Results grouped and color-coded by source
 
@@ -332,6 +368,7 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 | `tie` | New version performed equally to previous version |
 
 **Notes:**
+
 - Used by skill-creator to track skill evolution
 - See `skills/skill-creator/references/schemas.md` for full schema
 
@@ -365,6 +402,7 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 | `status` | Cycle | `completed`, `failed`, `in_progress` | `cycles.json`, `journal.json` |
 | `status` | Agent | `idle`, `running`, `healing`, `bootstrapping`, `awaiting_first_heartbeat`, `waiting_for_human` | `state.json` |
 | `status` | Bash Log | `running`, `exited`, `completed`, `failed` | `logs/bash-*.json` |
+| `Status` | Dream Remark | `light_sleep_dreaming`, `deep_sleep`, `completed` (legacy) | `dream/remark.md` |
 | `type` | Cycle | `goal`, `evolve`, `self-heal` | `cycles.json`, `journal.json` |
 | `type` | Message | `goal`, `message`, `bash`, `needs_human`, `response`, `goal_complete`, `goal_failed` | `inbox.json`, `outbox.json`, `command_history.json` |
 | `category` | Evolution | `reliability`, `observability`, `capability`, `efficiency`, `prompt_evolution` | `cycles.json`, `journal.json` |
@@ -381,6 +419,7 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 - **Goal lifecycle:** `prompts/goal.md`
 - **Cycle close:** `prompts/cycle-close.md`
 - **Evolution categories:** `prompts/evolve.md`
+- **Dream lifecycle:** `prompts/dream.md`
 - **State management:** `prompts/bootstrap.md`
 - **Capabilities list:** `memory/capabilities.json`
 - **Skill-creator schemas:** `skills/skill-creator/references/schemas.md`
