@@ -134,6 +134,14 @@ def write_to_inbox(
     """
     if not items:
         return True
+    # Stamp received_at on any dict item missing it so cycle_close.py can
+    # reliably distinguish pre-cycle items (archive) from mid-cycle arrivals
+    # (carry forward). All current callers set this explicitly; this is a
+    # belt-and-suspenders fallback for future writers.
+    _now_iso = datetime.now(timezone.utc).isoformat()
+    for item in items:
+        if isinstance(item, dict) and not item.get("received_at"):
+            item["received_at"] = _now_iso
     target = inbox_file or INBOX_FILE
     lock_path = str(target) + ".lock"
     try:

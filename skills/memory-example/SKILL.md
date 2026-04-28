@@ -491,6 +491,7 @@ Entry:
 - `source`: `user` | `scheduler` | `telegram` | `whatsapp` | `webhook` | other
 - Scheduler-injected entries may include `task_id`.
 - `event` entries (source `webhook`) carry the sanitized HTTP payload in `content`: method, path, filtered headers, and body (truncated at 4 KB). Full payload is in `webhook_receiver.log`.
+- `received_at`: **Required.** ISO-8601 UTC timestamp set by the writer the moment the item lands in `inbox.json`. This field is the cutoff `cycle_close.py` uses to decide which items the agent has already seen vs. which arrived **mid-cycle** and must be carried forward to the next cycle. Items with `received_at <= cycle.start` are archived to `inbox_history.json` and ingested into long-term memory; items with `received_at > cycle.start` stay in `inbox.json` so they are not silently dropped without processing. All writers (`app/data/write.py::queue_to_inbox`, `services/shared.py::write_to_inbox`, scheduler, webhook, telegram, whatsapp bridges) set this; `write_to_inbox` stamps it as a fallback. Items missing `received_at` are treated as pre-existing and archived on the next goal cycle close.
 
 ### outbox.json
 

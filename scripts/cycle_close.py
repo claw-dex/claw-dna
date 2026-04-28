@@ -59,6 +59,7 @@ Enhanced in cycle 167 (efficiency): auto-backup memory files if last backup >1h 
     eliminates the recurring ⚠ STALE BACKUP warning in cycle_start.py.
 """
 
+import fcntl
 import json
 import glob as glob_mod
 import os
@@ -197,35 +198,97 @@ def _store_inbox_to_memvid(items: list) -> int:
     return ok
 
 
-def _archive_inbox() -> int:
-    """Archive /agent/messages/inbox.json to inbox_history.json, then clear inbox.
+def _parse_iso(ts):
+    """Parse an ISO-8601 timestamp; return None if missing or unparseable."""
+    if not ts or not isinstance(ts, str):
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except Exception:
+        return None
 
-    Before archival, each inbox message is ingested into long-term semantic
-    memory (best-effort, non-fatal). Then the items are appended to
-    inbox_history.json (created as [] if missing) and inbox.json is cleared.
 
-    Returns the number of items archived, or -1 on failure (caller can
-    distinguish "nothing to do" from "data at risk"). Returns 0 when inbox is
-    missing or already empty.
+def _is_pre_cycle_item(msg, cutoff_dt):
+    """True when an inbox item should be archived (predates the cycle start).
+
+    Items missing or with unparseable ``received_at`` are treated as
+    pre-existing (legacy items written before this field was required).
+    When ``cutoff_dt`` is None, falls back to archiving everything.
+    """
+    if cutoff_dt is None:
+        return True
+    if not isinstance(msg, dict):
+        return True
+    ra_dt = _parse_iso(msg.get("received_at"))
+    if ra_dt is None:
+        return True
+    return ra_dt <= cutoff_dt
+
+
+def _archive_inbox(cycle_start_ts=None):
+    """Archive pre-cycle items in /agent/messages/inbox.json to inbox_history.json.
+
+    Items whose ``received_at`` is on or before ``cycle_start_ts`` are archived
+    and ingested into long-term memory (best-effort). Items that arrived
+    mid-cycle (after ``cycle_start_ts``) are left in inbox.json so the next
+    cycle can process them.
+
+    All inbox read/partition/rewrite happens under an exclusive lock on
+    ``inbox.json.lock`` (the same lock used by ``services.shared.write_to_inbox``
+    and ``app.shared.AtomicJSON``), so concurrent appenders cannot have their
+    messages dropped or double-archived. inbox.json is rewritten *before*
+    inbox_history.json is updated, so a failure during rewrite cannot leave
+    items duplicated across both files.
+
+    Returns the number of items archived, or -1 on failure. Returns 0 when
+    inbox is missing or has no archivable items.
     """
     inbox_path = Path("/agent/messages/inbox.json")
     history_path = Path("/agent/messages/inbox_history.json")
+    lock_path = str(inbox_path) + ".lock"
 
     if not inbox_path.exists():
         return 0
+
+    cutoff_dt = _parse_iso(cycle_start_ts)
+    to_archive = []
+
     try:
-        items = json.loads(inbox_path.read_text())
+        with open(lock_path, "a+") as lock_f:
+            fcntl.flock(lock_f, fcntl.LOCK_EX)
+            try:
+                try:
+                    items = json.loads(inbox_path.read_text())
+                except Exception as e:
+                    print(f"  ⚠ inbox archive — failed to read inbox.json: {e}")
+                    return -1
+                if not isinstance(items, list) or not items:
+                    return 0
+
+                to_archive = [m for m in items if _is_pre_cycle_item(m, cutoff_dt)]
+                if not to_archive:
+                    return 0
+
+                kept = [m for m in items if not _is_pre_cycle_item(m, cutoff_dt)]
+
+                # Rewrite inbox.json FIRST (still under the lock). If this
+                # fails we abort without touching history, so no duplicates.
+                tmp_inbox = inbox_path.with_suffix(inbox_path.suffix + ".tmp")
+                try:
+                    tmp_inbox.write_text(json.dumps(kept, indent=2))
+                    tmp_inbox.rename(inbox_path)
+                except Exception as e:
+                    tmp_inbox.unlink(missing_ok=True)
+                    print(f"  ⚠ inbox archive — failed to rewrite inbox.json: {e}")
+                    return -1
+            finally:
+                fcntl.flock(lock_f, fcntl.LOCK_UN)
     except Exception as e:
-        print(f"  ⚠ inbox archive — failed to read inbox.json: {e}")
+        print(f"  ⚠ inbox archive — lock acquisition failed: {e}")
         return -1
-    if not isinstance(items, list) or not items:
-        return 0
 
-    # Ingest each message into long-term memory before archival.
-    ingested = _store_inbox_to_memvid(items)
-    if ingested > 0:
-        print(f"  ✓ inbox memvid — ingested {ingested}/{len(items)} message(s)")
-
+    # From here, inbox.json no longer contains the archived items. Append
+    # them to history and ingest into memvid (best-effort, non-fatal).
     history = []
     if history_path.exists():
         try:
@@ -240,17 +303,14 @@ def _archive_inbox() -> int:
             return -1
         history = loaded
 
-    history.extend(items)
+    history.extend(to_archive)
     write_atomic(history_path, history)
-    tmp_inbox = inbox_path.with_suffix(inbox_path.suffix + ".tmp")
-    try:
-        tmp_inbox.write_text("[]")
-        tmp_inbox.rename(inbox_path)
-    except Exception as e:
-        tmp_inbox.unlink(missing_ok=True)
-        print(f"  ⚠ inbox archive — failed to clear inbox.json: {e}")
-        return -1
-    return len(items)
+
+    ingested = _store_inbox_to_memvid(to_archive)
+    if ingested > 0:
+        print(f"  ✓ inbox memvid — ingested {ingested}/{len(to_archive)} message(s)")
+
+    return len(to_archive)
 
 
 # ── Argument parsing (no external deps) ─────────────────────────────────────
@@ -905,10 +965,10 @@ def main():
     # 5. Archive inbox.json → inbox_history.json (goal cycles only;
     #    evolve/self-heal/dream cycles must not touch inbox so pending user commands survive)
     if opts["type"] == "goal":
-        archived_n = _archive_inbox()
+        archived_n = _archive_inbox(cycle_start_ts=cycle_entry.get("start"))
         if archived_n > 0:
             print(
-                f"  ✓ inbox archive — {archived_n} item(s) appended to inbox_history.json, inbox cleared"
+                f"  ✓ inbox archive — {archived_n} pre-cycle item(s) appended to inbox_history.json; mid-cycle arrivals carried forward"
             )
         elif archived_n < 0:
             print(

@@ -39,6 +39,11 @@
   (see the `service-manager` skill) — it handles PID tracking, health checks, and log management
 - Always save custom service scripts (created by the agent, not installed via system) to `/agent/services/`
 - Always review service status (`scripts/service_manager.py list`) before starting a cycle's main work
+- After modifying any service code, MUST restart the affected service via `scripts/service_manager.py`
+  so the running process picks up the change. This applies to:
+  - The service entry point itself (e.g. `services/webhook_receiver.py`, `services/telegram_bridge.py`)
+  - Any Python module imported by the service entry point (e.g. `services/shared.py`, `services/webhook/*`)
+  - When a shared module is touched, restart every service that imports it, not just one
 
 ## Self-Evolution Boundaries
 
@@ -57,7 +62,6 @@
 - You have passwordless sudo for system administration (apt-get, etc.)
 - Your home directory is /home/agent
 - Use sudo for: apt-get install, systemctl, editing files outside /agent/
-- Do NOT use sudo for: normal file operations inside /agent/
 
 ## Code Formatting
 
