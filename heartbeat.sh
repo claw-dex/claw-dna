@@ -193,10 +193,18 @@ select_prompt() {
 
     # 5. Force the idle prompt if none in the last 5 cycles (prevents starvation
     #    when idle). IDLE_MODE = "evolve" normally, "dream" when --agent-sleep.
+    #    Dream cycles match either type=="dream" (current scheme) or the legacy
+    #    combo type=="evolve" & category=="prompt_evolution" (pre-dream-type closes).
+    local idle_match_jq
+    if [ "$IDLE_MODE" = "dream" ]; then
+        idle_match_jq='(.type == "dream") or (.type == "evolve" and .category == "prompt_evolution")'
+    else
+        idle_match_jq='.type == $m'
+    fi
     local cycles_since_idle
-    cycles_since_idle=$(jq --arg m "$IDLE_MODE" '
-        [.[] | select(.type == $m)] | last | .cycle // 0
-    ' /agent/memory/cycles.json 2>/dev/null || echo 0)
+    cycles_since_idle=$(jq --arg m "$IDLE_MODE" "
+        [.[] | select($idle_match_jq)] | last | .cycle // 0
+    " /agent/memory/cycles.json 2>/dev/null || echo 0)
     local current_cycle
     current_cycle=$(jq -r '.cycle_number // 0' /agent/memory/state.json 2>/dev/null || echo 0)
     local gap=$(( current_cycle - cycles_since_idle ))
@@ -207,11 +215,11 @@ select_prompt() {
 
     # 6. All clear — run the idle prompt (skip if consecutive idle limit reached).
     local all_idle
-    all_idle=$(jq -r --argjson n "$MAX_CONSECUTIVE_IDLE" --arg m "$IDLE_MODE" '
-        if length < $n then false
-        else (. | reverse | .[0:$n] | all(.type == $m))
+    all_idle=$(jq -r --argjson n "$MAX_CONSECUTIVE_IDLE" --arg m "$IDLE_MODE" "
+        if length < \$n then false
+        else (. | reverse | .[0:\$n] | all($idle_match_jq))
         end
-    ' /agent/memory/cycles.json 2>/dev/null || echo false)
+    " /agent/memory/cycles.json 2>/dev/null || echo false)
     if [ "$all_idle" = "true" ]; then
         echo "skip"
         return

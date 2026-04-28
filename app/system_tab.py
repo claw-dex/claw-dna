@@ -38,7 +38,7 @@ _SCRIPT_ARGS: dict[str, list] = {
     "cycle_close.py": [
         {
             "flag": "--type",
-            "help": "evolve | goal | self-heal",
+            "help": "evolve | goal | self-heal | dream",
             "placeholder": "evolve",
         },
         {
@@ -53,7 +53,7 @@ _SCRIPT_ARGS: dict[str, list] = {
         },
         {
             "flag": "--category",
-            "help": "For evolve: reliability | observability | capability | efficiency",
+            "help": "evolve: reliability | observability | capability | efficiency | prompt_evolution; dream: memory_consolidation | deep_sleep",
             "placeholder": "capability",
         },
         {

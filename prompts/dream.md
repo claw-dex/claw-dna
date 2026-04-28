@@ -161,3 +161,34 @@ Note: The trailing line in remark regarding completion status is REQUIRED only w
 ---
 
 **NOTE** - all of these memory files are *for you*. This is to help you situate and orient yourself in the future, after session context has been lost. Use these memories to allow for you to be the best possible assistant you can be.
+
+---
+
+## Phase 6: Close the Cycle (MANDATORY — always run, even for deep-sleep short-circuits)
+
+Dream cycles are `dream` type. Choose the category based on what this dream actually did:
+
+- **Normal run** (transcripts processed in Phases 1–5) → `--category memory_consolidation`
+- **Deep-sleep short-circuit** (Phase 0 exit; no transcripts processed) → `--category deep_sleep`
+
+```bash
+# Normal run (transcripts processed):
+uv run python scripts/cycle_close.py \
+    --type dream \
+    --category memory_consolidation \
+    --summary "<one-sentence description of what was processed>" \
+    --actions "Processed pages <START>-<END> of <TOTAL>" \
+              "Topics updated: <comma-separated slugs, or 'none'>" \
+              "Learnings updated: <comma-separated slugs, or 'none'>"
+
+# Deep-sleep short-circuit (Phase 0 exit):
+uv run python scripts/cycle_close.py \
+    --type dream \
+    --category deep_sleep \
+    --summary "Dream short-circuit: deep_sleep already set for <TODAY> (<TZ>). No transcript processing needed."
+```
+
+For completed batches, use a summary like:
+`"Dream processed pages 1-48 of 48 for 2026-04-28. Updated 3 topics, 2 learnings."`
+
+**Do NOT use any of the evolve categories** (`reliability`, `observability`, `capability`, `efficiency`, `prompt_evolution`) for dream cycles — those are for self-improvement work and miscategorizing dream cycles distorts the evolve recommendation system. Always use `memory_consolidation` or `deep_sleep`.

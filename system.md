@@ -188,6 +188,43 @@ When you need discovery before planning (e.g., evolve cycles where you haven't c
 **Pattern 4: Plan First, Then Parallel Execute**
 For any non-trivial work (even a single goal), use a `Plan` subagent to break the work into independent tasks, then launch `general-purpose` subagents to complete the independent tasks in parallel.
 
+### Example Use Cases by Cycle Type
+
+#### Goal Cycle (`prompts/goal.md`)
+
+| Use case | Subagent |
+| --- | --- |
+| Multiple unrelated inbox goals, or one goal with disjoint deliverables (script + tab + routing entry) | `general-purpose` × N |
+| Unknown API / library / tool — need discovery before design | `Explore` → `Plan` |
+| Clear requirements, unknown insertion points (e.g. "add error handling to every `webhook_receiver` callout") | `Explore` + `Plan` in parallel |
+| Non-trivial single goal (multi-file refactor, new subsystem, unclear routing) | `Plan` first |
+| Status / multi-file summary messages (`state.json` + `journal.json` + `goal.json`) | `general-purpose` |
+
+#### Evolve Cycle (`prompts/evolve.md`)
+
+| Use case | Subagent |
+| --- | --- |
+| Pick the highest-leverage improvement within the suggested category (still implement ONE) | `Explore` |
+| Audit prompts / routing tables for stale or missing entries | `Explore` |
+| `reliability` — locate blast radius before patching a tab/module | `Explore` → `Plan` |
+| `observability` / `capability` — split data-layer vs UI, or interface vs implementation | `Plan` → `general-purpose` × N |
+| `efficiency` — profile / locate hot lines before optimizing | `Explore` |
+| `prompt-evolution` — ground the change in journal/transcript evidence | `Explore` |
+| Skill discovery via `skills-sh-find-skills` | `general-purpose` |
+
+#### Dream Cycle (`prompts/dream.md`)
+
+| Use case | Subagent |
+| --- | --- |
+| Phase 1 — large remaining page batch (incl. `light_sleep_dreaming` resume) | `general-purpose` × up to 3, disjoint page ranges |
+| Phase 2 — topic extraction + dedupe check against existing `dream/topics/` | `general-purpose` (extract) / `Explore` (dedupe) |
+| Phase 3 — pain-point / frustration scan across pages | `general-purpose` |
+| Phase 4 — staleness audit of `dream/topics/` & `dream/learnings/` for `MEMORY.md` pruning | `Explore` |
+| Reconcile new learnings against existing ones to avoid contradictions | `general-purpose` |
+
+> Dream rule: Phase 5 (`dream/remark.md`) and Phase 6 (`cycle_close.py`) are **never**
+> delegated — the main agent writes the durable hand-off itself.
+
 ### Rules
 
 - **Never exceed 3 concurrent subagents** — batch tasks into groups of 3 if more exist

@@ -27,14 +27,16 @@ Usage:
     uv run python scripts/cycle_close.py --help
 
 Required flags:
-    --type TYPE           Cycle type: evolve | goal | self-heal (see prompts/enum.md → Cycle Type)
+    --type TYPE           Cycle type: evolve | goal | self-heal | dream (see prompts/enum.md → Cycle Type)
     --summary TEXT        1-2 sentence summary of what was done and why it matters
 
 Optional flags:
     --cycle N             Cycle number (integer). Default: auto-detected from state.json
                             (state.cycle_number + 1, or max cycle in cycles.json + 1)
-    --category CAT        Evolve category (required when --type evolve):
+    --category CAT        Evolve / dream category (required when --type is evolve or dream):
                             reliability | observability | capability | efficiency | prompt_evolution
+                            | memory_consolidation | sleep
+                            (memory_consolidation and deep_sleep are dream-only)
     --actions TEXT…       One or more action strings (space-separated, each in quotes)
     --status STATUS       Cycle status: completed | failed (default: completed)
     --goal TEXT           What you worked on (defaults to --summary)
@@ -689,25 +691,38 @@ def main():
 
     # Validate required args
     if not opts["type"]:
-        die("--type TYPE is required (evolve | goal | self-heal)")
+        die("--type TYPE is required (evolve | goal | self-heal | dream)")
     if not opts["summary"]:
         die("--summary TEXT is required")
-    if opts["type"] == "evolve" and not opts["category"]:
-        die("--category CAT is required when --type is evolve")
+    if opts["type"] in ("evolve", "dream") and not opts["category"]:
+        die(f"--category CAT is required when --type is {opts['type']}")
 
-    valid_types = {"evolve", "goal", "self-heal"}
+    valid_types = {"evolve", "goal", "self-heal", "dream"}
     if opts["type"] not in valid_types:
         die(f"--type must be one of: {', '.join(sorted(valid_types))}")
 
-    valid_cats = {
+    evolve_cats = {
         "reliability",
         "observability",
         "capability",
         "efficiency",
         "prompt_evolution",
     }
-    if opts["category"] and opts["category"] not in valid_cats:
-        die(f"--category must be one of: {', '.join(sorted(valid_cats))}")
+    dream_cats = {"memory_consolidation", "deep_sleep"}
+    valid_cats = evolve_cats | dream_cats
+    if opts["category"]:
+        if opts["category"] not in valid_cats:
+            die(f"--category must be one of: {', '.join(sorted(valid_cats))}")
+        if opts["type"] == "evolve" and opts["category"] not in evolve_cats:
+            die(
+                f"--category {opts['category']} is dream-only; evolve cycles must use one of: "
+                f"{', '.join(sorted(evolve_cats))}"
+            )
+        if opts["type"] == "dream" and opts["category"] not in dream_cats:
+            die(
+                f"--category {opts['category']} is evolve-only; dream cycles must use one of: "
+                f"{', '.join(sorted(dream_cats))}"
+            )
 
     valid_statuses = {"completed", "failed"}
     if opts["status"] not in valid_statuses:
@@ -888,7 +903,7 @@ def main():
             print(f"  ⚠ normalize failed (non-fatal): {e}")
 
     # 5. Archive inbox.json → inbox_history.json (goal cycles only;
-    #    evolve/self-heal cycles must not touch inbox so pending user commands survive)
+    #    evolve/self-heal/dream cycles must not touch inbox so pending user commands survive)
     if opts["type"] == "goal":
         archived_n = _archive_inbox()
         if archived_n > 0:

@@ -11,6 +11,8 @@ _CATEGORY_COLORS = {
     "reliability": "#4CAF50",
     "efficiency": "#FF9800",
     "prompt_evolution": "#E91E63",
+    "memory_consolidation": "#673AB7",
+    "deep_sleep": "#3F51B5",
 }
 _CATEGORY_ICONS = {
     "capability": "⚡",
@@ -18,6 +20,8 @@ _CATEGORY_ICONS = {
     "reliability": "🛡️",
     "efficiency": "⏩",
     "prompt_evolution": "✏️",
+    "memory_consolidation": "🧠",
+    "deep_sleep": "💤",
 }
 
 
@@ -140,6 +144,7 @@ def _render_today_glance(now_utc):
             "evolve": "🧬",
             "goal": "🎯",
             "self-heal": "🔧",
+            "dream": "💤",
         }.get(ctype, "•")
         cat_icon = _CATEGORY_ICONS.get(cat, "") if cat else ""
         status_icon = {"completed": "✅", "failed": "❌", "in_progress": "🔄"}.get(
@@ -469,6 +474,7 @@ def render():
             "goal": "#2196F3",
             "bootstrap": "#FF9800",
             "self-heal": "#F44336",
+            "dream": "#3F51B5",
         }
 
         parts = [

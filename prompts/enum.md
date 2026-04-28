@@ -65,6 +65,7 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 | `goal` | Standard goal execution cycle | Processing inbox goals or continuing in-progress goals |
 | `evolve` | Self-improvement cycle | No user goals; agent improves itself (see `prompts/evolve.md`) |
 | `self-heal` | Recovery/healing cycle | Fixing broken services, corrupt memory, or system errors |
+| `dream` | Nightly memory consolidation cycle | Reflecting on transcripts, extracting topics/learnings (see `prompts/dream.md`) |
 
 **Alternate Forms:**
 
@@ -73,7 +74,7 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 **Notes:**
 
 - Type determines which prompt the agent receives
-- Evolve cycles require a `category` field (see below)
+- `evolve` and `dream` cycles require a `category` field (see below); `goal` and `self-heal` omit it
 
 ---
 
@@ -92,11 +93,15 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 | `capability` | Build utility scripts, install tools, expand features | Agent can't do something users might ask | Yes (graduated: 20 at 30+ capabilities) |
 | `efficiency` | Optimize hot paths, reduce wasted cycles | Slow startup, redundant work, cache misses | Yes (15 if mtime conversion done) |
 | `prompt_evolution` | Refine prompts, create new ones, remove outdated instructions | Prompts have stale info or missing guidance | No penalty |
+| `memory_consolidation` | Nightly transcript digest — extract topics & learnings | Set by dream cycles when transcripts were processed | No penalty (dream-only; not chosen by evolve recommender) |
+| `deep_sleep` | Deep-sleep short-circuit — no transcripts processed | Set by dream cycles that exit at Phase 0 (already in deep sleep for the day) | No penalty (dream-only; not chosen by evolve recommender) |
 
 **Notes:**
 
-- **REQUIRED** for `type: evolve` cycles; omit for `goal` and `self-heal` types
-- Category is chosen via evolve recommendation scoring system (see `prompts/evolve.md`)
+- **REQUIRED** for `type: evolve` and `type: dream` cycles; omit for `goal` and `self-heal` types
+- For `evolve` cycles, category is chosen via evolve recommendation scoring system (see `prompts/evolve.md`)
+- For `dream` cycles, category is `memory_consolidation` on a normal run and `deep_sleep` on a deep-sleep short-circuit (see `prompts/dream.md`)
+- `memory_consolidation` and `deep_sleep` are produced exclusively by dream cycles — the evolve recommender does not pick them
 - Maturity penalties gradually deprioritize well-developed areas
 - Used in `app/data/suggest.py` for balance tracking
 
@@ -403,9 +408,9 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 | `status` | Agent | `idle`, `running`, `healing`, `bootstrapping`, `awaiting_first_heartbeat`, `waiting_for_human` | `state.json` |
 | `status` | Bash Log | `running`, `exited`, `completed`, `failed` | `logs/bash-*.json` |
 | `Status` | Dream Remark | `light_sleep_dreaming`, `deep_sleep`, `completed` (legacy) | `dream/remark.md` |
-| `type` | Cycle | `goal`, `evolve`, `self-heal` | `cycles.json`, `journal.json` |
+| `type` | Cycle | `goal`, `evolve`, `self-heal`, `dream` | `cycles.json`, `journal.json` |
 | `type` | Message | `goal`, `message`, `bash`, `needs_human`, `response`, `goal_complete`, `goal_failed` | `inbox.json`, `outbox.json`, `command_history.json` |
-| `category` | Evolution | `reliability`, `observability`, `capability`, `efficiency`, `prompt_evolution` | `cycles.json`, `journal.json` |
+| `category` | Evolution | `reliability`, `observability`, `capability`, `efficiency`, `prompt_evolution`, `memory_consolidation`, `deep_sleep` | `cycles.json`, `journal.json` |
 | `category` | Capability | `core`, `memory`, `security`, `communication`, `observability`, `automation`, `portal` | `capabilities.json` |
 | `enabled` | Capability | `true`, `false` | `capabilities.json` |
 | `priority` | Suggestion | `high`, `medium`, `low` | Portal suggestions |

@@ -1001,6 +1001,7 @@ def handle_journal_command(
             "goal": "🎯",
             "self-heal": "🔧",
             "self_heal": "🔧",
+            "dream": "💤",
         }
 
         lines = [
@@ -1216,7 +1217,13 @@ def handle_cycles_command(
         recent = completed[-limit:][::-1]  # last N, reversed to newest-first
 
         total = len(completed)
-        type_emoji = {"evolve": "🔧", "goal": "🎯", "self-heal": "🩺", "unknown": "❓"}
+        type_emoji = {
+            "evolve": "🔧",
+            "goal": "🎯",
+            "self-heal": "🩺",
+            "dream": "💤",
+            "unknown": "❓",
+        }
 
         header = f"📊 *Recent Cycles* \\(last {len(recent)} of {total} completed\\)"
         lines = [header]

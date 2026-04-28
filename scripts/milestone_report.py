@@ -33,6 +33,8 @@ _CATEGORY_ICONS = {
     "reliability": "🛡️",
     "efficiency": "⚙️",
     "prompt_evolution": "📝",
+    "memory_consolidation": "🧠",
+    "deep_sleep": "💤",
 }
 
 
@@ -354,6 +356,7 @@ def render_markdown(report):
             "goal": "🎯",
             "bootstrap": "🌱",
             "self-heal": "🔧",
+            "dream": "💤",
         }
         icon = type_icons.get(t, "•")
         lines.append(f"- {icon} **{t}**: {count}")

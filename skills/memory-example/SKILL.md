@@ -34,7 +34,7 @@ file, start from the example below.
 ```
 
 - `status`: `idle` (between cycles) | `running` (during a cycle)
-- `last_cycle_type`: `evolve` | `goal` | `self-heal` | `null`
+- `last_cycle_type`: `evolve` | `goal` | `self-heal` | `dream` | `null`
 - `last_cycle_category`: evolve category (when applicable) | `null`
 - `last_heartbeat`: set by heartbeat.sh on every invocation (even during sleep mode)
 - `last_cycle_run`: set by heartbeat.sh only when a cycle actually executes (after sleep check passes)
@@ -63,8 +63,8 @@ Entry appended by cycle-close:
 }
 ```
 
-- `type`: `evolve` | `goal` | `self-heal`
-- `category` (evolve only): `reliability` | `observability` | `capability` | `efficiency` | `prompt_evolution`
+- `type`: `evolve` | `goal` | `self-heal` | `dream`
+- `category` (evolve and dream only): evolve → `reliability` | `observability` | `capability` | `efficiency` | `prompt_evolution`; dream → `memory_consolidation` | `deep_sleep`
 - `status`: `completed` | `failed` | `interrupted` | `in-progress`
 
 ### journal.json
@@ -521,8 +521,8 @@ Entry:
 | **Timestamps** | ISO 8601 with timezone: `2026-03-05T10:00:00+00:00` |
 | **Priority** | Integer 1-5 (1 = highest, 3 = default) |
 | **Status enums** | Vary per file — see individual sections above |
-| **Cycle type** | `evolve` / `goal` / `self-heal` |
-| **Category** | `reliability` / `observability` / `capability` / `efficiency` / `prompt_evolution` |
+| **Cycle type** | `evolve` / `goal` / `self-heal` / `dream` |
+| **Category** | evolve: `reliability` / `observability` / `capability` / `efficiency` / `prompt_evolution`; dream: `memory_consolidation` / `deep_sleep` |
 | **Null fields** | Use `null`, not empty string, for absent optional values |
 | **Arrays** | Default to `[]`; objects default to `{}` |
 | **Atomic writes** | All files use write-to-temp-then-rename to prevent corruption |

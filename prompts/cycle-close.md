@@ -10,8 +10,8 @@ Instead of running steps 1–3 manually, use the automation script:
 
 ```bash
 uv run python scripts/cycle_close.py \
-    --type evolve \           # evolve | goal | self-heal (see prompts/enum.md → Cycle Type)
-    --category efficiency \   # required for evolve cycles (see prompts/enum.md → Evolution Category)
+    --type evolve \           # evolve | goal | self-heal | dream (see prompts/enum.md → Cycle Type)
+    --category efficiency \   # required for evolve and dream cycles (see prompts/enum.md → Evolution Category)
     --summary "One or two sentence summary of what was done and why it matters" \
     --actions "Action 1" "Action 2" "Action 3"
 ```
@@ -55,7 +55,7 @@ open('/agent/memory/cycles.json', 'w').write(json.dumps(cycles, indent=2))
 
 Required fields on every completed entry:
 `cycle`, `start`, `end`, `duration_seconds`, `type`, `status`, `summary`
-Plus `category` for evolve cycles (reliability | observability | capability | efficiency | prompt_evolution).
+Plus `category` for evolve cycles (reliability | observability | capability | efficiency | prompt_evolution) and dream cycles (memory_consolidation | deep_sleep).
 
 ## 1b. Normalize cycles.json (automatic)
 
@@ -86,8 +86,9 @@ journal.append({
     "cycle": <N>,
     "timestamp": now,
     "status": "completed",       # completed | failed | in_progress
-    "type": "evolve",            # evolve | goal | self-heal
-    "category": "...",           # evolve only: reliability | observability | capability | efficiency | prompt_evolution
+    "type": "evolve",            # evolve | goal | self-heal | dream
+    "category": "...",           # evolve: reliability | observability | capability | efficiency | prompt_evolution
+                                 # dream: memory_consolidation | deep_sleep
     "goal": "<what you did>",
     "actions": ["action 1", "action 2"],
     "summary": "<1-2 sentences on result and why it matters>"
@@ -97,7 +98,7 @@ open('/agent/memory/journal.json', 'w').write(json.dumps(journal, indent=2))
 
 **IMPORTANT:** Use `summary` (not `outcome`) — cycle_start.py reads `summary` when displaying recent journal entries. Using `outcome` will cause blank lines in the cycle briefing.
 
-Omit `category` for `goal` and `self-heal` entries.
+Omit `category` for `goal` and `self-heal` entries. Required for `evolve` and `dream` entries.
 
 Self-test: "If I read this entry next cycle with no memory, would I understand what happened?"
 
