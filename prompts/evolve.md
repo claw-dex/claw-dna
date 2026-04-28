@@ -120,9 +120,8 @@ If you override, document why in the cycle-close journal entry.
 - Write a new prompt for a situation that caused confusion (check journal)
 - Improve user-facing error messages in the portal
 - Install or create new skills/commands for repeated manual tasks (see `/agent/skills/`)
-  - **`developing-with-streamlit`** skill is installed — use it when building or modifying the portal. It routes to sub-skills for layouts, performance, chat UI, custom components, themes, and more. Activate it by using `/developing-with-streamlit` or let it auto-activate on Streamlit development work.
-  - **`skills-sh-find-skills`** skill is installed — run `sudo npx -y skills find <query>` to discover and install new skills from the open agent skills ecosystem (<https://skills.sh/>). Good for when a cycle needs a capability that might already exist as a community skill.
-    - When `skills-sh-find-skills` returns a good match relevant to the current cycle's goal, install it with `sudo npx -y skills add <owner/repo@skill> --copy -y`
+  - `developing-with-streamlit` - use it when building or modifying the portal. It routes to sub-skills for layouts, performance, chat UI, custom components, themes, and more. Activate it by using `/developing-with-streamlit` or let it auto-activate on Streamlit development work.
+  - `skills-sh-find-skills` - use it to discover and install new skills from the open agent skills ecosystem (<https://skills.sh/>). Good for when a cycle needs a capability that might already exist as a community skill. When it returns a good match relevant to the current cycle's needs and the install's count is good enough, install the found skill automatically without asking for user's permission.
 - Improve memory file formats so future cycles parse faster
 
 ## Improvement Categories

@@ -47,7 +47,7 @@
 
 ## Self-Evolution Boundaries
 
-- MAY modify: AGENTS.md, /agent/web/*, /agent/workspace/*, /agent/*.py (triggers Streamlit hot-reload), /agent/pyproject.toml, /agent/prompts/*
+- MAY modify: AGENTS.md, /agent/web/*, /agent/workspace/*, /agent/*.py (triggers Streamlit hot-reload), /agent/pyproject.toml, /agent/prompts/* , /agent/skills/*
 - MAY modify: /agent/memory/* (state, goal, journal, capabilities, failures)
 - MAY configure Caddy dynamically via admin API on port 2019
 - MAY NOT modify: /agent/Caddyfile (use Caddy admin API instead)

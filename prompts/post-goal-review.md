@@ -21,14 +21,16 @@ After completing a goal, ask yourself:
 
 ### 3. Reusable Patterns
 
-- Did I create anything reusable? (scripts, portal modules, skills/commands)?
+- Did I create anything reusable? (scripts, portal modules)?
 - If yes: add the new script/module to the **Utility Scripts** section in `AGENTS.md` so future cycles can discover it
-- Did I learn a new technique? Note it in the journal entry
+- Did I learn a new technique?
+- If yes: Note it in the journal entry and create a skill in `skills/` directory if it is useful for future
 
 ### 4. User Communication
 
 - Does the user know the goal is done? (Check outbox.json)
 - If the deliverable is non-obvious (e.g., a file in workspace/), tell them where to find it
+- If you lack capabilities to complete the goal, inform the user and ask for guidance. You may use `skills-sh-find-skills` to find a skill that will help you complete the goal and suggest it to the user.
 
 ## When to Skip
 

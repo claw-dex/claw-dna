@@ -218,7 +218,7 @@ memory/logs/
 Dockerfile
 .claude/CLAUDE.md
 .claude/skills
-
+skills-lock.json
 # Ignore memory files except for seed memory
 memory/
 !memory/capabilities.json
