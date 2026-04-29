@@ -33,17 +33,23 @@ if ! flock -n 9; then
     echo "[$(date -Is)] Another heartbeat is already running. Skipping."
     exit 0
 fi
-# Lock is held for the duration of the script via fd 9
+# Lock is held for the duration of the script via fd 9.
+# The file is intentionally NOT removed on exit — it's a stable rendezvous
+# inode; flock auto-releases the advisory lock when fd 9 closes at process
+# exit, and keeping the path stable avoids a brief overlap race where a
+# concurrent heartbeat could create a fresh inode at the same path.
 
 # ── Parse arguments ──────────────────────────────────────────
 AGENT_SLEEP=false
 MAX_EVOLVE=5
 MAX_DREAM=5
+AGENT_TIMEOUT=1800
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --agent-sleep) AGENT_SLEEP=true; shift ;;
         --max-evolve) MAX_EVOLVE="$2"; shift 2 ;;
         --max-dream) MAX_DREAM="$2"; shift 2 ;;
+        --agent-timeout) AGENT_TIMEOUT="$2"; shift 2 ;;
         *) shift ;;
     esac
 done
@@ -51,16 +57,18 @@ done
 # IDLE_MODE is set after USER_TZ is read below, since the dream window
 # (20:00–08:00) is evaluated in the user's local timezone.
 
-# ── Guard: kill stale agent process from a previous crashed heartbeat ──
-# If a previous heartbeat was killed (e.g., OOM, signal) without cleanup,
-# a leftover agent process can still be running. Detect via the cycle lock
-# file (written at cycle start, cleaned up on exit). If the PID in the lock
-# is still alive but the heartbeat that spawned it is gone, kill it so this
-# heartbeat can run cleanly — otherwise the leftover process keeps writing
-# to cycles.json while we start a new cycle, causing overlapping entries.
+# ── Guard: kill stale agent process from a previous crashed/timed-out heartbeat ──
+# If a previous heartbeat was killed (e.g., OOM, signal) or timed out via
+# --agent-timeout without cleanup, a leftover agent process can still be
+# running. Detect via the cycle lock file (written at cycle start, cleaned up
+# on normal exit, preserved on timeout). If the PID in the lock is still
+# alive, kill it so this heartbeat can run cleanly — otherwise the leftover
+# process keeps writing to cycles.json while we start a new cycle, causing
+# overlapping entries.
 CYCLE_LOCK="/agent/memory/.cycle.lock"
 if [ -f "$CYCLE_LOCK" ]; then
     STALE_PID=$(jq -r '.pid // 0' "$CYCLE_LOCK" 2>/dev/null || echo 0)
+    : "${STALE_PID:=0}"
     if [ "$STALE_PID" -gt 0 ] && [ "$STALE_PID" != "$$" ]; then
         if kill -0 "$STALE_PID" 2>/dev/null; then
             echo "[$(date -Is)] Stale cycle process (PID $STALE_PID) still running from previous heartbeat. Killing..."
@@ -113,10 +121,11 @@ CYCLE_NUM=$((CYCLE_NUM + 1))
 
 # ── Cycle lock file (tracks active cycle PID for crash detection) ──
 # Initially written with shell PID; updated with agent PID after launch.
+# NOT cleaned up via EXIT trap — on timeout we want the lock to survive so
+# the next heartbeat's stale-process guard can find and kill the leftover
+# agent. The lock is removed manually below on normal cycle completion.
 CYCLE_LOCK="/agent/memory/.cycle.lock"
 echo "{\"pid\": $$, \"cycle\": ${CYCLE_NUM}, \"started\": \"${TIMESTAMP}\"}" > "$CYCLE_LOCK"
-cleanup_cycle_lock() { rm -f "$CYCLE_LOCK"; }
-trap cleanup_cycle_lock EXIT
 
 echo "[$TIMESTAMP] ════════ Cycle #${CYCLE_NUM} ════════"
 
@@ -416,8 +425,40 @@ fi
     2>&1 | tee "/agent/memory/logs/cycle-${CYCLE_NUM}.log" &
 AGENT_PID=$!
 echo "{\"pid\": ${AGENT_PID}, \"cycle\": ${CYCLE_NUM}, \"started\": \"${TIMESTAMP}\"}" > "$CYCLE_LOCK"
-wait $AGENT_PID
-EXIT_CODE=$?
+
+# ── Bounded wait: stop blocking after --agent-timeout seconds ──
+# A hung agent must not stall the heartbeat loop. On timeout we leave the
+# process running and preserve the cycle lock; the next heartbeat's
+# stale-process guard will kill it before starting a new cycle.
+AGENT_START_EPOCH=$(date +%s)
+AGENT_TIMED_OUT=false
+EXIT_CODE=0
+while kill -0 "$AGENT_PID" 2>/dev/null; do
+    NOW_EPOCH=$(date +%s)
+    ELAPSED=$(( NOW_EPOCH - AGENT_START_EPOCH ))
+    if [ "$ELAPSED" -ge "$AGENT_TIMEOUT" ]; then
+        AGENT_TIMED_OUT=true
+        break
+    fi
+    sleep 5
+done
+if $AGENT_TIMED_OUT; then
+    echo "[$(date -Is)] Agent timed out after ${ELAPSED}s (--agent-timeout=${AGENT_TIMEOUT}). Leaving PID ${AGENT_PID} running and cycle lock in place; it will be killed by the next heartbeat's stale-process guard."
+    EXIT_CODE=124
+else
+    wait "$AGENT_PID"
+    EXIT_CODE=$?
+    # Cycle finished normally — remove the lock so the next heartbeat sees
+    # a clean slate and doesn't try to kill an already-exited PID.
+    rm -f "$CYCLE_LOCK"
+fi
+
+# On timeout, exit immediately — the agent is still running and hasn't
+# written a final session, so transcript archiving is skipped this cycle.
+if $AGENT_TIMED_OUT; then
+    echo "[$(date -Is)] Cycle #${CYCLE_NUM} ended early due to agent timeout (exit code: ${EXIT_CODE})."
+    exit "$EXIT_CODE"
+fi
 
 # ── Archive transcript (preserve full reasoning chain before compaction) ──
 TRANSCRIPT_DIR="/agent/memory/transcripts"

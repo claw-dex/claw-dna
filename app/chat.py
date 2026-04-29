@@ -4,15 +4,17 @@ Also provides the Streamlit chat UI render() function.
 """
 
 import asyncio
+import atexit
 import json
 import os
 import queue
 import threading
+import weakref
 from pathlib import Path
 
 import streamlit as st
 
-from app.shared import CHAT_HISTORY_PATH, _write_json_atomic
+from app.shared import CHAT_HISTORY_PATH, CHAT_META_PATH, _write_json_atomic
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -119,6 +121,107 @@ def _save_chat_history(messages: list) -> None:
     _write_json_atomic(CHAT_HISTORY_PATH, messages[-_MAX_CHAT_HISTORY:], indent=2)
 
 
+def _load_chat_meta() -> dict:
+    """Load persisted SDK metadata (resume session id, etc.)."""
+    try:
+        with open(CHAT_META_PATH) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_chat_session_id(session_id: str | None) -> None:
+    """Persist the latest SDK session_id so the singleton can resume across
+    streamlit process restarts."""
+    if not session_id:
+        return
+    meta = _load_chat_meta()
+    if meta.get("session_id") == session_id:
+        return
+    meta["session_id"] = session_id
+    _write_json_atomic(CHAT_META_PATH, meta, indent=2)
+
+
+# ── Module-level cleanup helpers (used by atexit + weakref.finalize) ───────
+
+
+# Tracks (loop_id, sdk_id) tuples that have already been torn down, so that
+# weakref.finalize + atexit + explicit close() racing does not re-disconnect
+# an already-closed SDK transport.
+_SHUTDOWN_DONE: set[tuple[int, int]] = set()
+_SHUTDOWN_LOCK = threading.Lock()
+
+
+def _shutdown_chat_resources(loop, sdk, thread) -> None:
+    """Best-effort tear-down of an asyncio loop, SDK client, and daemon thread.
+
+    Module-level (not a method) so it can be called from a weakref.finalize
+    callback without keeping the ClaudeChat instance alive. Idempotent:
+    repeated calls for the same (loop, sdk) pair are a no-op.
+    """
+    key = (id(loop), id(sdk))
+    with _SHUTDOWN_LOCK:
+        if key in _SHUTDOWN_DONE:
+            return
+        _SHUTDOWN_DONE.add(key)
+    try:
+        if loop is not None and loop.is_running() and sdk is not None:
+
+            async def _shutdown():
+                try:
+                    await sdk.disconnect()
+                finally:
+                    loop.stop()
+
+            try:
+                fut = asyncio.run_coroutine_threadsafe(_shutdown(), loop)
+                fut.result(timeout=5)
+            except Exception:
+                pass
+        elif sdk is not None:
+            # Loop is already dead but the SDK may still own a child process.
+            # Try a synchronous best-effort terminate on whatever transport it
+            # exposes — attribute names vary across claude-agent-sdk versions
+            # so we probe a few rather than hard-coding one.
+            for attr in ("_transport", "transport", "_process", "process"):
+                obj = getattr(sdk, attr, None)
+                if obj is None:
+                    continue
+                proc = getattr(obj, "process", obj)
+                for action in ("terminate", "kill"):
+                    fn = getattr(proc, action, None)
+                    if callable(fn):
+                        try:
+                            fn()
+                        except Exception:
+                            pass
+                        break
+                break
+    except Exception:
+        pass
+    try:
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=5)
+    except Exception:
+        pass
+
+
+def _atexit_close_chat(ref) -> None:
+    """atexit callback that closes a ClaudeChat instance via weakref.
+
+    Using a weakref means atexit does not pin the instance in memory — if it
+    has already been GC'd / closed, this is a no-op.
+    """
+    inst = ref()
+    if inst is None:
+        return
+    try:
+        inst.close()
+    except Exception:
+        pass
+
+
 class ClaudeChat:
     """Sync adapter for claude-agent-sdk, lives in st.session_state.
 
@@ -159,9 +262,39 @@ class ClaudeChat:
 
         # Block until SDK is connected (or failed)
         if not self._ready.wait(timeout=30):
+            # Connect timed out — best-effort cleanup so we don't leak the
+            # daemon thread + a possibly half-spawned `claude` subprocess.
+            _shutdown_chat_resources(self._loop, self._sdk, self._thread)
             raise TimeoutError("Claude SDK client did not connect within 30s")
         if self._error is not None:
+            # _connect raised — the loop has already exited via _run_loop's
+            # except branch, but the SDK may have started a subprocess before
+            # failing. Best-effort tear-down.
+            _shutdown_chat_resources(self._loop, self._sdk, self._thread)
             raise self._error
+
+        # Register cleanup hooks AFTER the SDK is up, so we never finalize a
+        # half-built instance.
+        # - weakref.finalize: instance GC'd without close() (e.g.
+        #   cache_resource was cleared, or the daemon thread died and a new
+        #   instance replaced this one) → still tear down the subprocess.
+        # - atexit: streamlit process exit → disconnect SDK → reap `claude`
+        #   child. Wrapped in a weakref so atexit doesn't keep the instance
+        #   alive past its natural lifetime.
+        self._finalizer = weakref.finalize(
+            self,
+            _shutdown_chat_resources,
+            self._loop,
+            self._sdk,
+            self._thread,
+        )
+        self._atexit_ref = weakref.ref(self)
+        # Wrap in a per-instance closure so atexit.unregister(self._atexit_cb)
+        # in close() only drops THIS instance's hook — atexit.unregister
+        # matches by callable identity, not by (callable, args).
+        ref = self._atexit_ref
+        self._atexit_cb = lambda: _atexit_close_chat(ref)
+        atexit.register(self._atexit_cb)
 
     # ── background thread ─────────────────────────────────────
 
@@ -425,6 +558,46 @@ class ClaudeChat:
         with self._lock:
             return self._session_id
 
+    def interrupt(self) -> None:
+        """Best-effort cancel of the in-flight stream WITHOUT closing the SDK.
+
+        Used by the "Clear chat" button so an abandoned turn (and any tool
+        calls it would have made) actually stops on the server side, instead
+        of leaking until the next user prompt.
+
+        Serialized via ``_submit_lock`` so we can't race ``submit()`` and end
+        up SDK-interrupting the *next* turn after this one has already
+        completed (the SDK's ``interrupt()`` cancels whatever is currently
+        active, not a specific future).
+        """
+        with self._submit_lock:
+            with self._lock:
+                if self._closed or self._loop is None or self._sdk is None:
+                    return
+                future = self._stream_future
+                done = self._done_event
+            if future is None or future.done():
+                return
+            try:
+                int_fut = asyncio.run_coroutine_threadsafe(
+                    self._sdk.interrupt(), self._loop
+                )
+                try:
+                    int_fut.result(timeout=2)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            # Only wait/cancel if it's still the same in-flight turn.
+            with self._lock:
+                still_current = future is self._stream_future
+            if not still_current:
+                return
+            if done is not None:
+                done.wait(timeout=5)
+            if not future.done():
+                future.cancel()
+
     def close(self) -> None:
         """Disconnect the SDK client and stop the background loop."""
         with self._lock:
@@ -447,9 +620,66 @@ class ClaudeChat:
             except Exception:
                 pass
         self._thread.join(timeout=10)
+        # Detach lifetime hooks now that we've cleaned up explicitly.
+        try:
+            if getattr(self, "_finalizer", None) is not None:
+                self._finalizer.detach()
+        except Exception:
+            pass
+        try:
+            cb = getattr(self, "_atexit_cb", None)
+            if cb is not None:
+                atexit.unregister(cb)
+        except Exception:
+            pass
 
 
 # ── Streamlit chat UI ─────────────────────────────────────────
+
+
+@st.cache_resource(show_spinner="Connecting to Claude Code…")
+def _get_chat_singleton() -> "ClaudeChat":
+    """Return the process-wide ClaudeChat singleton.
+
+    Cached at process scope (not per-browser-session), so a hard refresh or
+    a second tab reuses the same SDK connection and the same `claude` child
+    subprocess instead of spawning a new one and orphaning the old one.
+
+    On a streamlit *process* restart the singleton is rebuilt and resumes
+    the previous SDK session via the persisted session_id (if any).
+    """
+    history = _load_chat_history()
+    resume_id = _load_chat_meta().get("session_id")
+    return ClaudeChat(resume_session_id=resume_id, chat_history=history)
+
+
+def _get_or_recreate_chat() -> "ClaudeChat | None":
+    """Return a live ClaudeChat, recreating the singleton if its background
+    thread died or it was explicitly closed.
+
+    Cache is cleared BEFORE attempting to close the dead instance so that a
+    hung close() never blocks recreation. If close() can't bring the thread
+    down, we force-shutdown its resources directly to avoid leaking a
+    `claude` subprocess.
+    """
+    chat = _get_chat_singleton()
+    if chat.is_alive() and not chat.is_closed:
+        return chat
+
+    dead = chat
+    _get_chat_singleton.clear()
+    try:
+        dead.close()
+    except Exception:
+        pass
+    if dead._thread is not None and dead._thread.is_alive():
+        # close() did not bring the daemon thread down — fall back to a
+        # direct teardown so the SDK subprocess doesn't outlive us.
+        try:
+            _shutdown_chat_resources(dead._loop, dead._sdk, dead._thread)
+        except Exception:
+            pass
+    return _get_chat_singleton()
 
 
 def render():
@@ -463,25 +693,11 @@ def render():
     if "chat_messages" not in st.session_state:
         st.session_state.chat_messages = _load_chat_history()
 
-    # Initialize or recover ClaudeChat (cache failure to avoid 30s block on every rerun)
-    if "chat_session" not in st.session_state:
-        st.session_state.chat_session = None
-
-    needs_new = (
-        st.session_state.chat_session is None
-        or not st.session_state.chat_session.is_alive()
-    )
-    if needs_new and not st.session_state.get("chat_connect_failed"):
-        old = st.session_state.chat_session
-        if old is not None:
-            old.close()
+    # Resolve the process-wide ClaudeChat singleton. Cached failures avoid
+    # blocking 30s on every rerun when the CLI isn't authenticated.
+    if not st.session_state.get("chat_connect_failed"):
         try:
-            resume_id = st.session_state.get("chat_session_id")
-            history = st.session_state.get("chat_messages", [])
-            st.session_state.chat_session = ClaudeChat(
-                resume_session_id=resume_id,
-                chat_history=history,
-            )
+            st.session_state.chat_session = _get_or_recreate_chat()
             st.session_state.chat_connect_failed = False
         except Exception as exc:
             st.warning(
@@ -489,8 +705,14 @@ def render():
                 "Make sure Claude Code CLI is authenticated:\n"
                 f"```\ndocker exec -it {CONTAINER_NAME} claude\n```"
             )
+            try:
+                _get_chat_singleton.clear()
+            except Exception:
+                pass
             st.session_state.chat_session = None
             st.session_state.chat_connect_failed = True
+    elif "chat_session" not in st.session_state:
+        st.session_state.chat_session = None
 
     if st.session_state.get("chat_connect_failed"):
         if st.button("Retry connection", key="retry_chat"):
@@ -533,9 +755,12 @@ def render():
                     {"role": "assistant", "content": full_text}
                 )
                 _save_chat_history(st.session_state.chat_messages)
-            # Capture session_id for resumption
+            # Capture session_id for resumption (per-session_state + on disk
+            # so the cache_resource singleton can resume after a process
+            # restart).
             if session.session_id:
                 st.session_state.chat_session_id = session.session_id
+                _save_chat_session_id(session.session_id)
             st.session_state.chat_streaming = False
             st.session_state.chat_stream_text = ""
             st.session_state.chat_stream_events = []
@@ -560,10 +785,17 @@ def render():
             else:
                 st.caption("Streaming...")
 
-    # Clear chat button — visual reset only; keeps SDK session and
-    # chat_session_id alive so server-side context survives.
+    # Clear chat button — visual reset; keeps SDK session and chat_session_id
+    # alive so server-side context survives. If a turn is mid-stream, ask the
+    # SDK to interrupt it so the abandoned `claude` work actually stops on the
+    # server (otherwise tool calls keep running invisibly until the next turn).
     if st.session_state.chat_messages:
         if st.button("Clear chat", key="clear_chat"):
+            if st.session_state.chat_streaming and session is not None:
+                try:
+                    session.interrupt()
+                except Exception:
+                    pass
             st.session_state.chat_messages = []
             _save_chat_history([])
             st.session_state.chat_streaming = False

@@ -64,6 +64,7 @@ AGENT_USER=""
 TASK_PROMPT=""
 TASK_PROMPT_FILE=""
 SYSTEM_PROMPT=""
+SYSTEM_PROMPT_FILE=""
 YOLO_MODE=false
 RESUME_SESSION=""
 OUTPUT_FORMAT=""
@@ -88,7 +89,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --system-prompt-file)
-            SYSTEM_PROMPT="$(cat "$2" 2>/dev/null)"
+            SYSTEM_PROMPT_FILE="$2"
             shift 2
             ;;
         -p)
@@ -165,25 +166,15 @@ claude_run() {
         cmd_args+=("--dangerously-skip-permissions")
     fi
 
-    # System prompt with auto-append from claude-system-prompt.md
-    local final_system_prompt="$SYSTEM_PROMPT"
-    if [ -f "./claude-system-prompt.md" ]; then
-        local claude_system_content
-        claude_system_content=$(cat ./claude-system-prompt.md)
-        local claude_system_block="<claude_system_prompt>
-${claude_system_content}
-</claude_system_prompt>"
-        if [ -n "$final_system_prompt" ]; then
-            final_system_prompt="${final_system_prompt}
-
-${claude_system_block}"
-        else
-            final_system_prompt="$claude_system_block"
-        fi
+    # System prompt: pass file paths and text directly to claude using its
+    # native --system-prompt-file / --append-system-prompt-file options.
+    if [ -n "$SYSTEM_PROMPT_FILE" ]; then
+        cmd_args+=("--system-prompt-file" "$SYSTEM_PROMPT_FILE")
+    elif [ -n "$SYSTEM_PROMPT" ]; then
+        cmd_args+=("--system-prompt" "$SYSTEM_PROMPT")
     fi
-
-    if [ -n "$final_system_prompt" ]; then
-        cmd_args+=("--system-prompt" "$final_system_prompt")
+    if [ -f "./claude-system-prompt.md" ]; then
+        cmd_args+=("--append-system-prompt-file" "./claude-system-prompt.md")
     fi
 
     # Resume session

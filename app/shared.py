@@ -20,6 +20,7 @@ HISTORY_PATH = f"{MEMORY_DIR}/command_history.json"
 GOALS_PATH = f"{MEMORY_DIR}/goal.json"
 ERROR_LOG_PATH = f"{MEMORY_DIR}/server_errors.json"
 CHAT_HISTORY_PATH = f"{MEMORY_DIR}/chat_history.json"
+CHAT_META_PATH = f"{MEMORY_DIR}/chat_meta.json"
 PORTAL_CONFIG_PATH = f"{MEMORY_DIR}/portal_config.json"
 AGENT_CREDENTIALS_PATH = "/home/agent/.claude/.credentials.json"
 SCHEDULED_TASKS_PATH = os.path.join(MEMORY_DIR, "scheduled_tasks.json")
