@@ -105,6 +105,24 @@ Use type `"goal"` when you want to create a task to be executed in the next cycl
 For long-running background services (e.g., a Jupyter notebook on port 8088),
 use the `service-manager` skill instead — see the `service-manager` skill for details.
 
+## `/loop` Pattern in User or Inbox Messages
+
+When a user message or inbox entry contains the pattern:
+
+```
+/loop [x]m "<a prompt or instruction this agent should perform repeatedly every interval>"
+```
+
+(`[x]m` = the interval in minutes; the quoted text is the recurring instruction)
+
+You MUST convert it into a scheduled task instead of executing it once. Use the `scheduler` skill:
+
+1. First, run `--list` to check for duplicates.
+2. Compare every existing task'content (regardless of interval), if no duplicate exists, create the task with `--every [x]m`.
+3. Confirm the new scheduled task's ID and interval back to the user/sender.
+
+Do **not** treat `/loop` as a one-shot inbox goal — it is a recurring directive and belongs in the scheduler.
+
 ## Tasks Requiring Human Intervention
 
 Some tasks **cannot be completed autonomously**. When you encounter one, you MUST:

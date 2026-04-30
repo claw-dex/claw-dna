@@ -1,6 +1,6 @@
 ---
 name: scheduler
-description: Manage and evaluate scheduled tasks — add, remove, enable, disable, run now, test cron patterns, forecast upcoming fires, and inject due tasks into inbox. Supports interval (every N minutes), once (fire once then disable), and cron-like schedule types. Use --add to create tasks from CLI, --run-now to trigger immediately, --test to preview cron fire times, --forecast to see upcoming timeline, --check at cycle start, or --list to see all tasks.
+description: Use this skill whenever the user wants something done **on a schedule rather than once** — recurring reminders, periodic check-ins, "every N minutes/hours/days" instructions, "do X every morning", "ping me hourly", a one-shot deferred task ("remind me at 5pm", "do this once tomorrow"), a cron-style schedule, or the explicit `/loop [x]m "<instruction>"` pattern in a user/inbox message (always treat `/loop` as recurring, never as a one-shot goal). Also use it whenever the user wants to **stop, pause, cancel, halt, or resume** a previously scheduled recurring task ("stop the loop", "stop pinging me every 5 minutes", "cancel the morning brief", "turn the X loop back on"). Also use it to **inspect the schedule** — when the user asks what is scheduled, what will run next, when something will fire, or to forecast upcoming runs. Do NOT use this skill for immediate one-off actions that should happen within this session.
 ---
 
 # scheduler

@@ -1,6 +1,6 @@
 ---
 name: reminder
-description: Create, list, and manage personal reminders. Reminders fire as inbox messages via the scheduler. Supports one-time, recurring (interval), and cron-based reminders.
+description: Use this skill whenever the user wants a **personal reminder** delivered to their inbox at a future moment — a one-shot nudge ("remind me to call the dentist at 3pm", "don't let me forget to submit the form tomorrow", "ping me in 30 minutes to stretch"), a recurring nudge ("remind me every day to drink more water", "nudge me every Monday morning to do my weekly review"), or a cron-style reminder ("every weekday at 9am remind me to..."). Also use it whenever the user wants to **list, snooze, edit, or cancel** reminders they previously set ("what reminders do I have", "cancel the stretch reminder", "stop reminding me to..."). Prefer this skill over the generic scheduler when the user's intent is clearly a human-facing reminder/nudge with a short message. Do NOT use it for scheduling repeated work — use the scheduler skill instead.
 ---
 
 # Reminder

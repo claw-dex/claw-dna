@@ -1,6 +1,6 @@
 ---
 name: memory-example
-description: Centralized reference for the expected JSON structure of every agent memory and message file. Use when creating, updating, or repairing memory files to know sensible defaults and field conventions. Not an enforced schema — files may contain additional fields added over time.
+description: Centralized reference for the expected JSON structure of every agent memory and message file. Use when creating, updating, or repairing memory files in /agent/memory to know sensible defaults and field conventions. Not an enforced schema — files may contain additional fields added over time.
 ---
 
 # memory-example
