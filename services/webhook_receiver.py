@@ -53,18 +53,25 @@ WEBHOOK_PORT = 8082
 MAX_BODY_SIZE = 1_048_576  # 1 MB
 
 # --- Logging ---
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-HEARTBEAT_DIR.mkdir(parents=True, exist_ok=True)
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler(sys.stdout),
-    ],
-)
 log = logging.getLogger("webhook_receiver")
+
+
+def _setup_logging():
+    """Create log/heartbeat dirs and attach handlers.
+
+    Deferred to main() so the module can be imported on hosts without /agent
+    (e.g. tests, dev machines).
+    """
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    HEARTBEAT_DIR.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[
+            logging.FileHandler(LOG_FILE),
+            logging.StreamHandler(sys.stdout),
+        ],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +302,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
 
 def main():
+    _setup_logging()
     log.info("=" * 60)
     log.info("Webhook Receiver starting up")
     log.info("=" * 60)

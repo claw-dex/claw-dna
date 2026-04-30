@@ -57,19 +57,26 @@ HEARTBEAT_DIR = BASE / "memory" / "heartbeats"
 HEARTBEAT_FILE = HEARTBEAT_DIR / "telegram_bridge.heartbeat"
 LOCK_FILE = BASE / "memory" / "telegram_bridge.lock"
 
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-HEARTBEAT_DIR.mkdir(parents=True, exist_ok=True)
-
 # --- Logging ---
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler(sys.stdout),
-    ],
-)
 log = logging.getLogger("telegram_bridge")
+
+
+def _setup_logging():
+    """Create log/heartbeat dirs and attach handlers.
+
+    Deferred to main() so the module can be imported on hosts without /agent
+    (e.g. tests, dev machines).
+    """
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    HEARTBEAT_DIR.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[
+            logging.FileHandler(LOG_FILE),
+            logging.StreamHandler(sys.stdout),
+        ],
+    )
 
 
 def _write_heartbeat():
@@ -2240,6 +2247,7 @@ def _format_outbox_msg(msg: dict) -> str:
 
 
 def main():
+    _setup_logging()
     # --- Singleton lock: prevent multiple instances from running simultaneously ---
     # Open in append mode so existing content (PID) is not truncated before we read it
     lock_fh = open(LOCK_FILE, "a+")
