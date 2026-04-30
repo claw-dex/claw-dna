@@ -684,7 +684,7 @@ def _list_recent_dream_files(hours: int = 24) -> list:
     Pairs with `_fetch_old_memories` (which returns memvid entries OLDER than
     24h) — together they cover the full memory timeline.
 
-    Does NOT touch dream/remark.md (internal dream-process state).
+    Does NOT touch dream/remark.json (internal dream-process state).
     """
     out = []
     cutoff = datetime.datetime.now(datetime.timezone.utc).timestamp() - hours * 3600

@@ -13,6 +13,7 @@ import weakref
 from pathlib import Path
 
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
 from app.shared import CHAT_HISTORY_PATH, CHAT_META_PATH, _write_json_atomic
 from claude_agent_sdk import (
@@ -722,6 +723,16 @@ def render():
     # Initialize streaming state
     if "chat_streaming" not in st.session_state:
         st.session_state.chat_streaming = False
+
+    # Chat-only 1s polling refresh — ONLY while a turn is in flight. The
+    # ClaudeChat singleton runs the SDK on a background daemon thread, so
+    # nothing about the streaming actually depends on streamlit reruns;
+    # this timer just drives `session.poll()` to surface streamed chunks
+    # to the UI. When the stream ends we stop registering it, leaving the
+    # global 60s refresh as the only timer. That guarantees the global
+    # tick never has to interrupt or accelerate the chat flow.
+    if st.session_state.get("chat_streaming"):
+        st_autorefresh(interval=1_000, key="chat_poll_refresh")
     if "chat_stream_text" not in st.session_state:
         st.session_state.chat_stream_text = ""
     if "chat_stream_events" not in st.session_state:

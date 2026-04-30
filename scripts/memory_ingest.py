@@ -387,9 +387,9 @@ def chunk_inbox_entry(entry: dict) -> dict | None:
     """Convert a single inbox message dict into an ingest chunk.
 
     Shared by rebuild (chunk_inbox) and live ingestion
-    (cycle_close._store_inbox_to_memvid) so both paths produce identical
-    records. The timestamp always comes from the entry — never datetime.now()
-    — so rebuilds preserve original message times.
+    (cycle_close._inbox_chunks_for_memvid → append_many) so both paths
+    produce identical records. The timestamp always comes from the entry —
+    never datetime.now() — so rebuilds preserve original message times.
 
     Returns None if the entry is unusable (non-dict or content too short).
     """
@@ -584,7 +584,7 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
                 )
         if not quiet and (i + 1) % 20 == 0:
             print(f"[INGEST] Ingested {i + 1}/{len(chunks)} chunks...")
-        if (i + 1) % 500 == 0:
+        if (i + 1) % 1000 == 0:
             mem.commit()
 
     # Commit WAL → searchable index (REQUIRED — without this, put() calls are
@@ -713,6 +713,58 @@ def append_json(mv2_path, entry_source, quiet=False, json_mode=False):
         )
     elif not quiet:
         print(f"[INGEST] Appended cycle {cycle} to {mv2.name}")
+
+
+# ---------------------------------------------------------------------------
+# Append Many — batched ingest with a single open + many puts + ONE commit
+# ---------------------------------------------------------------------------
+
+
+def append_many(mv2_path, chunks: list, *, quiet: bool = True) -> tuple:
+    """Ingest multiple chunks under a single open + ONE final commit.
+
+    Each per-call commit on the memvid `.mv2` rewrites the footer/segment
+    catalog and reserves significant on-disk space, so callers that need to
+    ingest several records at once should batch them through this function
+    instead of looping on `append_*` (which commits per-record).
+
+    The caller is responsible for ensuring the `.mv2` exists — a missing
+    file is treated as a no-op so we don't trigger a hidden full rebuild
+    inside an unrelated code path.
+
+    Returns ``(ok, fail)`` counts.
+    """
+    _require_sdk()
+    mv2 = Path(mv2_path)
+    if not mv2.exists() or not chunks:
+        return (0, 0)
+    mem = _open_or_create(mv2)
+    ok, fail = 0, 0
+    for ch in chunks:
+        try:
+            mem.put(
+                title=ch["title"],
+                label=ch["label"],
+                text=ch["text"],
+                tags=ch["tags"],
+                metadata=dict(ch.get("metadata") or {}),
+                **_put_kwargs(_should_compress(mv2)),
+            )
+            ok += 1
+        except Exception as e:
+            fail += 1
+            if not quiet:
+                print(f"WARN: put failed: {e}", file=sys.stderr)
+    if ok == 0:
+        # Nothing landed — skip the commit so we don't reserve a footer
+        # segment for an empty batch.
+        return (ok, fail)
+    try:
+        mem.commit()
+    except Exception as e:
+        if not quiet:
+            print(f"WARN: commit failed: {e}", file=sys.stderr)
+    return (ok, fail)
 
 
 # ---------------------------------------------------------------------------

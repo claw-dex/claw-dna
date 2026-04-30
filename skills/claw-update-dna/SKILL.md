@@ -163,7 +163,7 @@ When `git merge` reports conflicts:
 git diff --name-only --diff-filter=U
 
 # 2. For each conflicted file, resolve the conflict markers
-#    - Prefer LOCAL changes for: memory/, messages/, workspace/ (runtime state)
+#    - Prefer LOCAL changes for: memory/, web/, services/webhook/, messages/, workspace/ (runtime state and locally-owned code)
 #    - Prefer REMOTE changes for: constitution.md, system.md, bootstrap.sh (immutable upstream)
 #    - Manually merge for: server.py, app/*.py, scripts/*.py, pyproject.toml (code that diverges)
 
@@ -204,6 +204,8 @@ EOF
 | `bootstrap.sh`, `heartbeat.sh` | **REMOTE** | Infrastructure managed upstream |
 | `app/commands_tab.py` | **REMOTE** | Protected file — must not be locally modified |
 | `memory/` | **LOCAL** | Runtime state — local is the source of truth |
+| `web/` | **LOCAL** | Locally-owned code — local is the source of truth |
+| `services/webhook/` | **LOCAL** | Locally-owned service — local is the source of truth |
 | `messages/*.json` | **LOCAL** | Active message queues — never overwrite |
 | `server.py`, `app/*.py` | **MANUAL MERGE** | May have both local improvements and upstream updates for the portal |
 | `scripts/*.py` | **MANUAL MERGE** | Could have local additions and upstream fixes |

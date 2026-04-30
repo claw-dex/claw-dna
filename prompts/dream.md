@@ -21,17 +21,27 @@ Your memory files are located in `/agent/memory` directory. The rest of the path
 
   Store both `USER_TZ` and `TODAY` — use `TODAY` everywhere a calendar date is needed throughout all phases, and record `USER_TZ` in the remark so future dreams know which timezone was used.
 
-- Read `dream/remark.md`. This file is your hand-off note from the previous dream.
+- Read `dream/remark.json`. This file is your hand-off note from the previous dream. Parse it with `jq`:
+
+  ```bash
+  REMARK=/agent/memory/dream/remark.json
+  if [ ! -f "$REMARK" ]; then
+    START_PAGE=1
+  else
+    STATUS=$(jq -r '.status'              "$REMARK")
+    RDATE=$( jq -r '.date'                "$REMARK")
+    NEXT=$(  jq -r '.next_page // empty'  "$REMARK")
+  fi
+  ```
 
 | Remark state | Meaning | Action |
 |---|---|---|
 | File does not exist | Never dreamed before, or remark was wiped | Start fresh: `START_PAGE = 1` |
-| `Status: deep_sleep` and `Date: TODAY` | Already finished all transcripts for today in an earlier dream this same date | **Skip everything below.** Do **not** parse transcripts, do **not** touch any file. Leave `dream/remark.md` untouched and exit the dream cleanly. |
-| `Status: deep_sleep` and `Date: <some other date>` | Yesterday's dream completed; today is a new day | Start fresh: `START_PAGE = 1` |
-| `Status: light_sleep_dreaming` | A previous dream stopped at the 100-page batch limit | Resume: read the `Next page:` line and set `START_PAGE` to that value. |
-| `Status: completed` (legacy, no `Date:` line) | Older format — treat as fresh start | `START_PAGE = 1` |
+| `status == "deep_sleep"` and `date == TODAY` | Already finished all transcripts for today in an earlier dream this same date | **Skip everything below.** Do **not** parse transcripts, do **not** touch any file. Leave `dream/remark.json` untouched and exit the dream cleanly. |
+| `status == "deep_sleep"` and `date != TODAY` | Yesterday's dream completed; today is a new day | Start fresh: `START_PAGE = 1` |
+| `status == "light_sleep_dreaming"` | A previous dream stopped at the 100-page batch limit | Resume: `START_PAGE = next_page`. |
 
-- Treat the previous remark's `Topics touched:` / `Learnings touched:` lists as already-handled when resuming a `light_sleep_dreaming` remark — do not re-extract from pages 1..(START_PAGE-1) in this dream; trust the prior pass.
+- Treat the previous remark's `topics_touched` / `learnings_touched` arrays as already-handled when resuming a `light_sleep_dreaming` remark — do not re-extract from pages 1..(START_PAGE-1) in this dream; trust the prior pass.
 
 > **Deep-sleep short-circuit.** When the table above tells you to exit (deep_sleep on the same date), output a single line acknowledging it — e.g. `All transcripts for date <TODAY> (<USER_TZ>) are already processed. You are in deep sleep.` — and stop. Do not run any phase below. The remark file already has the right state; rewriting it would just churn the file timestamp without changing content.
 
@@ -85,8 +95,8 @@ Your memory files are located in `/agent/memory` directory. The rest of the path
   - You can recognize a dream cycle directly in the rendered digest: its `### User` block starts with `# Dream: Nightly reflection and consolidation of all memories…`. If you encounter that header inside a `## Cycle <N>` section, treat the whole `## Cycle <N>` block as a no-op for Phases 2–4 (no topics, no learnings extracted from it).
 - **Per-dream batch limit — process at most 100 pages in one dream cycle.**
   - Compute `END_PAGE = min(START_PAGE + 99, TOTAL_PAGES)` (where `TOTAL_PAGES` is read from the page-1 header) and only read pages `START_PAGE..END_PAGE` in this dream.
-  - If `END_PAGE < TOTAL_PAGES`, the dream is **not finished** — there are more pages to digest in a future dream. After completing Phases 2–4 on what you have, jump to **Phase 5** and write `Status: light_sleep_dreaming` to `dream/remark.md` with `Next page: END_PAGE + 1`. Do **not** spend further effort trying to cover the rest in this cycle.
-  - If `END_PAGE == TOTAL_PAGES`, you have finished the 24h window — proceed normally and write `Status: deep_sleep` (with today's `Date:` and the required trailing "All transcripts for date … are now completed. You are in deep sleep." line) to `dream/remark.md` in Phase 5. Any further dream triggered later on the same date will short-circuit at Phase 0.
+  - If `END_PAGE < TOTAL_PAGES`, the dream is **not finished** — there are more pages to digest in a future dream. After completing Phases 2–4 on what you have, jump to **Phase 5** and write `dream/remark.json` with `"status": "light_sleep_dreaming"` and `"next_page": END_PAGE + 1`. Do **not** spend further effort trying to cover the rest in this cycle.
+  - If `END_PAGE == TOTAL_PAGES`, you have finished the 24h window — proceed normally and write `dream/remark.json` with `"status": "deep_sleep"` and today's `"date"` (omit `next_page`) in Phase 5. Any further dream triggered later on the same date will short-circuit at Phase 0.
 
 - Review what topics and lessons already exist in `dream/topics/` directory to ensure that you are improving existing topics if they are already covered, rather than creating duplicates.
 
@@ -104,59 +114,56 @@ Your memory files are located in `/agent/memory` directory. The rest of the path
 
 **Phase 4: Prioritization and Pruning MEMORY.md**
 
+- **MANDATORY — never reference `dream/remark.json` (or any file under `dream/remark*`) in `MEMORY.md`.** The remark is internal hand-off state for the dream process itself; it changes every dream and would churn `MEMORY.md` uselessly. Only `dream/topics/<slug>.md` and `dream/learnings/<slug>.md` files are valid `MEMORY.md` references.
 - We need to update `MEMORY.md` with new learnings and topics while maintain it length within 200 lines.
 - These need to be *the most important* things for you to understand in the future.
 - If something is getting too long, consider only mentioning the gist of it and referencing a separate file (like a learning or topic file) with the full explanation.
 - Consider if any learning or topic file needs to be *removed* as it is becoming "stale" and no longer as important as it once was. You must keep the learning/topic files, only remove the reference in `MEMORY.md`.
 - Consider if any learning or topic should be *added* that has recently become more important.
-- When add/update a line in `MEMORY.md` to reference the learning/topic files, follow this format: `- [learning-or-topic-slug.md](/agent/memory/learnings/earning-or-topic-slug.md) - brief explanation of the learning/topic`
+- When add/update a line in `MEMORY.md` to reference the learning/topic files, use one of these two formats depending on whether the entry is a topic or a learning:
+  - **Topic** (file at `dream/topics/<slug>.md`):
+    `- Dreamed topic: [<slug>.md](/agent/memory/dream/topics/<slug>.md) - brief explanation of the topic`
+  - **Learning** (file at `dream/learnings/<slug>.md`):
+    `- Learning: [<slug>.md](/agent/memory/dream/learnings/<slug>.md) - brief explanation of the learning`
 - Never modify the first 10 lines of the `MEMORY.md` file.
 
-**Phase 5: Save Progress (always — overwrite `dream/remark.md`)**
+**Phase 5: Save Progress (always — overwrite `dream/remark.json`)**
 
-- This phase **always** runs at the end of a dream, regardless of whether you finished the window or stopped at the 100-page batch limit. It must completely **overwrite** `dream/remark.md` — do not append. Any prior remark content is discarded; the file always reflects only the most recent dream.
-- The file format is fixed Markdown so the next dream can parse it deterministically:
+- This phase **always** runs at the end of a dream, regardless of whether you finished the window or stopped at the 100-page batch limit. It must completely **overwrite** `dream/remark.json` — do not append or merge. Any prior remark content is discarded; the file always reflects only the most recent dream.
+- The file is a single JSON object so the next dream can parse it deterministically with `jq`:
 
-  ```markdown
-  # Dream remark
-  Updated: <ISO 8601 timestamp in user local timezone>
-  Date: <TODAY — YYYY-MM-DD in USER_TZ>
-  Timezone: <USER_TZ>
-  Status: light_sleep_dreaming | deep_sleep
-  Window: 24h transcripts as of <YYYY MonthName DD (Weekday)>
-  Total pages: <TOTAL_PAGES>
-  Processed pages: <START_PAGE>-<END_PAGE>
-  Next page: <END_PAGE + 1>          # omit this line when Status: deep_sleep
-
-  ## Summary
-  - <one-line bullet describing what was done in this batch>
-  - <…>
-
-  ## Topics touched
-  - <topic-slug.md> — created | updated
-  - <…>
-
-  ## Learnings touched
-  - <learning-slug.md> — created | updated
-  - <…>
-
-  ## Notable findings
-  - <anything noteworthy that the next dream — or you in a future cycle — should be aware of; leave the section empty if nothing>
-
-  ---
-  All transcripts for date <TODAY> (<USER_TZ>) are now completed. You are in deep sleep.
+  ```json
+  {
+    "updated": "<ISO 8601 timestamp in user local timezone>",
+    "date": "<TODAY — YYYY-MM-DD in USER_TZ>",
+    "timezone": "<USER_TZ>",
+    "status": "light_sleep_dreaming",
+    "window": "24h transcripts as of <YYYY MonthName DD (Weekday)>",
+    "total_pages": <TOTAL_PAGES>,
+    "processed_pages": { "start": <START_PAGE>, "end": <END_PAGE> },
+    "next_page": <END_PAGE + 1>,
+    "summary": [
+      "<one-line bullet describing what was done in this batch>"
+    ],
+    "topics_touched": [
+      { "slug": "<topic-slug>", "action": "created" }
+    ],
+    "learnings_touched": [
+      { "slug": "<learning-slug>", "action": "updated" }
+    ],
+    "notable_findings": []
+  }
   ```
 
-Note: The trailing line in remark regarding completion status is REQUIRED only when Status: deep_sleep, OMITTED when Status: light_sleep_dreaming.
-
 - Field rules:
-  - `Date:` is `TODAY` (`YYYY-MM-DD` in the user's local timezone, not UTC) — the calendar day on which this dream ran. The next dream computes its own `TODAY` using the same timezone logic and compares it against this field to decide whether deep-sleep applies (same date → skip) or has rolled over (new date → fresh start).
-  - `Timezone:` is `USER_TZ` (IANA name, e.g. `Asia/Singapore`). Stored for auditability; future dreams always re-derive `TODAY` from the live `portal_config.json`, so this field is informational only.
-  - `Updated:` is the wall-clock timestamp of when this remark was written, expressed in the user's local timezone (e.g. `2026-04-27T00:30:00+08:00`).
-  - `Status: light_sleep_dreaming` ⇔ `Next page:` line is present and points to the first un-processed page **and** the trailing "deep sleep" line is **omitted**. The next dream MUST resume from `Next page` even on the same date.
-  - `Status: deep_sleep` ⇔ no `Next page:` line **and** the trailing "deep sleep" line is present. This is the terminal state for the current `Date`. Any further dream invocation on the same `Date` must short-circuit per Phase 0.
-  - `Topics touched` / `Learnings touched` are **cumulative across the current 24h window**, not just this batch — when resuming a `light_sleep_dreaming` remark, copy forward the lists from the previous remark and append your new entries, so the final remark (when Status flips to `deep_sleep`) reflects everything done over the whole window.
-- Write the file with a single `Write` tool call after Phase 4 is done. Treat this step as non-negotiable; without a fresh remark, the next dream cannot resume correctly.
+  - `date` is `TODAY` (`YYYY-MM-DD` in the user's local timezone, not UTC) — the calendar day on which this dream ran. The next dream computes its own `TODAY` using the same timezone logic and compares it against this field to decide whether deep-sleep applies (same date → skip) or has rolled over (new date → fresh start).
+  - `timezone` is `USER_TZ` (IANA name, e.g. `Asia/Singapore`). Stored for auditability; future dreams always re-derive `TODAY` from the live `portal_config.json`, so this field is informational only.
+  - `updated` is the wall-clock timestamp of when this remark was written, expressed in the user's local timezone (e.g. `2026-04-27T00:30:00+08:00`).
+  - `status: "light_sleep_dreaming"` ⇔ the `next_page` key **is present** and points to the first un-processed page. The next dream MUST resume from `next_page` even on the same date.
+  - `status: "deep_sleep"` ⇔ the `next_page` key **is omitted** entirely (do not set it to `null`). This is the terminal state for the current `date`. Any further dream invocation on the same `date` must short-circuit per Phase 0. The `status` field carries the meaning — there is no separate trailing "deep sleep" sentence.
+  - `topics_touched` / `learnings_touched` are **cumulative across the current 24h window**, not just this batch — when resuming a `light_sleep_dreaming` remark, copy forward the arrays from the previous JSON and append your new entries, so the final remark (when `status` flips to `deep_sleep`) reflects everything done over the whole window. Each entry is `{ "slug": "<name>", "action": "created" | "updated" }`.
+  - `summary` and `notable_findings` are arrays of strings (one bullet per element). `notable_findings` may be `[]` if there is nothing to flag.
+- Write the file with a single `Write` tool call after Phase 4 is done. The output must be valid JSON — no comments, no trailing commas. Treat this step as non-negotiable; without a fresh remark, the next dream cannot resume correctly.
 
 ---
 

@@ -161,41 +161,26 @@ def _run_normalize_inlined(cycles_path: Path, verbose: bool = True) -> int:
 # ── Inbox archiving ─────────────────────────────────────────────────────────
 
 
-def _store_inbox_to_memvid(items: list) -> int:
-    """Ingest each inbox message into long-term semantic memory.
+def _inbox_chunks_for_memvid(items: list) -> list:
+    """Convert archived inbox messages into memvid chunks (no I/O).
 
-    Returns the count of messages successfully ingested. Non-fatal: a missing
-    SDK, build failure, or per-message error prints a warning and continues.
+    Returns a list of chunk dicts ready for ``memory_ingest.append_many``.
+    Skipped messages (too short / not a dict) are silently dropped to mirror
+    the previous per-message ingest semantics.
     """
     if not items:
-        return 0
+        return []
     try:
-        from scripts.memory_ingest import DEFAULT_MV2, append_inbox_message, build
+        from scripts.memory_ingest import chunk_inbox_entry
     except Exception as e:
         print(f"  ⚠ inbox memvid — import skipped: {e}")
-        return 0
-
-    # Ensure the .mv2 exists; build from memory files if this is the first run.
-    if not DEFAULT_MV2.exists():
-        try:
-            build(MEMORY, DEFAULT_MV2, quiet=True)
-        except SystemExit as e:
-            print(f"  ⚠ inbox memvid — build failed (exit {e.code}); skipping ingest")
-            return 0
-        except Exception as e:
-            print(f"  ⚠ inbox memvid — build failed: {e}; skipping ingest")
-            return 0
-
-    ok = 0
-    for i, msg in enumerate(items):
-        try:
-            if append_inbox_message(DEFAULT_MV2, msg, quiet=True):
-                ok += 1
-        except SystemExit as e:
-            print(f"  ⚠ inbox memvid — msg {i} exit {e.code}")
-        except Exception as e:
-            print(f"  ⚠ inbox memvid — msg {i} failed: {e}")
-    return ok
+        return []
+    out = []
+    for msg in items:
+        c = chunk_inbox_entry(msg)
+        if c is not None:
+            out.append(c)
+    return out
 
 
 def _parse_iso(ts):
@@ -225,7 +210,7 @@ def _is_pre_cycle_item(msg, cutoff_dt):
     return ra_dt <= cutoff_dt
 
 
-def _archive_inbox(cycle_start_ts=None):
+def _archive_inbox(cycle_start_ts=None, ingest_buffer: list = None):
     """Archive pre-cycle items in /agent/messages/inbox.json to inbox_history.json.
 
     Items whose ``received_at`` is on or before ``cycle_start_ts`` are archived
@@ -306,9 +291,10 @@ def _archive_inbox(cycle_start_ts=None):
     history.extend(to_archive)
     write_atomic(history_path, history)
 
-    ingested = _store_inbox_to_memvid(to_archive)
-    if ingested > 0:
-        print(f"  ✓ inbox memvid — ingested {ingested}/{len(to_archive)} message(s)")
+    # Buffer the archived items for the single end-of-cycle memvid commit.
+    # If no buffer is provided, fall through silently — main() owns the flush.
+    if ingest_buffer is not None:
+        ingest_buffer.extend(_inbox_chunks_for_memvid(to_archive))
 
     return len(to_archive)
 
@@ -650,93 +636,75 @@ def _sync_auto_memory() -> None:
 # ── Long-term memory (memvid via memory_ingest.py) ───────────────────────────
 
 
-def _store_cycle_to_memvid(cycle_entry: dict) -> bool:
-    """Ingest a cycles.json entry into long-term semantic memory.
+def _entry_chunks_for_memvid(entry: dict) -> list:
+    """Convert a cycle/journal/goal entry into memvid chunks (no I/O).
 
-    Routes through `memory_ingest.append_json` whose `_detect_and_chunk`
-    recognises cycle records (presence of start/end/duration_seconds) and
-    sends them through `chunk_cycles`. Best-effort and non-fatal: a missing
-    SDK or per-call error prints a warning and returns False.
+    Routes through ``memory_ingest._detect_and_chunk`` so the chunk schema
+    matches the rebuild path exactly. Returns ``[]`` on import failure.
     """
-    cycle = cycle_entry.get("cycle", "?")
+    if not entry:
+        return []
     try:
-        from scripts.memory_ingest import DEFAULT_MV2, append_json, build
+        from scripts.memory_ingest import _detect_and_chunk
     except Exception as e:
-        print(f"  ⚠ cycle memvid — import skipped: {e}")
-        return False
+        print(f"  ⚠ memvid — import skipped: {e}")
+        return []
+    try:
+        return list(_detect_and_chunk(entry) or [])
+    except Exception as e:
+        print(f"  ⚠ memvid — chunking failed: {e}")
+        return []
+
+
+def _flush_memvid_buffer(chunks: list) -> None:
+    """Write all buffered chunks to the .mv2 in a single open + ONE commit.
+
+    Per-call commits on the memvid `.mv2` rewrite the segment catalog and
+    reserve significant on-disk space, so cycle_close batches every record
+    it would ingest (inbox messages + cycle record + journal entry) into a
+    single buffer and flushes them here at the end of the cycle.
+
+    On first run the .mv2 doesn't exist; we run a one-shot ``build()`` from
+    the source JSON files (journal/cycles/inbox_history). Steps 1, 3, and 5
+    of ``main()`` have already flushed those files to disk, so build()
+    ingests this cycle's records via the source JSON. The buffered chunks
+    are therefore **intentionally discarded** on this branch — re-ingesting
+    them would create duplicates.
+    """
+    try:
+        from scripts.memory_ingest import DEFAULT_MV2, append_many, build
+    except Exception as e:
+        print(f"  ⚠ memvid — import skipped: {e}")
+        return
 
     if not DEFAULT_MV2.exists():
         try:
             build(MEMORY, DEFAULT_MV2, quiet=True)
-            # build() ingested journal.json + cycles.json wholesale — this
-            # cycle's record is already included via that pass.
             print(
-                f"  ✓ cycle memvid — built new {DEFAULT_MV2.name} "
-                f"(cycle {cycle} included via cycles.json)"
+                f"  ✓ memvid — built new {DEFAULT_MV2.name} "
+                f"(this cycle's records included via source JSON)"
             )
-            return True
+            return
         except SystemExit as e:
-            print(f"  ⚠ cycle memvid — build failed (exit {e.code}); skipping ingest")
-            return False
+            print(f"  ⚠ memvid — build failed (exit {e.code}); skipping ingest")
+            return
         except Exception as e:
-            print(f"  ⚠ cycle memvid — build failed: {e}; skipping ingest")
-            return False
+            print(f"  ⚠ memvid — build failed: {e}; skipping ingest")
+            return
+
+    if not chunks:
+        return
 
     try:
-        append_json(DEFAULT_MV2, json.dumps(cycle_entry), quiet=True)
-        return True
+        ok, fail = append_many(DEFAULT_MV2, chunks, quiet=True)
+        msg = f"  ✓ memvid — batched {ok} chunk(s) in 1 commit"
+        if fail:
+            msg += f" ({fail} failed)"
+        print(msg)
     except SystemExit as e:
-        print(f"  ⚠ cycle memvid — append exit {e.code}")
-        return False
+        print(f"  ⚠ memvid flush — exit {e.code}")
     except Exception as e:
-        print(f"  ⚠ cycle memvid — append failed: {e}")
-        return False
-
-
-def _store_to_memvid(journal_entry: dict) -> None:
-    """Store a journal entry into long-term semantic memory via memory_ingest.py.
-
-    Calls memory_ingest.py --append-json with the journal entry JSON. Uses the memvid
-    CLI with bge-base embeddings (no Python SDK or fastembed dependency needed).
-
-    Auto-creates the .mv2 if it doesn't exist (so no manual --build is required on first use).
-    Skips gracefully if the .mv2 is approaching the 50 MB free-tier limit (>45 MB guard).
-
-    Non-fatal: if the ingest fails, prints a warning but exits normally.
-    """
-    cycle = journal_entry.get("cycle", "?")
-    entry_json = json.dumps(journal_entry)
-
-    try:
-        from scripts.memory_ingest import append_json, build, DEFAULT_MV2
-
-        # Auto-create the .mv2 if it doesn't exist by doing a full rebuild
-        # from memory files — avoids "not found" exit(1) on first use. The
-        # rebuild already ingests this cycle's journal entry (journal.json
-        # was written earlier in main()), so skip the append in that branch.
-        if not DEFAULT_MV2.exists():
-            try:
-                build(MEMORY, DEFAULT_MV2, quiet=True)
-                print(
-                    f"  ✓ memvid — built new {DEFAULT_MV2.name} from memory "
-                    f"(cycle {cycle} included via journal.json)"
-                )
-                return
-            except SystemExit as e:
-                print(
-                    f"  ⚠ memvid store — failed to build {DEFAULT_MV2.name}: exit {e.code}"
-                )
-                return
-            except Exception as e:
-                print(f"  ⚠ memvid store — failed to build {DEFAULT_MV2.name}: {e}")
-                return
-
-        append_json(DEFAULT_MV2, entry_json, quiet=True)
-        print(f"  ✓ memvid — stored cycle {cycle} to long_term_memory.mv2")
-    except SystemExit as e:
-        print(f"  ⚠ memvid store failed (non-fatal): exit {e.code}")
-    except Exception as e:
-        print(f"  ⚠ memvid store failed (non-fatal): {e}")
+        print(f"  ⚠ memvid flush — failed: {e}")
 
 
 # ── Main ────────────────────────────────────────────────────────────────────
@@ -926,14 +894,19 @@ def main():
         sys.exit(0)
 
     # ── Apply updates ────────────────────────────────────────────────────────
+    # All long-term-memory writes for this cycle are buffered into one list
+    # and flushed in a single open + many puts + ONE commit at the end. Per-
+    # call commits on memvid rewrite the segment catalog and reserve
+    # significant on-disk space — batching keeps file growth bounded.
+    memvid_buffer: list = []
+
     # 1. Update cycles.json
     cycle_entry.update(cycle_update)
     write_atomic(cycles_path, cycles)
     print(f"\n  ✓ cycles.json updated (cycle {cycle_n})")
 
-    # 1a. Ingest the finalized cycle record into long-term semantic memory.
-    if _store_cycle_to_memvid(cycle_entry):
-        print(f"  ✓ cycle memvid — stored cycle {cycle_n} record")
+    # 1a. Buffer the finalized cycle record for the end-of-cycle memvid flush.
+    memvid_buffer.extend(_entry_chunks_for_memvid(cycle_entry))
 
     # 2. Update state.json
     state.update(state_update)
@@ -965,7 +938,10 @@ def main():
     # 5. Archive inbox.json → inbox_history.json (goal cycles only;
     #    evolve/self-heal/dream cycles must not touch inbox so pending user commands survive)
     if opts["type"] == "goal":
-        archived_n = _archive_inbox(cycle_start_ts=cycle_entry.get("start"))
+        archived_n = _archive_inbox(
+            cycle_start_ts=cycle_entry.get("start"),
+            ingest_buffer=memvid_buffer,
+        )
         if archived_n > 0:
             print(
                 f"  ✓ inbox archive — {archived_n} pre-cycle item(s) appended to inbox_history.json; mid-cycle arrivals carried forward"
@@ -984,8 +960,11 @@ def main():
     # 8. Sync auto memory (markdown files for agent native memory)
     _sync_auto_memory()
 
-    # 9. Store journal entry to long-term semantic memory (memvid)
-    _store_to_memvid(journal_entry)
+    # 9. Buffer the journal entry, then flush every memvid write for this
+    #    cycle in a single open + ONE commit (inbox messages + cycle record
+    #    + journal entry).
+    memvid_buffer.extend(_entry_chunks_for_memvid(journal_entry))
+    _flush_memvid_buffer(memvid_buffer)
 
     print(f"\n[cycle-close] Done. Cycle {cycle_n} closed.\n")
 

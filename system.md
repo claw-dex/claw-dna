@@ -203,7 +203,7 @@ For any non-trivial work (even a single goal), use a `Plan` subagent to break th
 | Phase 4 — staleness audit of `dream/topics/` & `dream/learnings/` for `MEMORY.md` pruning | `Explore` |
 | Reconcile new learnings against existing ones to avoid contradictions | `general-purpose` |
 
-> Dream rule: Phase 5 (`dream/remark.md`) and Phase 6 (`cycle_close.py`) are **never**
+> Dream rule: Phase 5 (`dream/remark.json`) and Phase 6 (`cycle_close.py`) are **never**
 > delegated — the main agent writes the durable hand-off itself.
 
 ### Rules

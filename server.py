@@ -219,10 +219,13 @@ if "app_initialized" not in st.session_state:
 else:
     _init()
 
-# ── Auto-refresh (fast during chat streaming for polling, 60s otherwise) ────
-# NB: chat_streaming is initialized in chat.render(); .get() is safe before first render
-_refresh_ms = 1_000 if st.session_state.get("chat_streaming") else 60_000
-st_autorefresh(interval=_refresh_ms, key="global_refresh")
+# ── Auto-refresh (header metrics only — fixed 60s) ───────────────────────────
+# The chat module owns its own faster poll-driven refresh in render() so the
+# global timer cannot affect chat correctness. This keeps the 60s rerun from
+# being entangled with the chat session: the ClaudeChat singleton lives in
+# @st.cache_resource and survives reruns, so the global tick is harmless to
+# the chat — it just refreshes header metrics (heartbeat, cycle, services).
+st_autorefresh(interval=60_000, key="global_refresh")
 
 # ── Header ────────────────────────────────────────────────────
 state = load_state() or {}

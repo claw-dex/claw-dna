@@ -174,21 +174,21 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 
 ### Dream Remark Status
 
-**Location:** `/agent/memory/dream/remark.md`
+**Location:** `/agent/memory/dream/remark.json`
 
-**Field:** `Status:` (Markdown front-matter style line)
+**Field:** `status` (top-level JSON string)
 
 **Description:** Tracks the state of nightly dream (memory consolidation) processing across batches and days.
 
 | Value | Meaning | When Used |
 |-------|---------|-----------|
-| `light_sleep_dreaming` | A dream stopped mid-window at the 100-page batch limit; more pages remain | Set when `END_PAGE < TOTAL_PAGES`; remark must include `Next page:` and **omit** the trailing "deep sleep" line |
-| `deep_sleep` | All transcripts in the 24h window for the current `Date:` are processed | Set when `END_PAGE == TOTAL_PAGES`; remark must include the trailing "All transcripts for date … are now completed. You are in deep sleep." line; subsequent dreams on the same `Date:` short-circuit |
+| `light_sleep_dreaming` | A dream stopped mid-window at the 100-page batch limit; more pages remain | Set when `END_PAGE < TOTAL_PAGES`; the `next_page` key MUST be present in the JSON |
+| `deep_sleep` | All transcripts in the 24h window for the current `date` are processed | Set when `END_PAGE == TOTAL_PAGES`; the `next_page` key MUST be omitted; subsequent dreams on the same `date` short-circuit |
 
 **Notes:**
 
-- `light_sleep_dreaming` ⇔ `Next page:` line present and trailing deep-sleep line absent
-- `deep_sleep` ⇔ no `Next page:` line and trailing deep-sleep line present
+- `light_sleep_dreaming` ⇔ `next_page` key present in the JSON
+- `deep_sleep` ⇔ `next_page` key absent (omitted entirely, not `null`)
 
 ---
 
@@ -407,7 +407,7 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 | `status` | Cycle | `completed`, `failed`, `in_progress` | `cycles.json`, `journal.json` |
 | `status` | Agent | `idle`, `running`, `healing`, `bootstrapping`, `awaiting_first_heartbeat`, `waiting_for_human` | `state.json` |
 | `status` | Bash Log | `running`, `exited`, `completed`, `failed` | `logs/bash-*.json` |
-| `Status` | Dream Remark | `light_sleep_dreaming`, `deep_sleep`, `completed` (legacy) | `dream/remark.md` |
+| `status` | Dream Remark | `light_sleep_dreaming`, `deep_sleep` | `dream/remark.json` |
 | `type` | Cycle | `goal`, `evolve`, `self-heal`, `dream` | `cycles.json`, `journal.json` |
 | `type` | Message | `goal`, `message`, `bash`, `needs_human`, `response`, `goal_complete`, `goal_failed` | `inbox.json`, `outbox.json`, `command_history.json` |
 | `category` | Evolution | `reliability`, `observability`, `capability`, `efficiency`, `prompt_evolution`, `memory_consolidation`, `deep_sleep` | `cycles.json`, `journal.json` |
