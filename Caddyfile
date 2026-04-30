@@ -27,6 +27,12 @@
         reverse_proxy localhost:8082
     }
 
+    # External agent API (basic auth applied here, not in the service)
+    handle /external-agent/* {
+        uri strip_prefix /external-agent
+        reverse_proxy localhost:8083
+    }
+
     # Home page
     handle / {
         root * /agent

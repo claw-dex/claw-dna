@@ -168,6 +168,12 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 - Outbox `needs_human` messages are highlighted distinctly in the portal
 - See `prompts/goal.md` for message handling rules
 
+#### External-Agent Inbox Source
+
+Inbox items with `source: "external_agent"` are forwarded by `external_agent_api.py` from a registered external agent's outbox. They carry these extra fields:
+
+- `type`: prefixed with `agent_` — one of `agent_response`, `agent_needs_human`, `agent_error`, `agent_info`. The prefix lets you distinguish forwarded entries from native inbox types (`goal`, `message`, `event`) at a glance; strip the prefix to see the external agent's intent.
+
 ---
 
 ## Dream Enums

@@ -14,6 +14,21 @@
     "stdout_log": "/agent/memory/logs/service-webhook_receiver.stdout.log",
     "stderr_log": "/agent/memory/logs/service-webhook_receiver.stderr.log"
   },
+  "external_agent_api": {
+    "pid": null,
+    "port": 8083,
+    "auto_start": true,
+    "health_url": "http://localhost:8083/health",
+    "command": [
+      "uv",
+      "run",
+      "python",
+      "/agent/services/external_agent_api.py"
+    ],
+    "started": null,
+    "stdout_log": "/agent/memory/logs/service-external_agent_api.stdout.log",
+    "stderr_log": "/agent/memory/logs/service-external_agent_api.stderr.log"
+  },
   "scheduler_daemon": {
     "pid": null,
     "port": null,

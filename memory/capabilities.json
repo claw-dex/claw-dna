@@ -161,6 +161,13 @@
     "enabled": false
   },
   {
+    "id": "external_agent_api",
+    "name": "External Agent API",
+    "description": "HTTP service on port 8083 (routed at /external-agent/* via Caddy with basic auth) that lets registered external agents talk to the main agent via per-agent inbox/outbox files at /agent/messages/external/<name>/. Routes: read-inbox, write-outbox, ping, update (patch status/capabilities/responsibilities; status=deactivated halts forwarding). Background sweeper drains each agent's outbox into /agent/messages/inbox.json with source=external_agent and reply_to=<inbox path>. Registry at memory/agents.json.",
+    "category": "communication",
+    "enabled": true
+  },
+  {
     "id": "email_imap",
     "name": "Email IMAP Client",
     "description": "IMAP email client supporting any provider; fetch, search, delete, and verify emails using credentials from KeePass (entry 'Email IMAP' with server URL, username, and app password)",

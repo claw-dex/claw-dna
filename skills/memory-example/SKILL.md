@@ -464,6 +464,50 @@ Entry:
 
 - `status`: `ok` | `fail` | `timeout` | `skip`
 
+### agents.json
+
+Registry of **external agents** (separate, out-of-process LLM sessions like another Claude Code or Codex instance) that talk to the main agent over the `external_agent_api` HTTP service. Managed by `scripts/register_external_agent.py` and the `register-external-agent` skill — do not hand-edit unless repairing.
+
+```json
+[]
+```
+
+Entry:
+
+```json
+{
+  "type": "external",
+  "name": "research-bot",
+  "inbox": "/agent/messages/external/research-bot/inbox.json",
+  "outbox": "/agent/messages/external/research-bot/outbox.json",
+  "capabilities": [
+    {
+      "id": "web_search",
+      "name": "Web Search",
+      "description": "Browses public web pages and summarises findings",
+      "category": "automation",
+      "enabled": true
+    }
+  ],
+  "responsibilities": "Run web research, source-check claims, and summarise long PDFs",
+  "status": "online",
+  "timeout_seconds": 300,
+  "last_ping_at": "2026-04-30T12:34:56+00:00"
+}
+```
+
+- `type`: always `external` for now (reserved value `internal` is unused).
+- `name`: stable identifier; matches the directory under `/agent/messages/external/<name>/` and is sent on every API call as the `X-Agent-Name` header. Must match `^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$`.
+- `inbox` / `outbox`: absolute paths to the per-agent message files. The same directory also holds `inbox_history.json` and `outbox_history.json` (archives written by the sweeper).
+- `capabilities`: list of capability objects shaped like entries in `memory/capabilities.json` (`id`, `name`, `description`, `category`, `enabled`).
+- `responsibilities`: free-text duties — write it from the perspective of "what kind of task should the main agent delegate to this agent?".
+- `status`: `online` | `offline` | `deactivated`.
+  - `online`: pinging within the timeout window; eligible for delegation. Surfaced in the goal-mode `[AGENTS]` section of `cycle_start.py`.
+  - `offline`: missed the ping window; the sweeper still forwards its outbox if it shows up, but the main agent should avoid assigning new work.
+  - `deactivated`: the agent has been deactivated (either by the main agent or itself)
+- `timeout_seconds`: how long without a ping before status flips to `offline`. Default 300s. Per-agent.
+- `last_ping_at`: ISO8601 UTC timestamp of the most recent successful ping. `null` until the agent's first ping.
+
 ---
 
 ## `/agent/messages/`
@@ -474,7 +518,7 @@ Entry:
 []
 ```
 
-Entry:
+Entry (base shape):
 
 ```json
 {
@@ -487,11 +531,30 @@ Entry:
 }
 ```
 
-- `type`: `goal` | `message` | `event`
-- `source`: `user` | `scheduler` | `telegram` | `whatsapp` | `webhook` | other
+- `type`: `goal` | `message` | `event` | `agent_response` | `agent_needs_human` | `agent_error` | `agent_info`
+  - The `agent_*` types arrive only when an external agent forwards an outbox entry (see below). They are the external agent's own outbox type (`response` / `needs_human` / `error` / `info`) prefixed with `agent_` so the main agent's inbox triage can distinguish forwarded entries from base inbox types (`goal` / `message` / `event`) at a glance.
+- `source`: `user` | `scheduler` | `telegram` | `whatsapp` | `webhook` | `external_agent` | other
 - Scheduler-injected entries may include `task_id`.
 - `event` entries (source `webhook`) carry the sanitized HTTP payload in `content`: method, path, filtered headers, and body (truncated at 4 KB). Full payload is in `webhook_receiver.log`.
-- `received_at`: **Required.** ISO-8601 UTC timestamp set by the writer the moment the item lands in `inbox.json`. This field is the cutoff `cycle_close.py` uses to decide which items the agent has already seen vs. which arrived **mid-cycle** and must be carried forward to the next cycle. Items with `received_at <= cycle.start` are archived to `inbox_history.json` and ingested into long-term memory; items with `received_at > cycle.start` stay in `inbox.json` so they are not silently dropped without processing. All writers (`app/data/write.py::queue_to_inbox`, `services/shared.py::write_to_inbox`, scheduler, webhook, telegram, whatsapp bridges) set this; `write_to_inbox` stamps it as a fallback. Items missing `received_at` are treated as pre-existing and archived on the next goal cycle close.
+- `received_at`: **Required.** ISO-8601 UTC timestamp set by the writer the moment the item lands in `inbox.json`. This field is the cutoff `cycle_close.py` uses to decide which items the agent has already seen vs. which arrived **mid-cycle** and must be carried forward to the next cycle. Items with `received_at <= cycle.start` are archived to `inbox_history.json` and ingested into long-term memory; items with `received_at > cycle.start` stay in `inbox.json` so they are not silently dropped without processing. All writers (`app/data/write.py::queue_to_inbox`, `services/shared.py::write_to_inbox`, scheduler, webhook, telegram, whatsapp bridges, external_agent_api) set this; `write_to_inbox` stamps it as a fallback. Items missing `received_at` are treated as pre-existing and archived on the next goal cycle close.
+
+Entry (forwarded from an external agent — `source: "external_agent"`):
+
+```json
+{
+  "type": "agent_needs_human",
+  "content": "[from external agent research-bot]\nAPI key rotation required\n\nStripe webhook signing secret expires in 24h",
+  "received_at": "2026-03-05T10:00:01+00:00",
+  "source": "external_agent",
+  "from": "messages/external/research-bot/outbox.json",
+  "reply_to": "messages/external/research-bot/inbox.json"
+}
+```
+
+- `content`: Built by `external_agent_api.py` as `[from external agent <name>]\n<subject>\n\n<content>` — the external agent's outbox `subject` and `content` are concatenated and prefixed with the agent name so the main agent has all the context in one field. The original `subject` is **not** kept as a separate field on the forwarded inbox entry (the unmodified copy lives in `messages/external/<name>/outbox_history.json`).
+- `from`: Path to the external agent's outbox file the message was drained from. The directory segment between `messages/external/` and `outbox.json` is the external agent's `name` in `/agent/memory/agents.json`; the archived copy lives next to it as `outbox_history.json`.
+- `reply_to`: Path to the external agent's **inbox** file. To reply, append a JSON object `{"id": "<uuid4>", "type": "message", "content": "...", "timestamp": "<iso8601>", "read": false}` to that file's list — the external agent will pick it up on its next `POST /read-inbox`.
+- When the external agent's outbox `type == "needs_human"` (i.e. forwarded as `agent_needs_human`), the same message is **also** mirrored into `/agent/messages/outbox.json` with type `needs_human` and content prefixed `[from external agent <name>]` so the existing human-notification channels (Telegram / WhatsApp / etc.) surface it without the main agent doing extra work.
 
 ### outbox.json
 

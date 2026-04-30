@@ -720,6 +720,53 @@ def _list_recent_dream_files(hours: int = 24) -> list:
 # ── Output Modes ────────────────────────────────────────────────────────────────
 
 
+def _print_online_agents() -> None:
+    """Print a section listing every currently-online registered agent.
+
+    Reads /agent/memory/agents.json (managed by the register-external-agent
+    skill). All agent types are surfaced equally — the entry's `type`
+    field is shown verbatim alongside the name. Silent if the file is
+    missing/empty or no agent is online, so non-users of the feature see
+    no clutter.
+    """
+    agents = load_json(MEMORY / "agents.json")
+    if not isinstance(agents, list):
+        return
+    online = [a for a in agents if isinstance(a, dict) and a.get("status") == "online"]
+    if not online:
+        return
+
+    print(f"\n[AGENTS]  {len(online)} online — available for delegation")
+    for a in online:
+        name = a.get("name") or "?"
+        agent_type = a.get("type") or "?"
+        responsibilities = (a.get("responsibilities") or "").strip() or "(none)"
+        caps = a.get("capabilities") or []
+        cap_names: list[str] = []
+        for c in caps:
+            if isinstance(c, dict):
+                cn = c.get("id") or c.get("name")
+                if cn:
+                    cap_names.append(str(cn))
+        cap_summary = ", ".join(cap_names) if cap_names else "(none)"
+        last_ping = a.get("last_ping_at") or "never"
+        last_ping_str = ago(last_ping) if last_ping != "never" else "never"
+        print(f"  • {name}  [type={agent_type}]  (last ping {last_ping_str})")
+        print(f"      responsibilities: {responsibilities}")
+        print(f"      capabilities:     {cap_summary}")
+        print(f"      inbox:            {a.get('inbox') or '?'}")
+        print(f"      outbox:           {a.get('outbox') or '?'}")
+    print(
+        "  → To delegate: append a JSON object "
+        '{"id":"<uuid>","type":"goal"|"message","content":"...","timestamp":"<iso>","read":false} '
+        'to the agent\'s inbox path. Use type="goal" when assigning a new task '
+        '(e.g. "Research about the topics of autonomous AI agent, produce a pdf report and upload it to my workspace"); use type="message" for a '
+        'conversational note or status request (e.g. "Report your current '
+        'progress back to me"). Replies surface in the main inbox.json with '
+        "source=external_agent."
+    )
+
+
 def print_full(
     repair,
     state,
@@ -816,6 +863,13 @@ def print_full(
             print(f"  [{m.get('type')}] {snippet}")
     else:
         print(f"\n[INBOX]  empty")
+
+    # ── Agents (goal mode only) ──────────────────────────────────
+    # Surface online registered agents (any type) so the main agent knows
+    # what work it can delegate this cycle. See services/external_agent_api.py
+    # and skills/register-external-agent.
+    if not EVOLVE_MODE:
+        _print_online_agents()
 
     # ── Cycles ───────────────────────────────────────────────────
     all_cats = [
