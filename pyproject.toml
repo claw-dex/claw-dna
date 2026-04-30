@@ -27,3 +27,14 @@ packages = ["app"]
 
 [tool.uv]
 environments = ["sys_platform == 'linux'"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-mock>=3.12",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+pythonpath = ["services", "scripts", "."]
+addopts = "-ra"
