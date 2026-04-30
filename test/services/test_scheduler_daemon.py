@@ -10,13 +10,14 @@ from pathlib import Path
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # _resolve_poll_interval
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_poll_interval_default_when_unset(monkeypatch, patch_scheduler_daemon_paths):
+def test_resolve_poll_interval_default_when_unset(
+    monkeypatch, patch_scheduler_daemon_paths
+):
     monkeypatch.delenv("SCHEDULER_DAEMON_POLL_SECONDS", raising=False)
     assert (
         patch_scheduler_daemon_paths._resolve_poll_interval()
@@ -24,7 +25,9 @@ def test_resolve_poll_interval_default_when_unset(monkeypatch, patch_scheduler_d
     )
 
 
-def test_resolve_poll_interval_default_when_empty(monkeypatch, patch_scheduler_daemon_paths):
+def test_resolve_poll_interval_default_when_empty(
+    monkeypatch, patch_scheduler_daemon_paths
+):
     monkeypatch.setenv("SCHEDULER_DAEMON_POLL_SECONDS", "")
     assert (
         patch_scheduler_daemon_paths._resolve_poll_interval()
@@ -32,7 +35,9 @@ def test_resolve_poll_interval_default_when_empty(monkeypatch, patch_scheduler_d
     )
 
 
-def test_resolve_poll_interval_falls_back_on_garbage(monkeypatch, patch_scheduler_daemon_paths):
+def test_resolve_poll_interval_falls_back_on_garbage(
+    monkeypatch, patch_scheduler_daemon_paths
+):
     monkeypatch.setenv("SCHEDULER_DAEMON_POLL_SECONDS", "fast")
     assert (
         patch_scheduler_daemon_paths._resolve_poll_interval()
@@ -40,7 +45,9 @@ def test_resolve_poll_interval_falls_back_on_garbage(monkeypatch, patch_schedule
     )
 
 
-def test_resolve_poll_interval_clamps_low_values(monkeypatch, patch_scheduler_daemon_paths):
+def test_resolve_poll_interval_clamps_low_values(
+    monkeypatch, patch_scheduler_daemon_paths
+):
     monkeypatch.setenv("SCHEDULER_DAEMON_POLL_SECONDS", "0")
     assert (
         patch_scheduler_daemon_paths._resolve_poll_interval()
@@ -53,7 +60,9 @@ def test_resolve_poll_interval_clamps_low_values(monkeypatch, patch_scheduler_da
     )
 
 
-def test_resolve_poll_interval_accepts_valid_value(monkeypatch, patch_scheduler_daemon_paths):
+def test_resolve_poll_interval_accepts_valid_value(
+    monkeypatch, patch_scheduler_daemon_paths
+):
     monkeypatch.setenv("SCHEDULER_DAEMON_POLL_SECONDS", "120")
     assert patch_scheduler_daemon_paths._resolve_poll_interval() == 120
 
@@ -64,14 +73,18 @@ def test_resolve_poll_interval_accepts_valid_value(monkeypatch, patch_scheduler_
 
 
 def test_write_heartbeat_writes_iso_timestamp(patch_scheduler_daemon_paths):
-    patch_scheduler_daemon_paths.HEARTBEAT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    patch_scheduler_daemon_paths.HEARTBEAT_FILE.parent.mkdir(
+        parents=True, exist_ok=True
+    )
     patch_scheduler_daemon_paths._write_heartbeat()
     text = patch_scheduler_daemon_paths.HEARTBEAT_FILE.read_text().strip()
     # Parses as ISO timestamp.
     datetime.fromisoformat(text)
 
 
-def test_write_heartbeat_swallows_oserror(monkeypatch, patch_scheduler_daemon_paths, tmp_path):
+def test_write_heartbeat_swallows_oserror(
+    monkeypatch, patch_scheduler_daemon_paths, tmp_path
+):
     # Point heartbeat at a path inside a non-existent dir; without the dir
     # being created first this would raise FileNotFoundError.
     bad = tmp_path / "no" / "such" / "dir" / "hb"
@@ -150,19 +163,17 @@ def test_interruptible_sleep_clamps_final_slice_to_remaining(
 # ---------------------------------------------------------------------------
 
 
-def test_import_scheduler_loads_module(monkeypatch, tmp_path, patch_scheduler_daemon_paths):
+def test_import_scheduler_loads_module(
+    monkeypatch, tmp_path, patch_scheduler_daemon_paths
+):
     # Drop a stub scheduler module that exposes check_and_inject(),
     # and put it on sys.path before _import_scheduler runs.
     stub_dir = tmp_path / "stub_scripts"
     stub_dir.mkdir()
-    (stub_dir / "scheduler.py").write_text(
-        textwrap.dedent(
-            """
+    (stub_dir / "scheduler.py").write_text(textwrap.dedent("""
             def check_and_inject():
                 return 0
-            """
-        )
-    )
+            """))
     monkeypatch.syspath_prepend(str(stub_dir))
     # Drop any cached scheduler module so the import picks up our stub.
     sys.modules.pop("scheduler", None)

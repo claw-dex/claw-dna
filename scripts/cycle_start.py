@@ -53,6 +53,18 @@ EVOLVE_MODE = "--mode" in args and args[
     args.index("--mode") + 1 : args.index("--mode") + 2
 ] == ["evolve"]
 
+
+def _arg_value(name: str):
+    """Return the value following a `--name` flag, or None if absent."""
+    if name in args:
+        idx = args.index(name)
+        if idx + 1 < len(args):
+            return args[idx + 1]
+    return None
+
+
+GOAL = _arg_value("--goal")
+
 # ── Helpers ─────────────────────────────────────────────────────────────────────
 
 
@@ -116,11 +128,19 @@ def _write_safe(path: Path, data) -> bool:
         return False
 
 
-def _auto_archive_journal_inlined(journal: list, keep: int = 20) -> tuple:
+def _auto_archive_journal_inlined(
+    journal: list,
+    min_keep: int = 100,
+    max_age_hours: float = 24.0,
+    min_cycle_age: int = 100,
+) -> tuple:
     """Archive old journal entries in-process (no subprocess).
 
-    Replaces the subprocess call to journal_archive.py at cycle start.
-    Saves ~1.5s (uv run startup) every ~5 cycles when the threshold is exceeded.
+    Archives only entries that satisfy BOTH conditions:
+      - older than max_age_hours (default 24h), AND
+      - cycle number is more than min_cycle_age cycles in the past
+        (relative to the newest cycle in the journal).
+    Always keeps at least min_keep entries in the active journal.
 
     Returns (journal_reloaded, n_archived, archived_total) tuple.
     """
@@ -128,8 +148,45 @@ def _auto_archive_journal_inlined(journal: list, keep: int = 20) -> tuple:
     ARCHIVE_PATH = MEMORY / "journal-archive.json"
     entries = sorted(journal, key=lambda e: e.get("cycle", 0))
     total = len(entries)
-    to_archive = entries[: total - keep]
-    to_keep = entries[total - keep :]
+    if total <= min_keep:
+        existing = load_json(ARCHIVE_PATH)
+        existing_list = existing if isinstance(existing, list) else []
+        return journal, 0, len(existing_list)
+
+    current_cycle = max((e.get("cycle", 0) or 0) for e in entries)
+    cutoff_dt = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+        hours=max_age_hours
+    )
+
+    def _is_archivable(e: dict) -> bool:
+        cyc = e.get("cycle", 0) or 0
+        if current_cycle - cyc <= min_cycle_age:
+            return False
+        ts_str = e.get("timestamp", "")
+        if not ts_str:
+            return False
+        try:
+            ts = datetime.datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+        except Exception:
+            return False
+        return ts < cutoff_dt
+
+    # Walk oldest-first, archiving while we'd still leave at least min_keep behind.
+    archivable_limit = total - min_keep
+    archive_cycles = set()
+    for i, e in enumerate(entries):
+        if i >= archivable_limit:
+            break
+        if _is_archivable(e):
+            archive_cycles.add(e.get("cycle"))
+
+    if not archive_cycles:
+        existing = load_json(ARCHIVE_PATH)
+        existing_list = existing if isinstance(existing, list) else []
+        return journal, 0, len(existing_list)
+
+    to_archive = [e for e in entries if e.get("cycle") in archive_cycles]
+    to_keep = [e for e in entries if e.get("cycle") not in archive_cycles]
     # Merge with existing archive (deduplicate by cycle number)
     existing = load_json(ARCHIVE_PATH)
     existing_list = existing if isinstance(existing, list) else []
@@ -951,9 +1008,10 @@ def print_full(
             )
 
     # ── Journal Auto-Archive ────────────────────────────────────────
-    # Auto-archive when journal exceeds 25 entries (keep last 20, archive the rest).
-    # Keeps journal.json small → faster loads for all future cycles.
-    AUTO_ARCHIVE_THRESHOLD = 25
+    # Auto-archive only entries that are BOTH >24h old AND >100 cycles in the past.
+    # Always retain at least 100 entries in the active journal so recent context
+    # stays in-format. Anything outside both windows is moved to journal-archive.json.
+    AUTO_ARCHIVE_THRESHOLD = 100
     if len(journal) > AUTO_ARCHIVE_THRESHOLD:
         try:
             journal_reloaded, n_archived, archived_after = (
@@ -963,18 +1021,10 @@ def print_full(
                 print(
                     f"  ✓  auto-archived {len(journal) - len(journal_reloaded)} old entries → {len(journal_reloaded)} active / {archived_after} archived"
                 )
-            else:
-                print(
-                    f"  ⚠  journal.json has {len(journal)} entries — auto-archive had no effect; run: uv run python scripts/journal_archive.py"
-                )
         except Exception as e:
             print(
                 f"  ⚠  journal.json has {len(journal)} entries — auto-archive error: {e}"
             )
-    elif len(journal) > 30:
-        print(
-            f"  ⚠  journal.json has {len(journal)} entries — run: uv run python scripts/journal_archive.py"
-        )
 
     # ── Backup Status ─────────────────────────────────────────────
     backup_root = MEMORY / "backups"
@@ -1007,6 +1057,36 @@ def print_full(
             print(f"\n[BACKUP]  no backups — run memory_backup.py")
     else:
         print(f"\n[BACKUP]  no backups dir — run memory_backup.py")
+
+    # ── Short-Term Memory (Recent Journal) ────────────────────────
+    # Full content of every active journal entry (no truncation). Timestamps are
+    # rendered as human-readable relative durations (e.g. "15m ago", "2h ago").
+    if journal:
+        sorted_journal = sorted(journal, key=lambda x: x.get("cycle", 0))
+        recent = sorted_journal[-10:]
+        print(
+            f"\n[SHORT-TERM MEMORY]  showing {len(recent)} of {len(journal)} journal entries:"
+        )
+        for e in recent:
+            cyc = e.get("cycle", "?")
+            status = e.get("status", "?")
+            etype = e.get("type", "?")
+            goal = e.get("goal", "")
+            actions = e.get("actions") or e.get("action") or []
+            if isinstance(actions, str):
+                actions = [actions]
+            summary = e.get("summary", "")
+            ts = e.get("timestamp", "")
+            when = ago(ts) if ts else "unknown"
+            print(f"\n  Cycle {cyc} | {when} | status={status} | type={etype}")
+            if goal:
+                print(f"    goal:    {goal}")
+            if actions:
+                print(f"    actions:")
+                for a in actions:
+                    print(f"      - {a}")
+            if summary:
+                print(f"    summary: {summary}")
 
     # ── Recent Memory Files (<24h) ────────────────────────────────
     if recent_dream_files:
@@ -1146,7 +1226,7 @@ def print_json_output(
                     "cycle": state.get("cycle_number"),
                     "status": state.get("status"),
                     "last_heartbeat": state.get("last_heartbeat"),
-                    "last_cycle_summary": state.get("last_cycle_summary", "")[:120],
+                    "last_cycle_summary": state.get("last_cycle_summary", ""),
                 },
                 "portal": portal,
                 "goals": {
@@ -1160,16 +1240,26 @@ def print_json_output(
                 },
                 "cycles": cycles_info,
                 "failures_count": len(failures),
-                "recent_failures": [
-                    str(f.get("summary", f))[:80] for f in failures[-3:]
-                ],
+                "recent_failures": [str(f.get("summary", f)) for f in failures[-3:]],
                 "recent_journal": [
                     {
-                        "ts": e.get("timestamp", "")[:16],
                         "cycle": e.get("cycle"),
-                        "summary": e.get("summary", "")[:90],
+                        "when": (
+                            ago(e.get("timestamp", ""))
+                            if e.get("timestamp")
+                            else "unknown"
+                        ),
+                        "status": e.get("status"),
+                        "type": e.get("type"),
+                        "goal": e.get("goal", ""),
+                        "actions": (
+                            [e.get("action")]
+                            if isinstance(e.get("action"), str)
+                            else (e.get("actions") or e.get("action") or [])
+                        ),
+                        "summary": e.get("summary", ""),
                     }
-                    for e in (journal[-5:] if len(journal) >= 5 else journal)
+                    for e in sorted(journal, key=lambda x: x.get("cycle", 0))[-10:]
                 ],
                 "capabilities_count": capabilities.get("total", 0),
                 "evolve_suggestion": suggested,
@@ -1256,6 +1346,8 @@ def main():
                     "start": now_iso(),
                     "status": "in_progress",
                 }
+                if GOAL:
+                    cycle_record["goal"] = GOAL
                 cycles.append(cycle_record)
                 _write_safe(MEMORY / "cycles.json", cycles)
                 if not JSON_MODE:
@@ -1278,6 +1370,8 @@ def main():
                 "start": now_iso(),
                 "status": "in_progress",
             }
+            if GOAL:
+                cycle_record["goal"] = GOAL
             cycles.append(cycle_record)
             _write_safe(MEMORY / "cycles.json", cycles)
             if not JSON_MODE:

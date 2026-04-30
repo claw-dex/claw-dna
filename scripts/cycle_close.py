@@ -39,7 +39,9 @@ Optional flags:
                             (memory_consolidation and deep_sleep are dream-only)
     --actions TEXT…       One or more action strings (space-separated, each in quotes)
     --status STATUS       Cycle status: completed | failed (default: completed)
-    --goal TEXT           What you worked on (defaults to --summary)
+    --goal TEXT           What you set out to do (defaults to the goal recorded by
+                          cycle_start.py on the in-progress cycle entry; omitted
+                          from the journal entry if neither is set)
     --no-normalize        Skip cycles.json normalization after writing
     --dry-run             Print what would be written, but write nothing
 
@@ -757,7 +759,11 @@ def main():
         die(f"--status must be one of: {', '.join(sorted(valid_statuses))}")
 
     now = now_iso()
-    goal_text = opts["goal"] or opts["summary"]
+    # Goal resolution order: explicit --goal > goal recorded by cycle_start.py
+    # on the in-progress cycle entry. Never fall back to --summary — goal
+    # (planned) and summary (delivered) are different concepts and silently
+    # aliasing them produced journal entries where both fields were identical.
+    goal_text = opts["goal"]
 
     # ── Load existing data ───────────────────────────────────────────────────
     cycles_path = MEMORY / "cycles.json"
@@ -827,6 +833,11 @@ def main():
             f"  ⚠  No existing entry for cycle {cycle_n} — created stub (start={stub_start[:19]})"
         )
 
+    # Pull goal from the in-progress cycle entry (written by cycle_start.py)
+    # when --goal wasn't passed at close time.
+    if not goal_text:
+        goal_text = cycle_entry.get("goal")
+
     start_ts = cycle_entry.get("start")
     duration = None
     if start_ts:
@@ -864,10 +875,11 @@ def main():
         "timestamp": now,
         "status": opts["status"],
         "type": opts["type"],
-        "goal": goal_text,
         "actions": opts["actions"],
         "summary": opts["summary"],
     }
+    if goal_text:
+        journal_entry["goal"] = goal_text
     if opts["category"]:
         journal_entry["category"] = opts["category"]
 

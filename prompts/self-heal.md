@@ -188,7 +188,15 @@ All checks must pass before this cycle is complete.
 
 ## Step 5: Record the Failure
 
-Follow the `/agent/prompts/cycle-close.md` checklist. Record the failure in your journal entry (via `cycle_close.py`) and update `/agent/memory/failures.json` with:
+Follow the `/agent/prompts/cycle-close.md` checklist. When you invoke `cycle_close.py`, set:
+
+- `--goal` to the *symptom you set out to repair* (e.g. `"Self-heal: portal /app returning 502"`),
+- `--summary` to the *delivered fix and verification* (e.g. `"Restarted Streamlit; health 200; root cause: stale lockfile"`).
+
+The two fields must differ — `--goal` is the plan, `--summary` is the outcome. See
+`prompts/cycle-close.md` for the full rule.
+
+Record the failure in your journal entry (via `cycle_close.py`) and update `/agent/memory/failures.json` with:
 
 - Symptom: what health check found
 - Diagnosis: actual root cause

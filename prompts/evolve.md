@@ -14,6 +14,13 @@ uv run python scripts/cycle_start.py --mode evolve    # status, past goals, rece
 Review the git log to understand what past cycles have changed — avoid repeating recent work
 and build on what's already been done. Then review the cycle-start output.
 
+**Goal is set at cycle close, not at start.** Unlike `goal` mode, the planned goal
+isn't known until you've reviewed the `[EVOLVE RECOMMENDATION]` and chosen what to work
+on — and there's no need to commit it mid-flight. Pass it to `cycle_close.py --goal "..."`
+at the end of the cycle (see Step 5 below). The goal describes the *plan* (what you
+took on); the summary describes the *outcome* (what you delivered). Keep them distinct —
+see `prompts/cycle-close.md` for the rule.
+
 This outputs your current state, recent journal, failures, AND the evolve recommendation
 with **dynamic score-based analysis**. The `[EVOLVE RECOMMENDATION]` section shows:
 
@@ -166,6 +173,26 @@ Always read a prompt before modifying it. Keep prompts concise — trim, don't p
   goal or inbox item while working on an evolve cycle, leave it — the next heartbeat will
   handle it. Creating overlapping cycle entries causes interruptions and lost work.
 - Test changes before finishing. Verify portal health after any server.py edit.
+- **Run app-check after modifying any file in `app/` or `server.py`:**
+
+  ```bash
+  uv run python scripts/app_check.py
+  ```
+
+  Fix any reported errors before continuing.
+- **Run the full test suite after modifying any agent Python file:**
+
+  ```bash
+  uv run pytest test/ -v
+  ```
+
+  If any tests fail, perform a quick root-cause analysis (RCA) — identify which change
+  broke which test and why. Then highlight the failures and notify the user via the
+  outbox so the issue isn't silently buried.
+- **Tests are mandatory for new Python code:** Every new script in `scripts/` and every
+  new function added to an existing Python script MUST come with corresponding unit tests
+  in `test/` that cover the new behavior (happy path + meaningful edge cases). No new
+  Python code lands without tests.
 - **Git-track every change:** After creating or modifying any file, immediately `git add` it:
 
   ```bash
@@ -199,5 +226,20 @@ Get the current cycle number from `state.json` (`cycle_number` field + 1, since 
   ```
 
 Use the category you picked (reliability, observability, capability, efficiency, prompt-evolution) and fill in all sections with specific details from this cycle's work.
-Update new capabilities in `capabilities.json` and journal entry with details of the improvement.
-Then follow the `/agent/prompts/cycle-close.md` checklist (includes running `cycle_close.py`) to close the cycle.
+Update new capabilities in `capabilities.json` with details of the improvement.
+
+Then follow the `/agent/prompts/cycle-close.md` checklist to close the cycle. Pass
+`--goal` to `cycle_close.py` describing the *plan* you set out to do, separately from
+`--summary` (the *outcome*):
+
+```bash
+uv run python scripts/cycle_close.py \
+    --type evolve \
+    --category <reliability|observability|capability|efficiency|prompt_evolution> \
+    --goal "<one-line plan, e.g. 'evolve(reliability): harden app_check.py against Streamlit reload races'>" \
+    --summary "<1-2 sentence outcome, e.g. 'app_check.py now retries health probe up to 3x with 500ms backoff; eliminates the false-FAIL we saw on cycles 712 and 778. Added unit test covering the retry path.'>" \
+    --actions "Action 1" "Action 2" "Action 3"
+```
+
+`--goal` and `--summary` must be **different** — goal is the intent, summary is the
+result. Never copy one into the other. See `prompts/cycle-close.md` for the rule.

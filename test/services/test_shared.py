@@ -10,7 +10,6 @@ from pathlib import Path
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # atomic_write_json
 # ---------------------------------------------------------------------------
@@ -111,9 +110,7 @@ def test_write_to_inbox_appends_to_existing_list(tmp_path, patch_shared_paths):
     assert [i["content"] for i in items] == ["first", "second"]
 
 
-def test_write_to_inbox_dedup_skips_same_type_and_content(
-    tmp_path, patch_shared_paths
-):
+def test_write_to_inbox_dedup_skips_same_type_and_content(tmp_path, patch_shared_paths):
     inbox = tmp_path / "inbox.json"
     patch_shared_paths.write_to_inbox(
         [{"type": "goal", "content": "Hello"}], inbox_file=inbox
@@ -192,26 +189,19 @@ def test_write_to_outbox_appends_and_reads_back(tmp_path, patch_shared_paths):
     patch_shared_paths.write_to_outbox(
         [{"type": "info", "subject": "s2", "content": "c2"}], outbox_file=outbox
     )
-    assert (
-        len(patch_shared_paths.read_outbox_locked(outbox_file=outbox)) == 2
-    )
+    assert len(patch_shared_paths.read_outbox_locked(outbox_file=outbox)) == 2
 
 
 def test_read_outbox_locked_returns_empty_for_missing(tmp_path, patch_shared_paths):
     assert (
-        patch_shared_paths.read_outbox_locked(
-            outbox_file=tmp_path / "nope.json"
-        )
-        == []
+        patch_shared_paths.read_outbox_locked(outbox_file=tmp_path / "nope.json") == []
     )
 
 
 def test_read_outbox_locked_returns_empty_for_corrupt(tmp_path, patch_shared_paths):
     outbox = tmp_path / "outbox.json"
     outbox.write_text("nope{")
-    assert (
-        patch_shared_paths.read_outbox_locked(outbox_file=outbox) == []
-    )
+    assert patch_shared_paths.read_outbox_locked(outbox_file=outbox) == []
 
 
 # ---------------------------------------------------------------------------
@@ -230,9 +220,7 @@ def test_locked_outbox_rw_applies_callback(tmp_path, patch_shared_paths):
     assert json.loads(outbox.read_text()) == [{"id": "b"}]
 
 
-def test_locked_outbox_rw_handles_callback_returning_none(
-    tmp_path, patch_shared_paths
-):
+def test_locked_outbox_rw_handles_callback_returning_none(tmp_path, patch_shared_paths):
     outbox = tmp_path / "outbox.json"
     outbox.write_text(json.dumps([{"id": "a"}]))
 

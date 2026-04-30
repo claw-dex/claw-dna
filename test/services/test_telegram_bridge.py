@@ -7,7 +7,6 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # heartbeat helpers
 # ---------------------------------------------------------------------------
@@ -149,9 +148,7 @@ def test_keepass_store_returns_true_on_success(monkeypatch, patch_telegram_paths
     monkeypatch.setitem(sys.modules, "scripts", pkg)
     monkeypatch.setitem(sys.modules, "scripts.keepass", fake)
 
-    assert (
-        patch_telegram_paths.keepass_store("T", "u", "v", group="Bots") is True
-    )
+    assert patch_telegram_paths.keepass_store("T", "u", "v", group="Bots") is True
     assert captured == {
         "title": "T",
         "username": "u",
@@ -234,17 +231,11 @@ def test_strip_bot_suffix(patch_telegram_paths, command, bot, expected):
 
 
 def test_bot_is_addressed_slash_command(patch_telegram_paths):
-    assert (
-        patch_telegram_paths.bot_is_addressed({}, "mybot", "/goals")
-        is True
-    )
+    assert patch_telegram_paths.bot_is_addressed({}, "mybot", "/goals") is True
 
 
 def test_bot_is_addressed_mention(patch_telegram_paths):
-    assert (
-        patch_telegram_paths.bot_is_addressed({}, "mybot", "hi @mybot help")
-        is True
-    )
+    assert patch_telegram_paths.bot_is_addressed({}, "mybot", "hi @mybot help") is True
 
 
 def test_bot_is_addressed_reply(patch_telegram_paths):
@@ -253,10 +244,7 @@ def test_bot_is_addressed_reply(patch_telegram_paths):
 
 
 def test_bot_is_addressed_negative(patch_telegram_paths):
-    assert (
-        patch_telegram_paths.bot_is_addressed({}, "mybot", "random chatter")
-        is False
-    )
+    assert patch_telegram_paths.bot_is_addressed({}, "mybot", "random chatter") is False
 
 
 # ---------------------------------------------------------------------------
@@ -302,9 +290,7 @@ def test_find_blocked_entry_by_chat_id(patch_telegram_paths):
 
 def test_find_blocked_entry_by_username_with_at(patch_telegram_paths):
     state = {"blocked_chat_ids": [{"chat_id": "42", "username": "bob"}]}
-    assert (
-        patch_telegram_paths.find_blocked_entry(state, "@BOB")["chat_id"] == "42"
-    )
+    assert patch_telegram_paths.find_blocked_entry(state, "@BOB")["chat_id"] == "42"
 
 
 def test_find_blocked_entry_returns_none(patch_telegram_paths):
@@ -416,9 +402,8 @@ def test_msg_hash_deterministic(patch_telegram_paths):
 
 
 def test_msg_hash_distinguishes_distinct(patch_telegram_paths):
-    assert (
-        patch_telegram_paths.msg_hash({"x": 1})
-        != patch_telegram_paths.msg_hash({"x": 2})
+    assert patch_telegram_paths.msg_hash({"x": 1}) != patch_telegram_paths.msg_hash(
+        {"x": 2}
     )
 
 
@@ -466,9 +451,7 @@ def test_escape_markdown_v2_full(patch_telegram_paths):
 def test_escape_markdown_v2_pre_only_escapes_backslash_and_backtick(
     patch_telegram_paths,
 ):
-    s = patch_telegram_paths.escape_markdown(
-        "a*b`c\\d", version=2, entity_type="pre"
-    )
+    s = patch_telegram_paths.escape_markdown("a*b`c\\d", version=2, entity_type="pre")
     assert s == "a*b\\`c\\\\d"
 
 
@@ -502,7 +485,9 @@ def test_load_chat_history_empty_when_missing(patch_telegram_paths):
 
 def test_save_then_load_chat_history(patch_telegram_paths):
     tb = patch_telegram_paths
-    h = {"42": [{"role": "user", "text": "hi", "timestamp": "2026-04-30T12:00:00+00:00"}]}
+    h = {
+        "42": [{"role": "user", "text": "hi", "timestamp": "2026-04-30T12:00:00+00:00"}]
+    }
     tb.save_chat_history(h)
     assert tb.load_chat_history() == h
 
@@ -659,7 +644,9 @@ def test_format_outbox_msg_needs_human_badge(patch_telegram_paths):
 
 def test_format_outbox_msg_falls_back_to_json(patch_telegram_paths):
     # Empty type+subject+content: dumps the whole payload (escaped).
-    out = patch_telegram_paths._format_outbox_msg({"type": "", "subject": "", "content": ""})
+    out = patch_telegram_paths._format_outbox_msg(
+        {"type": "", "subject": "", "content": ""}
+    )
     assert "type" in out
 
 

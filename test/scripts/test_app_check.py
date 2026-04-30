@@ -13,9 +13,22 @@ import app_check
 
 @pytest.fixture
 def redirect_result(monkeypatch, tmp_path):
-    result_path = tmp_path / "app_check_result.json"
+    # Pre-create the sandbox layout main() expects.
+    (tmp_path / "memory").mkdir(exist_ok=True)
+    (tmp_path / "messages").mkdir(exist_ok=True)
+    result_path = tmp_path / "memory" / "app_check_result.json"
+    inbox_path = tmp_path / "messages" / "inbox.json"
+
+    # For tests that invoke write_result() directly (no main()).
     monkeypatch.setattr(app_check, "RESULT_PATH", result_path)
     monkeypatch.setattr(app_check, "AGENT_DIR", tmp_path)
+    monkeypatch.setattr(app_check, "INBOX_PATH", inbox_path)
+
+    # For tests that go through main(): redirect the sandbox to tmp_path and
+    # neutralise the app.shared monkey-patching so it doesn't touch real state.
+    monkeypatch.setattr(app_check, "_make_sandbox", lambda: tmp_path)
+    monkeypatch.setattr(app_check, "_patch_agent_paths", lambda s: None)
+
     return result_path
 
 
@@ -59,15 +72,55 @@ def test_main_returns_3_when_apptest_unavailable(monkeypatch, redirect_result, c
 def _install_fake_apptest(monkeypatch, behavior):
     """Install a fake streamlit.testing.v1 module with an AppTest stub."""
 
+    class _Widget:
+        def __init__(self, **kwargs):
+            self._value = None
+            self._clicked = False
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+        def set_value(self, v):
+            self._value = v
+            return self
+
+        def click(self):
+            self._clicked = True
+            return self
+
     class FakeAppTest:
-        exception = []
+        def __init__(self):
+            self.exception = []
+            self.text_area = [_Widget()]
+            self.button = [_Widget(label="Send")]
 
         @classmethod
         def from_file(cls, path, default_timeout=30):
             return cls()
 
+        @classmethod
+        def from_string(cls, source, default_timeout=30):
+            return cls()
+
         def run(self):
             behavior(self)
+            # If the commands_tab form was filled and submitted, mirror the
+            # production behavior of writing the message to inbox.json so the
+            # post-submit verification step in check_commands_tab_form passes.
+            if (
+                self.text_area
+                and self.text_area[0]._value
+                and self.button
+                and self.button[0]._clicked
+            ):
+                inbox_path = app_check.INBOX_PATH
+                inbox_path.parent.mkdir(parents=True, exist_ok=True)
+                existing = (
+                    json.loads(inbox_path.read_text())
+                    if inbox_path.exists()
+                    else []
+                )
+                existing.append({"content": self.text_area[0]._value})
+                inbox_path.write_text(json.dumps(existing))
 
     fake_mod = types.ModuleType("streamlit.testing.v1")
     fake_mod.AppTest = FakeAppTest

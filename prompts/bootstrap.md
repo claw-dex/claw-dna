@@ -154,9 +154,13 @@ Then follow the `/agent/prompts/cycle-close.md` checklist. Use `cycle_close.py` 
 uv run python scripts/cycle_close.py \
     --type evolve \
     --category capability \
-    --summary "Bootstrap: <what you built and why it serves the goal>" \
+    --goal "Bootstrap: <what you set out to build for this cycle>" \
+    --summary "Bootstrap: <what you actually delivered and why it serves the goal>" \
     --actions "Action 1" "Action 2" "Action 3"
 ```
+
+`--goal` is the *planned intent* (decided before/at cycle start); `--summary` is the
+*delivered outcome*. Keep them distinct — see `prompts/cycle-close.md`.
 
 Ensure auto memory `capabilities.json` was updated in Step 4 with any new tools/capabilities.
 

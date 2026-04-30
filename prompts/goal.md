@@ -12,8 +12,16 @@ Important: do **not** re-parse `inbox.json` to discover new goals or messages. T
 ## Cycle Start (run this first)
 
 ```bash
-uv run python scripts/cycle_start.py --mode goal        # status, goals, inbox, recent journal
+uv run python scripts/cycle_start.py --mode goal \
+    --goal "<one-line statement of the goal/inbox-task you're taking on this cycle>"
+# Omit --goal only if you genuinely don't know yet what you'll work on (rare in goal mode).
 ```
+
+The `--goal` text is stored on the in-progress cycle entry in `cycles.json` and is picked
+up automatically by `cycle_close.py` when it writes the journal entry — so you don't need
+to repeat it at close time. The goal must describe the *plan* ("Implement X for user
+request Y", "Continue in-progress goal Z"), not the outcome — the outcome belongs in
+`--summary` at close. See `prompts/cycle-close.md` for the full rule on goal vs summary.
 
 Review the output before proceeding. If memory-repair reports any fixes, note them in your journal.
 
@@ -229,6 +237,6 @@ Also update portal to show current goal progress if applicable.
 
 Before running cycle-close, get the current cycle number:
 `cycle_n = state.cycle_number + 1` (state stores the *last completed* cycle).
-Pass it explicitly: `uv run python scripts/cycle_close.py --cycle <N> --type goal ...`
+Pass it explicitly: `uv run python scripts/cycle_close.py --cycle <N> --type goal --summary "<delivered outcome>" ...`
 
-Then follow the `/agent/prompts/cycle-close.md` checklist (includes running `cycle_close.py`) to close the cycle.
+Then follow the `/agent/prompts/cycle-close.md` checklist to close the cycle.

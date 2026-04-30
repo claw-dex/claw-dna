@@ -229,7 +229,7 @@ def cmd_setup(args) -> int:
         "On any 4xx, read the response's `readme` field and self-correct."
     )
 
-    print("Paste this to your Claude Code/Codex:")
+    print("Paste this to your Agent/Claude/Codex:")
     print(f"```/loop 1m {instruction}```")
     return 0
 

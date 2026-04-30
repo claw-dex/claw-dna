@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
@@ -48,7 +47,9 @@ def test_is_offline_treats_malformed_timestamp_as_offline(patch_eaa_paths):
 
 def test_is_offline_uses_default_timeout(patch_eaa_paths):
     now = datetime.now(timezone.utc)
-    edge = (now - timedelta(seconds=patch_eaa_paths.DEFAULT_TIMEOUT_SECONDS - 1)).isoformat()
+    edge = (
+        now - timedelta(seconds=patch_eaa_paths.DEFAULT_TIMEOUT_SECONDS - 1)
+    ).isoformat()
     agent = {"last_ping_at": edge}
     assert patch_eaa_paths._is_offline(agent, now=now) is False
 
@@ -396,9 +397,7 @@ def test_archive_old_read_inbox_returns_zero_for_missing(patch_eaa_paths):
 # ---------------------------------------------------------------------------
 
 
-def test_sweep_forwards_outbox_with_priority_and_archives(
-    patch_eaa_paths, frozen_now
-):
+def test_sweep_forwards_outbox_with_priority_and_archives(patch_eaa_paths, frozen_now):
     now = datetime(2026, 4, 30, 12, 0, 0, tzinfo=timezone.utc)
     frozen_now(now)
 

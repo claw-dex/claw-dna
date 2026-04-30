@@ -274,8 +274,22 @@ def test_list_recent_dream_files_with_recent(patched):
 
 
 def test_auto_archive_journal_inlined(patched):
+    import datetime as _dt
+
     (patched / "memory").mkdir(exist_ok=True)
-    journal = [{"cycle": i, "summary": f"c{i}"} for i in range(1, 31)]
-    kept, n_archived, total = cs._auto_archive_journal_inlined(journal, keep=20)
-    assert len(kept) == 20
+    # Build a journal where entries 1..10 are >24h old AND >5 cycles before the
+    # newest cycle (15), so they qualify for archival under the new rule.
+    old_ts = (
+        _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=48)
+    ).isoformat()
+    fresh_ts = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    journal = [
+        {"cycle": i, "summary": f"c{i}", "timestamp": old_ts} for i in range(1, 11)
+    ] + [
+        {"cycle": i, "summary": f"c{i}", "timestamp": fresh_ts} for i in range(11, 16)
+    ]
+    kept, n_archived, total = cs._auto_archive_journal_inlined(
+        journal, min_keep=5, min_cycle_age=0
+    )
+    assert len(kept) == 5
     assert n_archived == 10

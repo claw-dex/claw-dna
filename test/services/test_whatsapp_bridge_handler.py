@@ -7,7 +7,6 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # heartbeat / time helpers
 # ---------------------------------------------------------------------------
@@ -186,16 +185,14 @@ def test_load_state_default_on_corrupt(patch_whatsapp_paths):
 
 
 def test_msg_hash_deterministic(patch_whatsapp_paths):
-    assert (
-        patch_whatsapp_paths.msg_hash({"a": 1, "b": 2})
-        == patch_whatsapp_paths.msg_hash({"b": 2, "a": 1})
-    )
+    assert patch_whatsapp_paths.msg_hash(
+        {"a": 1, "b": 2}
+    ) == patch_whatsapp_paths.msg_hash({"b": 2, "a": 1})
 
 
 def test_msg_hash_distinguishes(patch_whatsapp_paths):
-    assert (
-        patch_whatsapp_paths.msg_hash({"a": 1})
-        != patch_whatsapp_paths.msg_hash({"a": 2})
+    assert patch_whatsapp_paths.msg_hash({"a": 1}) != patch_whatsapp_paths.msg_hash(
+        {"a": 2}
     )
 
 
@@ -217,7 +214,9 @@ def test_load_chat_history_empty_when_missing(patch_whatsapp_paths):
 
 def test_save_then_load_chat_history(patch_whatsapp_paths):
     wa = patch_whatsapp_paths
-    h = {"42": [{"role": "user", "text": "hi", "timestamp": "2026-04-30T12:00:00+00:00"}]}
+    h = {
+        "42": [{"role": "user", "text": "hi", "timestamp": "2026-04-30T12:00:00+00:00"}]
+    }
     wa.save_chat_history(h)
     assert wa.load_chat_history() == h
 
@@ -363,7 +362,9 @@ def test_format_outbox_msg_needs_human_badge(patch_whatsapp_paths):
 
 
 def test_format_outbox_msg_dumps_when_empty(patch_whatsapp_paths):
-    out = patch_whatsapp_paths._format_outbox_msg({"type": "", "subject": "", "content": ""})
+    out = patch_whatsapp_paths._format_outbox_msg(
+        {"type": "", "subject": "", "content": ""}
+    )
     assert "type" in out  # JSON dump fallback
 
 

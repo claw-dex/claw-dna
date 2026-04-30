@@ -183,7 +183,8 @@ Dream cycles are `dream` type. Choose the category based on what this dream actu
 uv run python scripts/cycle_close.py \
     --type dream \
     --category memory_consolidation \
-    --summary "<one-sentence description of what was processed>" \
+    --goal "Consolidate transcripts and update topics/learnings for <TODAY>" \
+    --summary "<one-sentence description of what was actually processed/updated>" \
     --actions "Processed pages <START>-<END> of <TOTAL>" \
               "Topics updated: <comma-separated slugs, or 'none'>" \
               "Learnings updated: <comma-separated slugs, or 'none'>"
@@ -192,8 +193,13 @@ uv run python scripts/cycle_close.py \
 uv run python scripts/cycle_close.py \
     --type dream \
     --category deep_sleep \
+    --goal "Run nightly dream consolidation for <TODAY> (<TZ>)" \
     --summary "Dream short-circuit: deep_sleep already set for <TODAY> (<TZ>). No transcript processing needed."
 ```
+
+`--goal` describes the *plan* for the dream cycle (what you set out to do).
+`--summary` describes the *outcome* (what was actually processed or why it short-circuited).
+They must differ — see `prompts/cycle-close.md` for the full rule.
 
 For completed batches, use a summary like:
 `"Dream processed pages 1-48 of 48 for 2026-04-28. Updated 3 topics, 2 learnings."`
