@@ -650,8 +650,9 @@ def test_format_outbox_msg_falls_back_to_json(patch_telegram_paths):
     assert "type" in out
 
 
-def test_format_outbox_msg_status_badge(patch_telegram_paths):
+def test_format_outbox_msg_info_has_no_badge(patch_telegram_paths):
     out = patch_telegram_paths._format_outbox_msg(
-        {"type": "status", "subject": "s", "content": "c"}
+        {"type": "info", "subject": "s", "content": "c"}
     )
-    assert "Status Report" in out
+    assert "Status Report" not in out
+    assert "ACTION REQUIRED" not in out

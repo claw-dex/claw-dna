@@ -872,7 +872,6 @@ def _format_outbox_msg(msg: dict) -> str:
         "needs_human": "🚨 *ACTION REQUIRED*",
         "goal_complete": "✅ *Goal Completed*",
         "goal_failed": "❌ *Goal Failed*",
-        "status": "📊 *Status Report*",
     }
     if msg_type in type_badges:
         lines.append(type_badges[msg_type])

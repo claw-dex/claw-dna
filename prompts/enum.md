@@ -156,18 +156,26 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 
 #### Outbox Types
 
+**Location:** `/agent/messages/outbox.json` (main agent + scripts) and `/agent/messages/external/<name>/outbox.json` (external agents via `POST /external-agent/write-outbox`)
+
 | Value | Meaning | When Used |
 |-------|---------|-----------|
-| `response` | Standard agent response | General updates, answers |
-| `needs_human` | Requires user action | Blocked on auth, payment, permissions (see `system.md` line 122) |
-| `goal_complete` | Goal completion notification | When goal status → `completed` |
-| `goal_failed` | Goal failure notification | When goal status → `failed` |
+| `response` | Standard reply / result for a request | General updates, answers, completed delegated work |
+| `needs_human` | Blocked; requires user action | Auth, payment, permissions, ambiguous task (see `system.md` line 122). Highlighted distinctly in the portal; external-agent entries with this type are mirrored into the main outbox so Telegram / WhatsApp / etc. pick them up |
+| `error` | Unrecoverable failure | Crash, unexpected exception, irrecoverable state |
+| `info` | Unsolicited status / FYI | Heartbeat-style updates and periodic status summaries; lowest priority |
 
 **Notes:**
 
+- The main outbox is **not** schema-validated by `services/shared.py:write_to_outbox` — types above are conventions recognized by display code (`app/commands_tab.py`, `app/shared.py`, `services/telegram_bridge.py`, `services/webhook/whatsapp_bridge_handler.py`). Other types still write, but render without an icon/badge.
+- The external-agent endpoint **strictly validates** to `("response", "needs_human", "error", "info")` via `_ALLOWED_OUTBOX_TYPES` in `services/external_agent_api.py:426`.
+- Sweeper forward priority (lower = more urgent): `needs_human` (2), `error` (3), `response` (4), `info` (5).
+- The sweeper forwards each external-agent outbox entry into the main inbox with the type prefixed `agent_` (`agent_response`, `agent_needs_human`, `agent_error`, `agent_info`) and `source: "external_agent"` — see the next subsection.
+
+**Inbox-side notes:**
+
 - Inbox messages with `type: goal` create persistent goal.json entries
 - `type: message` is conversational-only; always gets a response but no goal tracking
-- Outbox `needs_human` messages are highlighted distinctly in the portal
 - See `prompts/goal.md` for message handling rules
 
 #### External-Agent Inbox Source
@@ -395,7 +403,9 @@ Inbox items with `source: "external_agent"` are forwarded by `external_agent_api
 | `status` | Bash Log | `running`, `exited`, `completed`, `failed` | `logs/bash-*.json` |
 | `status` | Dream Remark | `light_sleep_dreaming`, `deep_sleep` | `dream/remark.json` |
 | `cycle_type` | Cycle | `goal`, `evolve`, `self-heal`, `dream` | `cycles.json`, `journal.json` |
-| `type` | Message | `goal`, `message`, `bash`, `needs_human`, `response`, `goal_complete`, `goal_failed` | `inbox.json`, `outbox.json`, `command_history.json` |
+| `type` | Inbox | `goal`, `message`, `bash` | `inbox.json`, `command_history.json` |
+| `type` | Outbox | `response`, `needs_human`, `error`, `info` | `outbox.json`, `messages/external/<name>/outbox.json` |
+| `type` | Forwarded Inbox (from external agent) | `agent_response`, `agent_needs_human`, `agent_error`, `agent_info` | `inbox.json` (with `source: "external_agent"`) |
 | `cycle_category` | Evolution | `reliability`, `observability`, `capability`, `efficiency`, `prompt_evolution`, `memory_consolidation`, `deep_sleep` | `cycles.json`, `journal.json` |
 | `category` | Capability | `core`, `memory`, `security`, `communication`, `observability`, `automation`, `portal` | `capabilities.json` |
 | `enabled` | Capability | `true`, `false` | `capabilities.json` |

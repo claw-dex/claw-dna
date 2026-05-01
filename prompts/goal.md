@@ -63,7 +63,9 @@ For each item in `<new_goals_to_start>`:
    set current_goal to null, status to "idle", and write journal entry
 3. If content starts with "status", generate a comprehensive status report:
    Read state.json, journal.json, goal.json and compile a summary of current
-   goal progress, blockers, and next steps. Write the report to outbox.
+   goal progress, blockers, and next steps. Write the report to outbox with
+   `type: "error"` if any blockers or errors are present; otherwise
+   `type: "info"`.
 4. Otherwise, treat it as a new goal:
    a. Check goal.json for duplicates (see Duplicate Detection below)
    b. If not a duplicate, add the goal entry to goal.json with status "pending"
@@ -85,8 +87,8 @@ For each item in `<new_goals_to_start>`:
    g. Execute all steps (or as much as fits in one cycle)
    h. Update `state.json` -> `current_goal` with the current goal/task in this format: `{goal-id} A short task description no more than 20 words` (concise and short)
    i. Write journal entry with plan and progress
-   j. **If goal is completed:** write a summary to `/agent/messages/outbox.json` so the user knows it's done and where to find results. Then read `/agent/prompts/post-goal-review.md` and add a Review line.
-   k. **If goal failed:** set status to "failed" in goal.json; write explanation to `outbox.json`; log failure in journal entry with diagnosis and prevention. If goal failed due to an action that requires human intervention, must set `needs_human` to true.
+   j. **If goal is completed:** write a summary to `/agent/messages/outbox.json` with `type: "response"` so the user knows it's done and where to find results. Then read `/agent/prompts/post-goal-review.md` and add a Review line.
+   k. **If goal failed:** set status to "failed" in goal.json; write explanation to `outbox.json` with `type: "error"` (or `type: "needs_human"` if recovery requires user action); log failure in journal entry with diagnosis and prevention.
 
 ### Multi-Step Goals (Requiring Multiple Specialist Prompts)
 
@@ -235,7 +237,7 @@ If a goal is too large for one cycle:
 
 ## End of Cycle
 
-Review `/agent/messages/outbox.json`, if no messages was written within this cycle, write a summary of what you accomplished in the outbox so the user has visibility into your progress.
+Review `/agent/messages/outbox.json`, if no messages was written within this cycle, write a summary of what you accomplished in the outbox with `type: "response"` (use `type: "needs_human"` if you stopped because of a blocker only a human can unblock e.g — auth, payment, ambiguous decision) so the user has visibility into your progress.
 Also update portal to show current goal progress if applicable.
 
 Before running cycle-close, get the current cycle number:

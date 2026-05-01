@@ -225,7 +225,17 @@ def cmd_setup(args) -> int:
         "do the work, then reply via "
         f"`curl -s -u {creds} -H 'X-Agent-Name: {name}' -H 'Content-Type: application/json' "
         f'-d \'{{"type":"response","subject":"...","content":"..."}}\' '
-        f"{base_url}/write-outbox` (type ∈ response|needs_human|error|info; subject+content non-empty). "
+        f"{base_url}/write-outbox`. "
+        "Outbox message schema (single object, or non-empty array of such objects): "
+        "`type` (required) is one of "
+        "`response` (normal reply / result for a request from the main agent), "
+        "`needs_human` (you are blocked and need a human to intervene), "
+        "`error` (you hit an unrecoverable failure while performing the task), "
+        "`info` (unsolicited status updates); "
+        "`subject` (required) is a non-empty short string summarising the message; "
+        "`content` (required) is a non-empty string with the full body / details "
+        "(use this for the actual answer, logs, error trace, or question for the human); "
+        "Body limit is 1 MB; for larger artefacts upload via POST /upload first and reference the path. "
         "On any 4xx, read the response's `readme` field and self-correct."
     )
 
