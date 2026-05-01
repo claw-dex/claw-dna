@@ -86,21 +86,21 @@ def test_write_safe_success(tmp_path):
 def test_check_orphaned_cycles_marks_stale(patched):
     old_start = "2020-01-01T00:00:00+00:00"
     cycles = [
-        {"cycle": 1, "status": "in_progress", "start": old_start},
-        {"cycle": 2, "status": "completed"},
+        {"cycle_number": 1, "cycle_status": "in_progress", "start": old_start},
+        {"cycle_number": 2, "cycle_status": "completed"},
     ]
     out, n = cs.check_orphaned_cycles(cycles, max_age_minutes=30)
     assert n == 1
-    assert out[0]["status"] == "interrupted"
+    assert out[0]["cycle_status"] == "interrupted"
     assert "interrupted_at" in out[0]
 
 
 def test_check_orphaned_cycles_keeps_recent(patched):
     recent = datetime.now(timezone.utc).isoformat()
-    cycles = [{"cycle": 1, "status": "in_progress", "start": recent}]
+    cycles = [{"cycle_number": 1, "cycle_status": "in_progress", "start": recent}]
     out, n = cs.check_orphaned_cycles(cycles, max_age_minutes=30)
     assert n == 0
-    assert out[0]["status"] == "in_progress"
+    assert out[0]["cycle_status"] == "in_progress"
 
 
 def test_error_age_hours_no_timestamp():
@@ -143,17 +143,17 @@ def test_summarize_cycles_empty():
 def test_summarize_cycles_with_data():
     cycles = [
         {
-            "type": "evolve",
-            "status": "completed",
+            "cycle_type": "evolve",
+            "cycle_status": "completed",
             "duration_seconds": 60,
-            "category": "efficiency",
+            "cycle_category": "efficiency",
         },
-        {"type": "goal", "status": "completed", "duration_seconds": 120},
+        {"cycle_type": "goal", "cycle_status": "completed", "duration_seconds": 120},
         {
-            "type": "evolve",
-            "status": "completed",
+            "cycle_type": "evolve",
+            "cycle_status": "completed",
             "duration_seconds": 90,
-            "category": "reliability",
+            "cycle_category": "reliability",
         },
     ]
     info = cs.summarize_cycles(cycles)
@@ -178,7 +178,7 @@ def test_compute_recency_boost_no_cycles():
 
 
 def test_compute_recency_boost_recent_pick():
-    cycles = [{"type": "evolve", "category": "efficiency"}]
+    cycles = [{"cycle_type": "evolve", "cycle_category": "efficiency"}]
     boost = cs._compute_recency_boost("efficiency", cycles)
     assert 0 <= boost <= 25
 
@@ -199,8 +199,16 @@ def test_compute_roi_bonus_no_history():
 
 def test_compute_roi_bonus_all_pass():
     cycles = [
-        {"type": "evolve", "category": "efficiency", "status": "completed"},
-        {"type": "evolve", "category": "efficiency", "status": "completed"},
+        {
+            "cycle_type": "evolve",
+            "cycle_category": "efficiency",
+            "cycle_status": "completed",
+        },
+        {
+            "cycle_type": "evolve",
+            "cycle_category": "efficiency",
+            "cycle_status": "completed",
+        },
     ]
     assert cs._compute_roi_bonus("efficiency", cycles) == 10
 
@@ -279,14 +287,14 @@ def test_auto_archive_journal_inlined(patched):
     (patched / "memory").mkdir(exist_ok=True)
     # Build a journal where entries 1..10 are >24h old AND >5 cycles before the
     # newest cycle (15), so they qualify for archival under the new rule.
-    old_ts = (
-        _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=48)
-    ).isoformat()
+    old_ts = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=48)).isoformat()
     fresh_ts = _dt.datetime.now(_dt.timezone.utc).isoformat()
     journal = [
-        {"cycle": i, "summary": f"c{i}", "timestamp": old_ts} for i in range(1, 11)
+        {"cycle_number": i, "summary": f"c{i}", "timestamp": old_ts}
+        for i in range(1, 11)
     ] + [
-        {"cycle": i, "summary": f"c{i}", "timestamp": fresh_ts} for i in range(11, 16)
+        {"cycle_number": i, "summary": f"c{i}", "timestamp": fresh_ts}
+        for i in range(11, 16)
     ]
     kept, n_archived, total = cs._auto_archive_journal_inlined(
         journal, min_keep=5, min_cycle_age=0

@@ -373,7 +373,7 @@ _MEMORY_FILE_LABELS = {
     "state.json": ("Agent State", "Core agent status, cycle number, last heartbeat"),
     "goal.json": ("Goals", "Pending / completed goals from user"),
     "journal.json": ("Journal (active)", "Recent cycle journal entries"),
-    "journal-archive.json": ("Journal (archive)", "Archived older journal entries"),
+    "journal_archive.json": ("Journal (archive)", "Archived older journal entries"),
     "cycles.json": ("Cycles", "Complete cycle history with durations"),
     "outbox.json": ("Outbox", "Pending messages for the user"),
     "outbox_history.json": ("Outbox History", "All past agent→user messages"),

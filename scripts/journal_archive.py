@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Archive old journal entries to keep journal.json lean.
 
-Moves entries older than --keep N cycles into journal-archive.json.
+Moves entries older than --keep N cycles into journal_archive.json.
 Keeps the active journal.json small for fast loading by cycle_start.py and the portal.
 
 Usage:
@@ -12,7 +12,7 @@ Usage:
   uv run python scripts/journal_archive.py --search Q  # search active + archive
   uv run python scripts/journal_archive.py --json      # output stats as JSON
 
-Archive: /agent/memory/journal-archive.json (sorted by cycle ascending)
+Archive: /agent/memory/journal_archive.json (sorted by cycle ascending)
 """
 
 import argparse
@@ -23,8 +23,18 @@ from pathlib import Path
 
 MEMORY_DIR = Path("/agent/memory")
 JOURNAL = MEMORY_DIR / "journal.json"
-ARCHIVE = MEMORY_DIR / "journal-archive.json"
+ARCHIVE = MEMORY_DIR / "journal_archive.json"
+LEGACY_ARCHIVE = MEMORY_DIR / "journal-archive.json"
 DEFAULT_KEEP = 20
+
+
+def _migrate_legacy_archive():
+    """One-shot rename of legacy hyphenated archive to underscored name."""
+    try:
+        if LEGACY_ARCHIVE.exists() and not ARCHIVE.exists():
+            LEGACY_ARCHIVE.rename(ARCHIVE)
+    except OSError:
+        pass
 
 
 def _load_json(path, default=None):
@@ -42,6 +52,9 @@ def _write_json_atomic(path, data):
 
 
 def cmd_archive(keep=DEFAULT_KEEP, dry_run=False):
+    from scripts.memory_repair import migrate_journal_list
+
+    _migrate_legacy_archive()
     entries = _load_json(JOURNAL, [])
     if not isinstance(entries, list):
         print("journal.json is not a list — aborting", file=sys.stderr)
@@ -50,7 +63,8 @@ def cmd_archive(keep=DEFAULT_KEEP, dry_run=False):
         print("Journal is empty — nothing to archive.")
         return 0
 
-    entries.sort(key=lambda e: e.get("cycle", 0))
+    migrate_journal_list(entries)
+    entries.sort(key=lambda e: e.get("cycle_number", 0))
     total = len(entries)
 
     if total <= keep:
@@ -63,11 +77,11 @@ def cmd_archive(keep=DEFAULT_KEEP, dry_run=False):
     print(f"Journal: {total} entries total")
     print(
         f"  Archive: {len(to_archive)} entries  "
-        f"(cycles {to_archive[0].get('cycle')}–{to_archive[-1].get('cycle')})"
+        f"(cycles {to_archive[0].get('cycle_number')}–{to_archive[-1].get('cycle_number')})"
     )
     print(
         f"  Keep:    {len(to_keep)} entries  "
-        f"(cycles {to_keep[0].get('cycle')}–{to_keep[-1].get('cycle')})"
+        f"(cycles {to_keep[0].get('cycle_number')}–{to_keep[-1].get('cycle_number')})"
     )
 
     if dry_run:
@@ -82,19 +96,23 @@ def cmd_archive(keep=DEFAULT_KEEP, dry_run=False):
     existing_archive = _load_json(ARCHIVE, [])
     if not isinstance(existing_archive, list):
         existing_archive = []
+    migrate_journal_list(existing_archive)
 
-    new_archive = sorted(existing_archive + to_archive, key=lambda e: e.get("cycle", 0))
+    new_archive = sorted(
+        existing_archive + to_archive, key=lambda e: e.get("cycle_number", 0)
+    )
 
     _write_json_atomic(ARCHIVE, new_archive)
     _write_json_atomic(JOURNAL, to_keep)
 
     print(f"\n✓ Archived {len(to_archive)} entries → {ARCHIVE}")
     print(f"  journal.json now has {len(to_keep)} entries (was {total})")
-    print(f"  journal-archive.json now has {len(new_archive)} entries total")
+    print(f"  journal_archive.json now has {len(new_archive)} entries total")
     return len(to_archive)
 
 
 def cmd_list():
+    _migrate_legacy_archive()
     active = _load_json(JOURNAL, [])
     archive = _load_json(ARCHIVE, [])
 
@@ -109,10 +127,10 @@ def cmd_list():
     print(f"{'journal.json':<35} {active_count:>8}  {journal_size // 1024:>7} KB")
     if ARCHIVE.exists():
         print(
-            f"{'journal-archive.json':<35} {archive_count:>8}  {archive_size // 1024:>7} KB"
+            f"{'journal_archive.json':<35} {archive_count:>8}  {archive_size // 1024:>7} KB"
         )
     else:
-        print(f"{'journal-archive.json':<35} {'—':>8}  {'(not created)':>12}")
+        print(f"{'journal_archive.json':<35} {'—':>8}  {'(not created)':>12}")
     print("-" * 55)
     total = active_count + archive_count
     total_size = journal_size + archive_size
@@ -127,15 +145,17 @@ def cmd_list():
 
 
 def cmd_search(query):
+    from scripts.memory_repair import migrate_journal_list
+
+    _migrate_legacy_archive()
     q = query.lower()
     results = []
 
     def matches(entry):
         text = " ".join(
             [
-                str(entry.get("goal", "")),
+                str(entry.get("cycle_goal", "")),
                 str(entry.get("summary", "")),
-                str(entry.get("outcome", "")),
                 " ".join(entry.get("actions", [])),
             ]
         ).lower()
@@ -143,17 +163,19 @@ def cmd_search(query):
 
     active = _load_json(JOURNAL, [])
     if isinstance(active, list):
+        migrate_journal_list(active)
         for e in active:
             if matches(e):
                 results.append(("active", e))
 
     archived = _load_json(ARCHIVE, [])
     if isinstance(archived, list):
+        migrate_journal_list(archived)
         for e in archived:
             if matches(e):
                 results.append(("archive", e))
 
-    results.sort(key=lambda r: r[1].get("cycle", 0))
+    results.sort(key=lambda r: r[1].get("cycle_number", 0))
 
     if not results:
         print(f"No results for '{query}' in active journal or archive.")
@@ -162,13 +184,14 @@ def cmd_search(query):
     print(f"Found {len(results)} result(s) for '{query}':\n")
     for source, e in results:
         tag = "[archived]" if source == "archive" else "[active]  "
-        cycle = e.get("cycle", "?")
+        cycle = e.get("cycle_number", "?")
         ts = e.get("timestamp", "")[:10]
-        goal = (e.get("goal", "") or e.get("summary", ""))[:80]
+        goal = (e.get("cycle_goal", "") or e.get("summary", ""))[:80]
         print(f"  {tag}  Cycle {str(cycle):>3}  {ts}  {goal}")
 
 
 def cmd_json(keep=DEFAULT_KEEP):
+    _migrate_legacy_archive()
     active = _load_json(JOURNAL, [])
     archive = _load_json(ARCHIVE, [])
     active_count = len(active) if isinstance(active, list) else 0

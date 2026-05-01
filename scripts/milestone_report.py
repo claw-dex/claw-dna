@@ -47,11 +47,21 @@ def _load_json(path, default=None):
 
 
 def _load_state():
-    return _load_json(MEMORY_DIR / "state.json", {})
+    from scripts.memory_repair import migrate_state_dict
+
+    state = _load_json(MEMORY_DIR / "state.json", {})
+    if isinstance(state, dict):
+        migrate_state_dict(state)
+    return state
 
 
 def _load_cycles():
-    return _load_json(MEMORY_DIR / "cycles.json", [])
+    from scripts.memory_repair import migrate_cycles_list
+
+    cycles = _load_json(MEMORY_DIR / "cycles.json", [])
+    if isinstance(cycles, list):
+        migrate_cycles_list(cycles)
+    return cycles
 
 
 def _load_goals():
@@ -75,7 +85,12 @@ def _load_capabilities():
 
 
 def _load_journal():
-    return _load_json(MEMORY_DIR / "journal.json", [])
+    from scripts.memory_repair import migrate_journal_list
+
+    journal = _load_json(MEMORY_DIR / "journal.json", [])
+    if isinstance(journal, list):
+        migrate_journal_list(journal)
+    return journal
 
 
 def _load_notes():
@@ -116,7 +131,7 @@ def _cycles_up_to(cycles, cycle_num):
     result = []
     for c in cycles:
         try:
-            if int(c.get("cycle", 0)) <= cycle_num:
+            if int(c.get("cycle_number", 0)) <= cycle_num:
                 result.append(c)
         except (ValueError, TypeError):
             pass
@@ -177,19 +192,19 @@ def build_report(
 ):
     """Build milestone report data for a given target cycle number."""
     subset = _cycles_up_to(all_cycles, target_cycle)
-    completed = [c for c in subset if c.get("status") == "completed"]
+    completed = [c for c in subset if c.get("cycle_status") == "completed"]
 
     # Type breakdown
     type_counts = {}
     for c in completed:
-        t = c.get("type", "unknown")
+        t = c.get("cycle_type", "unknown")
         type_counts[t] = type_counts.get(t, 0) + 1
 
     # Category breakdown (evolve cycles only)
     cat_counts = {}
     for c in completed:
-        if c.get("type") == "evolve":
-            cat = c.get("category", "")
+        if c.get("cycle_type") == "evolve":
+            cat = c.get("cycle_category", "")
             if cat:
                 cat_counts[cat] = cat_counts.get(cat, 0) + 1
 
@@ -242,7 +257,7 @@ def build_report(
     window_low = max(1, target_cycle - 9)
     for je in journal_entries:
         try:
-            cn = int(je.get("cycle", 0))
+            cn = int(je.get("cycle_number", 0))
         except (ValueError, TypeError):
             continue
         if window_low <= cn <= target_cycle:
@@ -251,8 +266,8 @@ def build_report(
                 highlights.append(
                     {
                         "cycle": cn,
-                        "type": je.get("type", ""),
-                        "category": je.get("category", ""),
+                        "type": je.get("cycle_type", ""),
+                        "category": je.get("cycle_category", ""),
                         "summary": summary[:120],
                     }
                 )
@@ -440,7 +455,7 @@ def main():
         print(f"Milestone cycles (every {MILESTONE_INTERVAL}):")
         for m in milestones:
             subset = _cycles_up_to(all_cycles, m)
-            completed = len([c for c in subset if c.get("status") == "completed"])
+            completed = len([c for c in subset if c.get("cycle_status") == "completed"])
             print(f"  Cycle {m:4d} — {completed} completed cycles in range")
         return 0
 

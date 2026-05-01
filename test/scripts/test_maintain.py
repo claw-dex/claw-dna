@@ -24,7 +24,7 @@ def patched(monkeypatch, agent_root):
     monkeypatch.setattr(maintain, "WORKSPACE_DIR", workspace)
     monkeypatch.setattr(maintain, "SCRIPTS_DIR", scripts)
     monkeypatch.setattr(maintain, "JOURNAL_PATH", memory / "journal.json")
-    monkeypatch.setattr(maintain, "JOURNAL_ARCHIVE", memory / "journal-archive.json")
+    monkeypatch.setattr(maintain, "JOURNAL_ARCHIVE", memory / "journal_archive.json")
     monkeypatch.setattr(maintain, "LOGS_DIR", logs)
     return agent_root
 

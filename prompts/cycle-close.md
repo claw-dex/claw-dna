@@ -1,6 +1,6 @@
 # Cycle Close Checklist
 
-> **Enum Reference:** See `prompts/enum.md` for all valid values of `type`, `category`, `status`, and other enum fields.
+> **Enum Reference:** See `prompts/enum.md` for all valid values of `cycle_type`, `cycle_category`, `cycle_status`, `agent_status`, and other enum fields.
 
 Run this checklist at the end of every cycle, regardless of cycle type.
 
@@ -43,10 +43,10 @@ uv run python scripts/cycle_close.py \
 
 **One command handles all of this** — do NOT do any of these by hand:
 
-- creates / updates the `cycles.json` entry (start, end, duration, status, summary, type, category)
-- normalizes legacy cycles.json fields (`timestamp`→`start`, `goal`→`summary`)
-- updates `state.json` (`cycle_number`, `status`, `current_goal`, `last_cycle_summary`, `last_cycle_end`, …)
-- appends the `journal.json` entry (cycle, timestamp, status, type, category, goal, actions, summary)
+- creates / updates the `cycles.json` entry (start, end, duration, cycle_status, cycle_type, cycle_category, cycle_goal)
+- normalizes legacy cycles.json fields (`timestamp`→`start`; `cycle`/`status`/`type`/`category`/`goal` → `cycle_number`/`cycle_status`/`cycle_type`/`cycle_category`/`cycle_goal`; drops legacy `summary` from cycle records)
+- updates `state.json` (`cycle_number`, `agent_status` → `idle`, `last_cycle_summary`; clears `current_goal`)
+- appends the `journal.json` entry (cycle_number, timestamp, cycle_status, cycle_type, cycle_category, cycle_goal, actions, summary)
 - archives `outbox.json` and clears it
 - runs `memory_backup.py` if the last backup is >1h old
 - runs the stale-count check (tabs / tests / scripts vs AGENTS.md and prompts)
@@ -55,11 +55,19 @@ uv run python scripts/cycle_close.py \
 
 ### Notes on `--goal`
 
-- The planned goal is normally read from the in-progress cycle entry — set by
-  `cycle_start.py --goal "..."` (goal mode) or by patching `cycles.json` after picking
-  the category (evolve mode). When present there, **omit `--goal`** at close.
-- Pass `--goal "..."` only if (a) no goal was recorded at start, or (b) the actual work
-  diverged from the planned goal.
+- The planned cycle goal lives on the cycle record under `cycle_goal` (set by
+  `cycle_start.py --goal "..."`, or patched into `cycles.json` mid-cycle for
+  evolve mode after picking the category). `cycle_close.py` reads it from
+  there when writing the journal entry, so **omit `--goal` at close** when
+  `cycle_goal` is already correct.
+- Pass `--goal "..."` at close only when (a) no `cycle_goal` was recorded at
+  start, or (b) the actual work diverged from the planned goal and you want
+  the journal entry to reflect the final plan. Explicit `--goal` overrides
+  whatever `cycle_goal` says.
+- `state.current_goal` is the *active sub-task* — the agent may rewrite it
+  mid-cycle as it picks up tasks. `cycle_close.py` does NOT read it; the
+  journal records `cycle_goal` (the planned cycle goal), not whatever was
+  in flight at close time.
 - **Never copy `--summary` into `--goal`.** Goal = the plan; summary = the outcome.
   They must differ. Omitting `--goal` is preferable to duplicating the summary.
 
@@ -120,9 +128,11 @@ documented here only so you can reconstruct an entry by hand if `cycle_close.py`
 unavailable (broken script, missing dependency, etc.). **Do not run these snippets in a
 normal close — they will conflict with `cycle_close.py`.**
 
-- **`/agent/memory/cycles.json`** — list of `{cycle, start, end, duration_seconds, type, status, summary}`
-  plus `category` for evolve/dream cycles.
-- **`/agent/memory/state.json`** — `{cycle_number, status, current_goal, goal_status, last_cycle_summary, last_cycle_end, last_cycle_type}`.
-- **`/agent/memory/journal.json`** — append `{cycle, timestamp, status, type, category?, goal?, actions, summary}`.
+- **`/agent/memory/cycles.json`** — list of `{cycle_number, start, end, duration_seconds, cycle_type, cycle_status, cycle_goal?}`
+  plus `cycle_category` for evolve/dream cycles. `cycle_goal` is the planned goal recorded by
+  `cycle_start.py`; `summary` lives on `journal.json`, not here.
+- **`/agent/memory/state.json`** — `{cycle_number, agent_status, current_goal, last_cycle_summary, last_heartbeat, last_cycle_run, services}`. `current_goal` is the dynamic in-flight sub-task (cleared at close, repopulated mid-cycle by the agent).
+- **`/agent/memory/journal.json`** — append `{cycle_number, timestamp, cycle_status, cycle_type, cycle_category?, cycle_goal?, actions, summary}`.
   Use `summary` (not `outcome`) — `cycle_start.py` reads `summary` when rendering the briefing.
-  Omit `category` for `goal` and `self-heal`. Omit `goal` if no plan was recorded — never duplicate `summary`.
+  Omit `cycle_category` for `goal` and `self-heal`. `cycle_goal` is filled from `cycle_goal` on the
+  cycle record (or from explicit `--goal` at close, which overrides). Never duplicate `summary`.

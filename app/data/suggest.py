@@ -33,7 +33,7 @@ def load_suggest():
     goal_path = GOALS_PATH
     inbox_path = os.path.join(MESSAGES_DIR, "inbox.json")
     jour_path = os.path.join(MEMORY_DIR, "journal.json")
-    arch_path = os.path.join(MEMORY_DIR, "journal-archive.json")
+    arch_path = os.path.join(MEMORY_DIR, "journal_archive.json")
     err_path = ERROR_LOG_PATH
     cyc_path = os.path.join(MEMORY_DIR, "cycles.json")
     ws_path = os.path.join(AGENT_DIR, "workspace")
@@ -130,11 +130,13 @@ def load_suggest():
         cycles = load_cycles()
         if isinstance(cycles, list):
             evolve_cycles = [
-                c for c in cycles if c.get("type") == "evolve" and c.get("category")
+                c
+                for c in cycles
+                if c.get("cycle_type") == "evolve" and c.get("cycle_category")
             ]
             categories = {}
             for c in evolve_cycles:
-                cat = c["category"]
+                cat = c["cycle_category"]
                 categories[cat] = categories.get(cat, 0) + 1
             all_cats = [
                 "reliability",

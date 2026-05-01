@@ -28,11 +28,13 @@ def test_normalize_legacy_timestamp_to_start():
     assert n >= 1
 
 
-def test_normalize_legacy_goal_to_summary():
+def test_normalize_legacy_goal_to_cycle_goal():
     entry = {"goal": "did stuff", "start": "2026-04-01"}
     out, n = cc._normalize_cycle_entry(entry)
-    assert out["summary"] == "did stuff"
+    assert out["cycle_goal"] == "did stuff"
     assert "goal" not in out
+    # summary is stripped from cycle records (lives on journal.json now)
+    assert "summary" not in out
 
 
 def test_normalize_computes_duration():
@@ -46,13 +48,15 @@ def test_normalize_computes_duration():
 
 def test_normalize_adds_default_status_and_type():
     out, _ = cc._normalize_cycle_entry({})
-    assert out["status"] == "completed"
-    assert out["type"] == "evolve"
+    assert out["cycle_status"] == "completed"
+    assert out["cycle_type"] == "evolve"
 
 
 def test_normalize_cycle_int_conversion():
     out, _ = cc._normalize_cycle_entry({"cycle": "5"})
-    assert out["cycle"] == 5
+    # legacy "cycle" key gets renamed to "cycle_number" and coerced to int
+    assert out["cycle_number"] == 5
+    assert "cycle" not in out
 
 
 # ── _parse_iso ─────────────────────────────────────────────────────────────
@@ -171,7 +175,18 @@ def test_now_iso():
 
 def test_run_normalize_inlined_no_changes(tmp_path):
     p = tmp_path / "cycles.json"
-    p.write_text(json.dumps([{"cycle": 1, "status": "completed", "type": "evolve"}]))
+    # Already on the current schema — normalize should be a no-op.
+    p.write_text(
+        json.dumps(
+            [
+                {
+                    "cycle_number": 1,
+                    "cycle_status": "completed",
+                    "cycle_type": "evolve",
+                }
+            ]
+        )
+    )
     n = cc._run_normalize_inlined(p)
     assert n == 0
 

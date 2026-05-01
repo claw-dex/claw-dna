@@ -14,10 +14,14 @@ from app.shared import MEMORY_DIR
 
 @_mfile_cache(
     lambda: f"{MEMORY_DIR}/state.json",
-    lambda: {"status": "awaiting_first_heartbeat", "cycle_number": 0},
+    lambda: {"agent_status": "awaiting_first_heartbeat", "cycle_number": 0},
 )
 def load_state(data):
     """Load state.json — mtime-cached, invalidates on every heartbeat write."""
+    from scripts.memory_repair import migrate_state_dict
+
+    if isinstance(data, dict):
+        migrate_state_dict(data)
     return data
 
 

@@ -22,7 +22,7 @@ Exit codes: 0 = healthy, 1 = memory issues found (check output).
 Enum Reference: See prompts/enum.md for agent status values and other enums.
 
 Added in cycle 14 (efficiency): replaces two separate uv run invocations at cycle start.
-Enhanced in cycle 129 (efficiency): inlined journal-archive logic — saves ~1.5s uv-run startup when auto-archive triggers (every ~5 cycles).
+Enhanced in cycle 129 (efficiency): inlined journal_archive logic — saves ~1.5s uv-run startup when auto-archive triggers (every ~5 cycles).
 """
 
 import json
@@ -49,9 +49,6 @@ CLEAR_OLD_ERRORS = "--clear-old-errors" in args
 CLEAR_ALL_ERRORS = (
     "--clear-all-errors" in args
 )  # purge ALL errors (use when fix is confirmed)
-EVOLVE_MODE = "--mode" in args and args[
-    args.index("--mode") + 1 : args.index("--mode") + 2
-] == ["evolve"]
 
 
 def _arg_value(name: str):
@@ -62,6 +59,12 @@ def _arg_value(name: str):
             return args[idx + 1]
     return None
 
+
+# `--mode` accepts: goal | evolve | self-heal | dream. Used both to drive the
+# evolve recommendation section and to seed `cycle_type` on the in-progress
+# cycle record so anything reading c.get("cycle_type") mid-cycle gets a real value.
+MODE = _arg_value("--mode")
+EVOLVE_MODE = MODE == "evolve"
 
 GOAL = _arg_value("--goal")
 
@@ -145,21 +148,27 @@ def _auto_archive_journal_inlined(
     Returns (journal_reloaded, n_archived, archived_total) tuple.
     """
     JOURNAL_PATH = MEMORY / "journal.json"
-    ARCHIVE_PATH = MEMORY / "journal-archive.json"
-    entries = sorted(journal, key=lambda e: e.get("cycle", 0))
+    ARCHIVE_PATH = MEMORY / "journal_archive.json"
+    LEGACY_ARCHIVE_PATH = MEMORY / "journal-archive.json"
+    if LEGACY_ARCHIVE_PATH.exists() and not ARCHIVE_PATH.exists():
+        try:
+            LEGACY_ARCHIVE_PATH.rename(ARCHIVE_PATH)
+        except OSError:
+            pass
+    entries = sorted(journal, key=lambda e: e.get("cycle_number", 0))
     total = len(entries)
     if total <= min_keep:
         existing = load_json(ARCHIVE_PATH)
         existing_list = existing if isinstance(existing, list) else []
         return journal, 0, len(existing_list)
 
-    current_cycle = max((e.get("cycle", 0) or 0) for e in entries)
+    current_cycle = max((e.get("cycle_number", 0) or 0) for e in entries)
     cutoff_dt = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
         hours=max_age_hours
     )
 
     def _is_archivable(e: dict) -> bool:
-        cyc = e.get("cycle", 0) or 0
+        cyc = e.get("cycle_number", 0) or 0
         if current_cycle - cyc <= min_cycle_age:
             return False
         ts_str = e.get("timestamp", "")
@@ -178,21 +187,27 @@ def _auto_archive_journal_inlined(
         if i >= archivable_limit:
             break
         if _is_archivable(e):
-            archive_cycles.add(e.get("cycle"))
+            archive_cycles.add(e.get("cycle_number"))
 
     if not archive_cycles:
         existing = load_json(ARCHIVE_PATH)
         existing_list = existing if isinstance(existing, list) else []
         return journal, 0, len(existing_list)
 
-    to_archive = [e for e in entries if e.get("cycle") in archive_cycles]
-    to_keep = [e for e in entries if e.get("cycle") not in archive_cycles]
-    # Merge with existing archive (deduplicate by cycle number)
+    to_archive = [e for e in entries if e.get("cycle_number") in archive_cycles]
+    to_keep = [e for e in entries if e.get("cycle_number") not in archive_cycles]
+    # Merge with existing archive (deduplicate by cycle number). Migrate the
+    # archive in place so the legacy "cycle" key is rewritten to "cycle_number".
+    from scripts.memory_repair import migrate_journal_list
+
     existing = load_json(ARCHIVE_PATH)
     existing_list = existing if isinstance(existing, list) else []
-    existing_cycles = {e.get("cycle") for e in existing_list}
-    new_entries = [e for e in to_archive if e.get("cycle") not in existing_cycles]
-    merged = sorted(existing_list + new_entries, key=lambda e: e.get("cycle", 0))
+    migrate_journal_list(existing_list)
+    existing_cycles = {e.get("cycle_number") for e in existing_list}
+    new_entries = [
+        e for e in to_archive if e.get("cycle_number") not in existing_cycles
+    ]
+    merged = sorted(existing_list + new_entries, key=lambda e: e.get("cycle_number", 0))
     # Write atomically
     ok_archive = _write_safe(ARCHIVE_PATH, merged)
     ok_journal = _write_safe(JOURNAL_PATH, to_keep)
@@ -213,7 +228,7 @@ def check_orphaned_cycles(cycles: list, max_age_minutes: int = 30) -> tuple:
     now = datetime.datetime.now(datetime.timezone.utc)
     interrupted = 0
     for c in cycles:
-        if c.get("status") != "in_progress":
+        if c.get("cycle_status") != "in_progress":
             continue
         start_str = c.get("start", "")
         if not start_str:
@@ -222,7 +237,7 @@ def check_orphaned_cycles(cycles: list, max_age_minutes: int = 30) -> tuple:
             start = datetime.datetime.fromisoformat(start_str.replace("Z", "+00:00"))
             age_min = (now - start).total_seconds() / 60
             if age_min > max_age_minutes:
-                c["status"] = "interrupted"
+                c["cycle_status"] = "interrupted"
                 c["interrupted_at"] = now.isoformat()
                 interrupted += 1
         except Exception:
@@ -236,7 +251,14 @@ def check_orphaned_cycles(cycles: list, max_age_minutes: int = 30) -> tuple:
 
 
 def load_all():
+    from scripts.memory_repair import (
+        migrate_cycles_list,
+        migrate_journal_list,
+        migrate_state_dict,
+    )
+
     state = load_json(MEMORY / "state.json") or {}
+    migrate_state_dict(state)
     goals_raw = load_json(MEMORY / "goal.json")
     goals = (
         goals_raw
@@ -244,13 +266,15 @@ def load_all():
         else (goals_raw.get("goals", []) if isinstance(goals_raw, dict) else [])
     )
     cycles = load_json(MEMORY / "cycles.json") or []
+    migrate_cycles_list(cycles)
     journal = load_json(MEMORY / "journal.json") or []
+    migrate_journal_list(journal)
     inbox = load_json(MESSAGES / "inbox.json")
     server_errors_raw = load_json(MEMORY / "server_errors.json")
     server_errors = server_errors_raw if isinstance(server_errors_raw, list) else []
 
-    # Compute failures from journal entries with status=failed (replaces failures.json)
-    failures = [e for e in journal if e.get("status") == "failed"]
+    # Compute failures from journal entries with cycle_status=failed (replaces failures.json)
+    failures = [e for e in journal if e.get("cycle_status") == "failed"]
 
     # Load capabilities from memory file
     capabilities_raw = load_json(MEMORY / "capabilities.json")
@@ -318,11 +342,13 @@ def auto_archive_old_errors(
 
 
 def summarize_cycles(cycles):
-    by_type = Counter(c.get("type", "unknown") for c in cycles)
-    evolve = [c for c in cycles if c.get("type") == "evolve"]
-    by_cat = Counter(c.get("category", "unknown") for c in evolve)
+    by_type = Counter(c.get("cycle_type", "unknown") for c in cycles)
+    evolve = [c for c in cycles if c.get("cycle_type") == "evolve"]
+    by_cat = Counter(c.get("cycle_category", "unknown") for c in evolve)
     completed = [
-        c for c in cycles if c.get("status") == "completed" and "duration_seconds" in c
+        c
+        for c in cycles
+        if c.get("cycle_status") == "completed" and "duration_seconds" in c
     ]
     avg_dur = (
         sum(c["duration_seconds"] for c in completed) / len(completed)
@@ -412,11 +438,11 @@ def _compute_recency_boost(cat: str, cycles: list) -> int:
     if not cycles:
         return 25
     evolve_cycles = [
-        c for c in cycles if c.get("type") == "evolve" and c.get("category")
+        c for c in cycles if c.get("cycle_type") == "evolve" and c.get("cycle_category")
     ]
     # Walk backwards to find last occurrence
     for i, c in enumerate(reversed(evolve_cycles)):
-        if c.get("category") == cat:
+        if c.get("cycle_category") == cat:
             return min(25, i * 5)
     return 25  # never done
 
@@ -438,10 +464,12 @@ def _compute_goal_alignment(cat: str, goals: list) -> int:
 def _compute_roi_bonus(cat: str, cycles: list) -> int:
     """0-10: historical success rate for this category."""
     cat_cycles = [
-        c for c in cycles if c.get("type") == "evolve" and c.get("category") == cat
+        c
+        for c in cycles
+        if c.get("cycle_type") == "evolve" and c.get("cycle_category") == cat
     ]
-    completed = sum(1 for c in cat_cycles if c.get("status") == "completed")
-    failed = sum(1 for c in cat_cycles if c.get("status") == "failed")
+    completed = sum(1 for c in cat_cycles if c.get("cycle_status") == "completed")
+    failed = sum(1 for c in cat_cycles if c.get("cycle_status") == "failed")
     total = completed + failed
     if total == 0:
         return 5  # neutral
@@ -1010,7 +1038,7 @@ def print_full(
     # ── Journal Auto-Archive ────────────────────────────────────────
     # Auto-archive only entries that are BOTH >24h old AND >100 cycles in the past.
     # Always retain at least 100 entries in the active journal so recent context
-    # stays in-format. Anything outside both windows is moved to journal-archive.json.
+    # stays in-format. Anything outside both windows is moved to journal_archive.json.
     AUTO_ARCHIVE_THRESHOLD = 100
     if len(journal) > AUTO_ARCHIVE_THRESHOLD:
         try:
@@ -1062,16 +1090,16 @@ def print_full(
     # Full content of every active journal entry (no truncation). Timestamps are
     # rendered as human-readable relative durations (e.g. "15m ago", "2h ago").
     if journal:
-        sorted_journal = sorted(journal, key=lambda x: x.get("cycle", 0))
+        sorted_journal = sorted(journal, key=lambda x: x.get("cycle_number", 0))
         recent = sorted_journal[-10:]
         print(
             f"\n[SHORT-TERM MEMORY]  showing {len(recent)} of {len(journal)} journal entries:"
         )
         for e in recent:
-            cyc = e.get("cycle", "?")
-            status = e.get("status", "?")
-            etype = e.get("type", "?")
-            goal = e.get("goal", "")
+            cyc = e.get("cycle_number", "?")
+            status = e.get("cycle_status", "?")
+            etype = e.get("cycle_type", "?")
+            goal = e.get("cycle_goal", "")
             actions = e.get("actions") or e.get("action") or []
             if isinstance(actions, str):
                 actions = [actions]
@@ -1223,8 +1251,8 @@ def print_json_output(
                 "generated_at": now_iso(),
                 "repair": repair,
                 "state": {
-                    "cycle": state.get("cycle_number"),
-                    "status": state.get("status"),
+                    "cycle_number": state.get("cycle_number"),
+                    "agent_status": state.get("agent_status"),
                     "last_heartbeat": state.get("last_heartbeat"),
                     "last_cycle_summary": state.get("last_cycle_summary", ""),
                 },
@@ -1243,15 +1271,15 @@ def print_json_output(
                 "recent_failures": [str(f.get("summary", f)) for f in failures[-3:]],
                 "recent_journal": [
                     {
-                        "cycle": e.get("cycle"),
+                        "cycle_number": e.get("cycle_number"),
                         "when": (
                             ago(e.get("timestamp", ""))
                             if e.get("timestamp")
                             else "unknown"
                         ),
-                        "status": e.get("status"),
-                        "type": e.get("type"),
-                        "goal": e.get("goal", ""),
+                        "cycle_status": e.get("cycle_status"),
+                        "cycle_type": e.get("cycle_type"),
+                        "cycle_goal": e.get("cycle_goal", ""),
                         "actions": (
                             [e.get("action")]
                             if isinstance(e.get("action"), str)
@@ -1259,7 +1287,9 @@ def print_json_output(
                         ),
                         "summary": e.get("summary", ""),
                     }
-                    for e in sorted(journal, key=lambda x: x.get("cycle", 0))[-10:]
+                    for e in sorted(journal, key=lambda x: x.get("cycle_number", 0))[
+                        -10:
+                    ]
                 ],
                 "capabilities_count": capabilities.get("total", 0),
                 "evolve_suggestion": suggested,
@@ -1305,7 +1335,7 @@ def main():
     # Guard: refuse to create a new cycle if there's already a recent in-progress cycle.
     # This prevents the agent from creating overlapping cycles within a single heartbeat.
     active_in_progress = [
-        c for c in cycles if c.get("status") == "in_progress" and c.get("start")
+        c for c in cycles if c.get("cycle_status") == "in_progress" and c.get("start")
     ]
     if active_in_progress:
         latest_ip = active_in_progress[-1]
@@ -1322,32 +1352,34 @@ def main():
             # There's a recent in-progress cycle — this is a duplicate cycle-start call
             if not JSON_MODE:
                 print(
-                    f"[CYCLE START]  ⚠ Cycle {latest_ip.get('cycle')} already in-progress "
+                    f"[CYCLE START]  ⚠ Cycle {latest_ip.get('cycle_number')} already in-progress "
                     f"({age_min:.0f}m ago). Skipping duplicate registration."
                 )
                 print(
                     f"               ONE cycle per heartbeat — do not run cycle_start.py again."
                 )
             # Still continue with briefing output, just don't create a new entry
-            cycle_number = latest_ip.get("cycle", 1)
+            cycle_number = latest_ip.get("cycle_number", 1)
         else:
             # Old in-progress cycle (>30m) — already handled by check_orphaned_cycles above
             state_cycle = state.get("cycle_number")
             if state_cycle is not None and isinstance(state_cycle, int):
                 cycle_number = state_cycle + 1
             elif cycles:
-                cycle_number = max(c.get("cycle", 0) for c in cycles) + 1
+                cycle_number = max(c.get("cycle_number", 0) for c in cycles) + 1
             else:
                 cycle_number = 1
-            existing = any(c.get("cycle") == cycle_number for c in cycles)
+            existing = any(c.get("cycle_number") == cycle_number for c in cycles)
             if not existing:
                 cycle_record = {
-                    "cycle": cycle_number,
+                    "cycle_number": cycle_number,
                     "start": now_iso(),
-                    "status": "in_progress",
+                    "cycle_status": "in_progress",
                 }
+                if MODE:
+                    cycle_record["cycle_type"] = MODE
                 if GOAL:
-                    cycle_record["goal"] = GOAL
+                    cycle_record["cycle_goal"] = GOAL
                 cycles.append(cycle_record)
                 _write_safe(MEMORY / "cycles.json", cycles)
                 if not JSON_MODE:
@@ -1360,25 +1392,27 @@ def main():
         if state_cycle is not None and isinstance(state_cycle, int):
             cycle_number = state_cycle + 1
         elif cycles:
-            cycle_number = max(c.get("cycle", 0) for c in cycles) + 1
+            cycle_number = max(c.get("cycle_number", 0) for c in cycles) + 1
         else:
             cycle_number = 1
-        existing = any(c.get("cycle") == cycle_number for c in cycles)
+        existing = any(c.get("cycle_number") == cycle_number for c in cycles)
         if not existing:
             cycle_record = {
-                "cycle": cycle_number,
+                "cycle_number": cycle_number,
                 "start": now_iso(),
-                "status": "in_progress",
+                "cycle_status": "in_progress",
             }
+            if MODE:
+                cycle_record["cycle_type"] = MODE
             if GOAL:
-                cycle_record["goal"] = GOAL
+                cycle_record["cycle_goal"] = GOAL
             cycles.append(cycle_record)
             _write_safe(MEMORY / "cycles.json", cycles)
             if not JSON_MODE:
                 print(f"[CYCLE START]  Registered cycle {cycle_number} as in-progress")
 
-    # Always set status to "running" at cycle start
-    state["status"] = "running"
+    # Always set agent_status to "running" at cycle start
+    state["agent_status"] = "running"
     _write_safe(MEMORY / "state.json", state)
 
     cycles_info = summarize_cycles(cycles)

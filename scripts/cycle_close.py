@@ -4,7 +4,7 @@ cycle_close.py — One-command cycle close automation.
 
 Automates the repetitive boilerplate from cycle-close.md:
   1. Marks the in-progress cycles.json entry as completed (computes duration)
-  2. Updates state.json (cycle_number, status, last_cycle_summary, last_cycle_type)
+  2. Updates state.json (cycle_number, status, last_cycle_summary; clears current_goal)
   3. Appends a journal entry to journal.json
   4. Normalizes cycles.json schema (inlined — no subprocess)
   5. Archives inbox.json items to inbox_history.json, then clears inbox.json
@@ -39,9 +39,11 @@ Optional flags:
                             (memory_consolidation and deep_sleep are dream-only)
     --actions TEXT…       One or more action strings (space-separated, each in quotes)
     --status STATUS       Cycle status: completed | failed (default: completed)
-    --goal TEXT           What you set out to do (defaults to the goal recorded by
-                          cycle_start.py on the in-progress cycle entry; omitted
-                          from the journal entry if neither is set)
+    --goal TEXT           What you set out to do. Defaults to `cycle_goal` on
+                          the in-progress cycle entry (set by cycle_start.py).
+                          Pass explicitly to override what cycle_start recorded.
+                          state.current_goal is the dynamic in-flight task and
+                          is NOT consulted here.
     --no-normalize        Skip cycles.json normalization after writing
     --dry-run             Print what would be written, but write nothing
 
@@ -49,7 +51,7 @@ Exit codes: 0 = success, 1 = error (missing required args, write failure)
 
 Added in cycle 24 (efficiency): replaces manual Python one-liners at end of every cycle.
 Enhanced in cycle 66 (efficiency): fixed python3→uv run python.
-Enhanced in cycle 79 (efficiency): stub start uses state.last_heartbeat for accurate durations.
+Enhanced in cycle 79 (efficiency): stub start uses state.last_cycle_run (with last_heartbeat fallback) for accurate durations.
 Enhanced in cycle 86 (efficiency): --cycle is now optional (auto-detected from state.json).
 Enhanced in cycle 114 (prompt_evolution): auto stale-count check runs every cycle — warns when
     tab count, test count, or script count in AGENTS.md/prompts diverges from actual values.
@@ -82,12 +84,18 @@ SCRIPTS = Path("/agent/scripts")
 def _normalize_cycle_entry(entry: dict) -> tuple:
     """Normalize a single cycles.json entry. Returns (normalized_entry, changes_count).
 
-    Handles legacy fields from early cycles:
+    Handles legacy fields:
       - "timestamp" → "start"
-      - "goal" → "summary"
+      - rename legacy keys to current schema (cycle → cycle_number,
+        status → cycle_status, type → cycle_type, category → cycle_category,
+        goal → cycle_goal) via memory_repair.migrate_cycle_entry
+      - drop "summary" — summaries live on journal.json now, mirroring them
+        onto cycles.json was redundant
       - computes duration_seconds when start+end present but duration missing
-      - adds default status/type if absent
+      - adds default cycle_status/cycle_type if absent
     """
+    from scripts.memory_repair import migrate_cycle_entry
+
     c = dict(entry)
     n = 0
 
@@ -98,11 +106,15 @@ def _normalize_cycle_entry(entry: dict) -> tuple:
         del c["timestamp"]
         n += 1
 
-    if "goal" in c and "summary" not in c:
-        c["summary"] = c.pop("goal")
+    # Apply schema-key renames (idempotent; counts a change if anything moved).
+    before_keys = set(c.keys())
+    migrate_cycle_entry(c)
+    if set(c.keys()) != before_keys:
         n += 1
-    elif "goal" in c and "summary" in c:
-        del c["goal"]
+
+    # "summary" no longer belongs on cycle records — it lives on journal.json.
+    if "summary" in c:
+        del c["summary"]
         n += 1
 
     if "start" in c and "end" in c and "duration_seconds" not in c:
@@ -119,15 +131,15 @@ def _normalize_cycle_entry(entry: dict) -> tuple:
         except (ValueError, TypeError):
             pass
 
-    if "status" not in c:
-        c["status"] = "completed"
+    if "cycle_status" not in c:
+        c["cycle_status"] = "completed"
         n += 1
-    if "type" not in c:
-        c["type"] = "evolve"
+    if "cycle_type" not in c:
+        c["cycle_type"] = "evolve"
         n += 1
-    if "cycle" in c and not isinstance(c["cycle"], int):
+    if "cycle_number" in c and not isinstance(c["cycle_number"], int):
         try:
-            c["cycle"] = int(c["cycle"])
+            c["cycle_number"] = int(c["cycle_number"])
             n += 1
         except (ValueError, TypeError):
             pass
@@ -663,15 +675,16 @@ def _flush_memvid_buffer(chunks: list) -> None:
 
     Per-call commits on the memvid `.mv2` rewrite the segment catalog and
     reserve significant on-disk space, so cycle_close batches every record
-    it would ingest (inbox messages + cycle record + journal entry) into a
-    single buffer and flushes them here at the end of the cycle.
+    it would ingest (inbox messages + journal entry) into a single buffer
+    and flushes them here at the end of the cycle. Cycle records are not
+    buffered — cycles.json is excluded from long-term memory.
 
     On first run the .mv2 doesn't exist; we run a one-shot ``build()`` from
-    the source JSON files (journal/cycles/inbox_history). Steps 1, 3, and 5
-    of ``main()`` have already flushed those files to disk, so build()
-    ingests this cycle's records via the source JSON. The buffered chunks
-    are therefore **intentionally discarded** on this branch — re-ingesting
-    them would create duplicates.
+    the source JSON files (journal/journal_archive/inbox_history). Steps 1,
+    3, and 5 of ``main()`` have already flushed those files to disk, so
+    build() ingests this cycle's records via the source JSON. The buffered
+    chunks are therefore **intentionally discarded** on this branch —
+    re-ingesting them would create duplicates.
     """
     try:
         from scripts.memory_ingest import DEFAULT_MV2, append_many, build
@@ -759,10 +772,14 @@ def main():
         die(f"--status must be one of: {', '.join(sorted(valid_statuses))}")
 
     now = now_iso()
-    # Goal resolution order: explicit --goal > goal recorded by cycle_start.py
-    # on the in-progress cycle entry. Never fall back to --summary — goal
-    # (planned) and summary (delivered) are different concepts and silently
-    # aliasing them produced journal entries where both fields were identical.
+    # Resolution order: explicit --goal > cycle_entry.cycle_goal (set by
+    # cycle_start.py at the start of the cycle) > legacy cycle_entry.goal
+    # (in-progress entries written before the cycle_goal rename). Never fall
+    # back to --summary — goal (planned) and summary (delivered) are
+    # different concepts. We deliberately do NOT read state.current_goal:
+    # the agent may rewrite it mid-cycle as it picks up sub-tasks, but the
+    # journal entry should record the original cycle goal, not the last
+    # in-flight task.
     goal_text = opts["goal"]
 
     # ── Load existing data ───────────────────────────────────────────────────
@@ -781,15 +798,30 @@ def main():
     if not isinstance(journal, list):
         die("journal.json is not a list")
 
+    # Migrate legacy field names in memory before any reads so the rest of
+    # this function only sees the current schema. Disk gets rewritten when
+    # we save updates below.
+    from scripts.memory_repair import (
+        migrate_cycles_list,
+        migrate_journal_list,
+        migrate_state_dict,
+    )
+
+    migrate_state_dict(state)
+    migrate_cycles_list(cycles)
+    migrate_journal_list(journal)
+
     # ── Auto-detect cycle number if not provided ─────────────────────────────
     if opts["cycle"] is None:
         # Prefer the most recent in_progress entry — cycle_start.py always writes one.
         # This is immune to state.cycle_number being pre-updated by the agent.
         ip_entries = [
-            c for c in cycles if c.get("status") == "in_progress" and c.get("cycle")
+            c
+            for c in cycles
+            if c.get("cycle_status") == "in_progress" and c.get("cycle_number")
         ]
         if ip_entries:
-            detected = max(c["cycle"] for c in ip_entries)
+            detected = max(c["cycle_number"] for c in ip_entries)
             print(
                 f"  ℹ  --cycle not specified — auto-detected from in_progress entry: {detected}"
             )
@@ -799,7 +831,7 @@ def main():
             if state_cycle is not None and isinstance(state_cycle, int):
                 detected = state_cycle + 1
             elif cycles:
-                detected = max(c.get("cycle", 0) for c in cycles) + 1
+                detected = max(c.get("cycle_number", 0) for c in cycles) + 1
             else:
                 detected = 1
             print(
@@ -813,7 +845,7 @@ def main():
     # ── Find this cycle's entry and compute duration ─────────────────────────
     cycle_entry = None
     for c in cycles:
-        if c.get("cycle") == cycle_n:
+        if c.get("cycle_number") == cycle_n:
             cycle_entry = c
             break
 
@@ -823,20 +855,20 @@ def main():
         # `now` only if state.json is missing or corrupt (gives duration=0 in that case).
         stub_start = state.get("last_cycle_run") or state.get("last_heartbeat") or now
         cycle_entry = {
-            "cycle": cycle_n,
+            "cycle_number": cycle_n,
             "start": stub_start,
-            "type": opts["type"],
-            "status": "in_progress",
+            "cycle_type": opts["type"],
+            "cycle_status": "in_progress",
         }
         cycles.append(cycle_entry)
         print(
             f"  ⚠  No existing entry for cycle {cycle_n} — created stub (start={stub_start[:19]})"
         )
 
-    # Pull goal from the in-progress cycle entry (written by cycle_start.py)
-    # when --goal wasn't passed at close time.
+    # Pull goal from the in-progress cycle entry (written by cycle_start.py
+    # under the `cycle_goal` field) when --goal wasn't passed at close time.
     if not goal_text:
-        goal_text = cycle_entry.get("goal")
+        goal_text = cycle_entry.get("cycle_goal")
 
     start_ts = cycle_entry.get("start")
     duration = None
@@ -848,40 +880,46 @@ def main():
             pass
 
     # ── Build updated values ─────────────────────────────────────────────────
+    # `summary` is intentionally omitted — it lives on the journal entry and
+    # mirroring it onto cycles.json was redundant.
     cycle_update = {
         "end": now,
-        "status": opts["status"],
-        "summary": opts["summary"],
-        "type": opts["type"],
+        "cycle_status": opts["status"],
+        "cycle_type": opts["type"],
     }
     if opts["category"]:
-        cycle_update["category"] = opts["category"]
+        cycle_update["cycle_category"] = opts["category"]
     if duration is not None:
         cycle_update["duration_seconds"] = duration
 
+    # state.current_goal is the dynamic in-flight sub-task (the agent
+    # rewrites it mid-cycle as it picks up tasks). Cycle is now idle, so
+    # clear it to None — the planned cycle goal already lives on
+    # cycles.json:cycle_goal and on the journal entry. The next cycle's
+    # agent will repopulate current_goal as soon as it picks up a sub-task.
     state_update = {
         "cycle_number": cycle_n,
-        "status": "idle",
-        "current_goal": goal_text if goal_text else None,
+        "agent_status": "idle",
+        "current_goal": None,
         "last_cycle_summary": opts["summary"],
-        "last_cycle_type": opts["type"],
-        "last_cycle_end": now,
     }
-    if opts["category"]:
-        state_update["last_cycle_category"] = opts["category"]
 
     journal_entry = {
-        "cycle": cycle_n,
+        "cycle_number": cycle_n,
         "timestamp": now,
-        "status": opts["status"],
-        "type": opts["type"],
+        "cycle_status": opts["status"],
+        "cycle_type": opts["type"],
         "actions": opts["actions"],
         "summary": opts["summary"],
     }
+    # Record the planned goal on the journal entry. Resolution already
+    # preferred --goal over cycle_entry.cycle_goal above; we just persist it
+    # if anything was found. --goal at close acts as an explicit override of
+    # whatever cycle_start.py recorded.
     if goal_text:
-        journal_entry["goal"] = goal_text
+        journal_entry["cycle_goal"] = goal_text
     if opts["category"]:
-        journal_entry["category"] = opts["category"]
+        journal_entry["cycle_category"] = opts["category"]
 
     # ── Print plan ───────────────────────────────────────────────────────────
     print(
@@ -917,16 +955,13 @@ def main():
     write_atomic(cycles_path, cycles)
     print(f"\n  ✓ cycles.json updated (cycle {cycle_n})")
 
-    # 1a. Buffer the finalized cycle record for the end-of-cycle memvid flush.
-    memvid_buffer.extend(_entry_chunks_for_memvid(cycle_entry))
-
     # 2. Update state.json
     state.update(state_update)
     write_atomic(state_path, state)
     print(f"  ✓ state.json updated (cycle_number={cycle_n})")
 
     # 3. Append journal entry
-    already_in_journal = any(e.get("cycle") == cycle_n for e in journal)
+    already_in_journal = any(e.get("cycle_number") == cycle_n for e in journal)
     if already_in_journal:
         print(
             f"  ⚠ journal.json — entry for cycle {cycle_n} already exists, skipping duplicate write"
@@ -973,8 +1008,9 @@ def main():
     _sync_auto_memory()
 
     # 9. Buffer the journal entry, then flush every memvid write for this
-    #    cycle in a single open + ONE commit (inbox messages + cycle record
-    #    + journal entry).
+    #    cycle in a single open + ONE commit (inbox messages + journal entry).
+    #    cycle records are no longer ingested — cycles.json is excluded from
+    #    long-term memory.
     memvid_buffer.extend(_entry_chunks_for_memvid(journal_entry))
     _flush_memvid_buffer(memvid_buffer)
 

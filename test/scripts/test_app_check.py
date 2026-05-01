@@ -115,9 +115,7 @@ def _install_fake_apptest(monkeypatch, behavior):
                 inbox_path = app_check.INBOX_PATH
                 inbox_path.parent.mkdir(parents=True, exist_ok=True)
                 existing = (
-                    json.loads(inbox_path.read_text())
-                    if inbox_path.exists()
-                    else []
+                    json.loads(inbox_path.read_text()) if inbox_path.exists() else []
                 )
                 existing.append({"content": self.text_area[0]._value})
                 inbox_path.write_text(json.dumps(existing))

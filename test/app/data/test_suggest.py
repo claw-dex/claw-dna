@@ -116,8 +116,8 @@ def test_old_errors_dont_yield_suggestion(isolated, patched_loaders):
 
 def test_evolve_suggestion_when_no_high_priority(isolated, patched_loaders):
     patched_loaders["cycles"] = [
-        {"type": "evolve", "category": "reliability"},
-        {"type": "evolve", "category": "reliability"},
+        {"cycle_type": "evolve", "cycle_category": "reliability"},
+        {"cycle_type": "evolve", "cycle_category": "reliability"},
     ]
     result = suggest.load_suggest()
     evolve = [s for s in result if s["category"] == "evolve"]
@@ -128,7 +128,9 @@ def test_evolve_suggestion_when_no_high_priority(isolated, patched_loaders):
 
 def test_no_evolve_suggestion_when_high_priority_exists(isolated, patched_loaders):
     patched_loaders["goals"] = [{"status": "pending", "content": "Go"}]
-    patched_loaders["cycles"] = [{"type": "evolve", "category": "reliability"}]
+    patched_loaders["cycles"] = [
+        {"cycle_type": "evolve", "cycle_category": "reliability"}
+    ]
     result = suggest.load_suggest()
     assert not any(s["category"] == "evolve" for s in result)
 

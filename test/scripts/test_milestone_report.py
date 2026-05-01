@@ -36,10 +36,15 @@ def test_milestone_cycles():
 
 
 def test_cycles_up_to():
-    cycles = [{"cycle": 1}, {"cycle": 5}, {"cycle": 10}, {"cycle": "bad"}]
+    cycles = [
+        {"cycle_number": 1},
+        {"cycle_number": 5},
+        {"cycle_number": 10},
+        {"cycle_number": "bad"},
+    ]
     out = mr._cycles_up_to(cycles, 5)
     assert len(out) == 2
-    assert all(c.get("cycle", 0) <= 5 for c in out)
+    assert all(c.get("cycle_number", 0) <= 5 for c in out)
 
 
 def test_format_duration():
@@ -82,27 +87,31 @@ def test_summarize_notes_invalid_input():
 def test_build_report_basic():
     cycles = [
         {
-            "cycle": 1,
-            "status": "completed",
-            "type": "evolve",
-            "category": "efficiency",
+            "cycle_number": 1,
+            "cycle_status": "completed",
+            "cycle_type": "evolve",
+            "cycle_category": "efficiency",
             "duration_seconds": 60,
             "start": "2026-04-01T00:00:00",
             "end": "2026-04-01T01:00:00",
         },
         {
-            "cycle": 2,
-            "status": "completed",
-            "type": "goal",
+            "cycle_number": 2,
+            "cycle_status": "completed",
+            "cycle_type": "goal",
             "duration_seconds": 120,
             "start": "2026-04-01T01:00:00",
             "end": "2026-04-01T03:00:00",
         },
-        {"cycle": 3, "status": "in_progress", "type": "evolve"},
+        {
+            "cycle_number": 3,
+            "cycle_status": "in_progress",
+            "cycle_type": "evolve",
+        },
     ]
     goals = [{"status": "completed"}, {"status": "failed"}, {"status": "pending"}]
     caps = {"utility_scripts": ["a.py", "b.py"]}
-    journal = [{"cycle": 2, "summary": "did stuff"}]
+    journal = [{"cycle_number": 2, "summary": "did stuff"}]
 
     rep = mr.build_report(
         2, cycles, goals, caps, journal, notes=[], command_history=[], server_errors=[]

@@ -126,8 +126,6 @@ def test_render_journal(patch_paths):
                     "goal": "g",
                     "summary": "s",
                     "actions": ["a1", "a2"],
-                    "outcome": "good",
-                    "learnings": {"approach": "appr"},
                 }
             ]
         )
@@ -135,8 +133,8 @@ def test_render_journal(patch_paths):
     md = msync.render_journal()
     assert "Cycle 1" in md
     assert "**Goal**" in md
+    assert "**Summary**" in md
     assert "a1" in md
-    assert "Approach" in md
 
 
 def test_render_goals_grouped(patch_paths):

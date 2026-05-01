@@ -52,13 +52,13 @@ def test_summarize_state():
     s = ms.summarize_state(
         {
             "cycle_number": 3,
-            "status": "running",
-            "goal_status": "active",
+            "agent_status": "running",
             "last_heartbeat": "2026-01-01T00:00:00Z",
             "last_cycle_summary": "x" * 200,
         }
     )
-    assert s["cycle"] == 3
+    assert s["cycle_number"] == 3
+    assert s["agent_status"] == "running"
     assert len(s["last_cycle_summary"]) == 120
 
 
@@ -91,18 +91,18 @@ def test_summarize_cycles_full():
     s = ms.summarize_cycles(
         [
             {
-                "type": "evolve",
-                "status": "completed",
+                "cycle_type": "evolve",
+                "cycle_status": "completed",
                 "duration_seconds": 60,
-                "category": "capability",
+                "cycle_category": "capability",
             },
             {
-                "type": "evolve",
-                "status": "completed",
+                "cycle_type": "evolve",
+                "cycle_status": "completed",
                 "duration_seconds": 30,
-                "category": "reliability",
+                "cycle_category": "reliability",
             },
-            {"type": "explore", "status": "failed"},
+            {"cycle_type": "explore", "cycle_status": "failed"},
         ]
     )
     assert s["total"] == 3

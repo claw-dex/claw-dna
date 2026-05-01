@@ -100,7 +100,7 @@ Two modules render above the tab strip in `server.py` (after the header, before 
 
 | Metric | Source | Notes |
 |--------|--------|-------|
-| Status | `state.json` → `status` | Color-coded pill (idle=yellow, running=green, healing=red, bootstrapping=blue, awaiting_first_heartbeat=white) |
+| Status | `state.json` → `agent_status` | Color-coded pill (idle=yellow, running=green, healing=red, bootstrapping=blue, awaiting_first_heartbeat=white) |
 | Cycle | `state.json` → `cycle_number` | Current cycle number |
 | Heartbeat | `state.json` → `last_heartbeat` | Freshness icon: green <5m, yellow 5-30m, red >30m |
 | Velocity | `load_cycle_velocity()` | Cycles per hour (rolling last 10 completed) |
@@ -179,7 +179,7 @@ Most data loading uses **mtime-based caching** (re-reads only when the source fi
 | `load_outbox()` | `message.py` | `outbox.json` |
 | `load_outbox_history()` | `message.py` | `outbox_history.json` |
 | `load_history()` | `message.py` | `command_history.json` |
-| `load_journal(limit, offset)` | `journal.py` | `journal.json` + `journal-archive.json` (both mtimes) |
+| `load_journal(limit, offset)` | `journal.py` | `journal.json` + `journal_archive.json` (both mtimes) |
 | `load_errors()` | `system.py` | `server_errors.json` |
 | `load_validate()` | `system.py` | 6 memory files + 30s heartbeat bucket |
 | `load_plugins()` | `system.py` | `.claude/settings.json` |
@@ -252,7 +252,7 @@ All JSON mutations use `_write_json_atomic()` from `app/shared.py` — writes to
 
 | File | Default |
 |------|---------|
-| `state.json` | `{cycle_number: 0, status: "idle", current_goal: null, last_cycle_summary: null, created_at: null, last_heartbeat: null, last_cycle_run: null, last_cycle_end: null, services: {}}` |
+| `state.json` | `{cycle_number: 0, agent_status: "idle", current_goal: null, last_cycle_summary: null, last_heartbeat: null, last_cycle_run: null, services: {}}` |
 | `cycles.json` | `[]` |
 | `goal.json` | `[]` |
 | `command_history.json` | `[]` |

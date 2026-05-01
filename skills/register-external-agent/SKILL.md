@@ -32,7 +32,7 @@ Do **not** use this skill for:
 | Register / update | `--name <agent-name> --responsibilities "<text>" [--capabilities-file F \| --capabilities-inline JSON] [--timeout-seconds N]` | Adds (or upserts) the agent in `agents.json`, creates empty `messages/external/<agent-name>/{inbox,outbox}.json`, and clears any prior `deactivated` status. |
 | List | `--list` | One line per agent: name, type, status, timeout, last_ping_at. |
 | Deactivate | `--deactivate <agent-name>` | Sets `status="deactivated"` so the API rejects all routes except `POST /update` and the sweeper skips that agent. Exits non-zero if `<agent-name>` isn't registered. |
-| Connection prompt | `--setup <agent-name>` | Prints a one-line `/loop 1m ...` system prompt that the operator pastes into the external agent's Claude Code / Codex session. Show this prompt to the user to help setup the external agent. |
+| Connection prompt | `--setup <agent-name>` | Prints a one-line `/loop 5m ...` system prompt that the operator pastes into the external agent's Claude Code / Codex session. Show this prompt to the user to help setup the external agent. |
 
 ## Typical flows
 
@@ -54,10 +54,10 @@ The `--setup` output is one block. For example:
 Paste this to your Claude Code/Codex:
 
 ```
-/loop 1m You are external agent 'research-bot'. Each tick: `curl -s -u <user>:<pass> ...`...
+/loop 5m You are external agent 'research-bot'. Each tick: `curl -s -u <user>:<pass> ...`...
 ```
 
-The operator copies that into the remote agent. From then on, the remote agent pings every minute, picks up unread items via `POST /read-inbox`, and replies via `POST /write-outbox` — all surfaced into our main inbox by the sweeper with `source: "external_agent"` and types prefixed `agent_*` (see `prompts/enum.md`).
+The operator copies that into the remote agent. From then on, the remote agent pings every 5 minutes, picks up unread items via `POST /read-inbox`, and replies via `POST /write-outbox` — all surfaced into our main inbox by the sweeper with `source: "external_agent"` and types prefixed `agent_*` (see `prompts/enum.md`).
 
 ### 2. Check who can take work
 
@@ -82,7 +82,7 @@ If the remote session was lost, just rerun `--setup` — it reads live config + 
 ## Inputs and validation
 
 - `--name`: must match `^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$`. The name becomes a directory segment under `messages/external/`, so unsafe characters are rejected.
-- `--timeout-seconds`: must be `> 0`. Default is 300s. Set lower for chatty agents that should turn over fast; higher for slow research agents that legitimately go quiet between tasks.
+- `--timeout-seconds`: must be `> 0`. Default is 1800s (30 minutes). Set lower for chatty agents that should turn over fast; higher for slow research agents that legitimately go quiet between tasks.
 - `--capabilities-file` and `--capabilities-inline` are mutually exclusive. Each entry should follow the same shape as a row in `memory/capabilities.json` (`id`, `name`, `description`, `category`, `enabled`).
 - `--responsibilities` is free text — write it from the perspective of the **main agent deciding whether to delegate** ("Run web searches and summarise findings"; "Open and review PRs in repo X"). Keep it specific enough that a triage step can match a task to an agent.
 

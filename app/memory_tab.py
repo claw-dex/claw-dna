@@ -1,4 +1,4 @@
-"""Tab: Memory — consolidated Journal + Logs + Goals + Memory Files with top-level search."""
+"""Tab: Memory — consolidated Journal + Logs + Goals + Memory Files."""
 
 import io
 
@@ -28,43 +28,7 @@ def render():
         load_cycles,
         load_memory_files,
         read_memory_file,
-        search as do_search,
     )
-
-    # ── Top-level search bar ──────────────────────────────────
-    query = st.text_input(
-        "Search journal, goals, cycles, history",
-        placeholder="min 2 characters...",
-        key="mem_search",
-    )
-
-    if query and len(query) >= 2:
-        with st.spinner("Searching..."):
-            results = do_search(query)
-        st.subheader(f"Search results for '{query}' ({results.get('count', 0)} found)")
-        if not results.get("results"):
-            st.info("No results found.")
-        else:
-            for r in results["results"]:
-                source = r.get("source", "")
-                icon = {
-                    "journal": "📓",
-                    "goal": "🎯",
-                    "cycle": "🔄",
-                    "history": "📜",
-                }.get(source, "•")
-                with st.expander(f"{icon} [{source}] {r.get('title', '')[:80]}"):
-                    st.write(r.get("snippet", ""))
-                    meta = []
-                    if r.get("cycle"):
-                        meta.append(f"Cycle: {r['cycle']}")
-                    if r.get("status"):
-                        meta.append(f"Status: {r['status']}")
-                    if r.get("timestamp"):
-                        meta.append(f"Time: {str(r['timestamp'])[:19]}")
-                    if meta:
-                        st.caption(" | ".join(meta))
-        return  # early-return on active search
 
     st.divider()
 
@@ -91,9 +55,9 @@ def render():
             st.info("No journal entries yet. The agent writes here after each cycle.")
         else:
             for entry in entries:
-                cycle = entry.get("cycle", "?")
-                goal = entry.get("goal", "Unknown")
-                status = entry.get("status", "completed")
+                cycle = entry.get("cycle_number", "?")
+                goal = entry.get("cycle_goal", "Unknown")
+                status = entry.get("cycle_status", "completed")
                 ts = str(entry.get("timestamp", ""))[:19].replace("T", " ")
                 status_icon = {
                     "completed": "✅",
@@ -102,8 +66,8 @@ def render():
                 }.get(status, "⏳")
 
                 with st.expander(f"{status_icon} Cycle {cycle} — {goal[:60]} `{ts}`"):
-                    entry_type = entry.get("type", "")
-                    category = entry.get("category", "")
+                    entry_type = entry.get("cycle_type", "")
+                    category = entry.get("cycle_category", "")
                     actions = entry.get("actions", [])
                     summary = entry.get("summary") or entry.get("outcome", "")
                     if entry_type:
@@ -251,11 +215,11 @@ def render():
                 for c in reversed(cycles):
                     rows.append(
                         {
-                            "Cycle": c.get("cycle", ""),
-                            "Type": c.get("type", ""),
-                            "Status": c.get("status", ""),
+                            "Cycle": c.get("cycle_number", ""),
+                            "Type": c.get("cycle_type", ""),
+                            "Status": c.get("cycle_status", ""),
                             "Duration (s)": c.get("duration_seconds"),
-                            "Goal": (c.get("goal") or "")[:60],
+                            "Goal": (c.get("cycle_goal") or "")[:60],
                             "Start": str(c.get("start", ""))[:19].replace("T", " "),
                         }
                     )

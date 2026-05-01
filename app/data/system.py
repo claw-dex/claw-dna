@@ -227,7 +227,7 @@ def load_validate():
     cycles = parsed.get("cycles.json")
     if state and cycles and isinstance(cycles, list):
         state_cycle = state.get("cycle_number", 0)
-        max_cycle = max((c.get("cycle", 0) for c in cycles), default=0)
+        max_cycle = max((c.get("cycle_number", 0) for c in cycles), default=0)
         check(
             "cycle_number consistent",
             state_cycle >= max_cycle,
@@ -236,7 +236,7 @@ def load_validate():
         )
 
     if cycles and isinstance(cycles, list) and len(cycles) > 1:
-        nums = sorted(c.get("cycle", 0) for c in cycles)
+        nums = sorted(c.get("cycle_number", 0) for c in cycles)
         gaps = [nums[i + 1] for i in range(len(nums) - 1) if nums[i + 1] != nums[i] + 1]
         check(
             "cycle continuity",

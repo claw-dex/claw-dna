@@ -19,7 +19,12 @@ from app.shared import MEMORY_DIR, LOGS_DIR, HISTORY_PATH
 @_mfile_cache(lambda: f"{MEMORY_DIR}/cycles.json", list)
 def load_cycles(data):
     """Load cycles from cycles.json — mtime-cached."""
-    return data if isinstance(data, list) else []
+    from scripts.memory_repair import migrate_cycles_list
+
+    if isinstance(data, list):
+        migrate_cycles_list(data)
+        return data
+    return []
 
 
 @_mmfile_cache([lambda: f"{MEMORY_DIR}/cycles.json"])
@@ -34,7 +39,9 @@ def load_cycle_velocity():
     try:
         cycles_data = load_cycles() or []
         completed = [
-            c for c in cycles_data if c.get("status") == "completed" and c.get("start")
+            c
+            for c in cycles_data
+            if c.get("cycle_status") == "completed" and c.get("start")
         ]
         if len(completed) < 2:
             return None
@@ -186,13 +193,13 @@ def load_balance():
     categories = {}
     recent_categories = {}
     evolve_cycles = [
-        c for c in cycles if c.get("type") == "evolve" and c.get("category")
+        c for c in cycles if c.get("cycle_type") == "evolve" and c.get("cycle_category")
     ]
     for c in evolve_cycles:
-        cat = c["category"]
+        cat = c["cycle_category"]
         categories[cat] = categories.get(cat, 0) + 1
     for c in evolve_cycles[-10:]:
-        cat = c["category"]
+        cat = c["cycle_category"]
         recent_categories[cat] = recent_categories.get(cat, 0) + 1
     total = sum(categories.values())
     all_cats = [
@@ -280,8 +287,8 @@ def load_activity():
                     {
                         "time": c["start"],
                         "type": "cycle_start",
-                        "summary": f"Cycle {c.get('cycle', '')} started",
-                        "detail": (c.get("goal") or "")[:120],
+                        "summary": f"Cycle {c.get('cycle_number', '')} started",
+                        "detail": (c.get("cycle_goal") or "")[:120],
                     }
                 )
             if c.get("end"):
@@ -290,8 +297,8 @@ def load_activity():
                     {
                         "time": c["end"],
                         "type": "cycle_end",
-                        "summary": f"Cycle {c.get('cycle', '')} completed ({dur}s)",
-                        "detail": (c.get("goal") or "")[:120],
+                        "summary": f"Cycle {c.get('cycle_number', '')} completed ({dur}s)",
+                        "detail": (c.get("cycle_goal") or "")[:120],
                     }
                 )
     events.sort(key=lambda e: e.get("time", ""), reverse=True)

@@ -16,7 +16,6 @@ dependencies = [
     "pykeepass",
     "psutil",
     "memvid-sdk-free==2.0.159",
-    "ripgrep-rs==0.4.2",
 ]
 
 [build-system]

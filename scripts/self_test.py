@@ -130,7 +130,11 @@ def test_state_fields():
         _check("state_fields", False, f"cannot read: {e}")
         return
 
-    required = ["cycle_number", "status", "last_heartbeat"]
+    from scripts.memory_repair import migrate_state_dict
+
+    migrate_state_dict(state)
+
+    required = ["cycle_number", "agent_status", "last_heartbeat"]
     missing = [f for f in required if f not in state]
     if missing:
         _check("state_fields", False, f"missing: {', '.join(missing)}")
@@ -151,7 +155,7 @@ def test_state_fields():
     _check(
         "state_fields",
         True,
-        f"cycle={state.get('cycle_number')}, status={state.get('status')!r}",
+        f"cycle={state.get('cycle_number')}, agent_status={state.get('agent_status')!r}",
     )
 
 

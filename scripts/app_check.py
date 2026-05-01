@@ -117,17 +117,7 @@ def _patch_agent_paths(sandbox: Path) -> None:
         f"{base}/workspace",
     ]
     shared._CRITICAL_FILES = {
-        f"{shared.MEMORY_DIR}/state.json": {
-            "cycle_number": 0,
-            "status": "idle",
-            "current_goal": None,
-            "last_cycle_summary": None,
-            "created_at": None,
-            "last_heartbeat": None,
-            "last_cycle_run": None,
-            "last_cycle_end": None,
-            "services": {},
-        },
+        f"{shared.MEMORY_DIR}/state.json": dict(shared.STATE_DEFAULTS),
         f"{shared.MEMORY_DIR}/cycles.json": [],
         shared.GOALS_PATH: [],
         shared.HISTORY_PATH: [],

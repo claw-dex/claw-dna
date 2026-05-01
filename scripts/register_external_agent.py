@@ -10,7 +10,7 @@ Usage:
       --name research-bot \
       --responsibilities "Run web research tasks delegated by main agent" \
       --capabilities-file /tmp/caps.json \
-      [--timeout-seconds 300]
+      [--timeout-seconds 1800]
 
   uv run python scripts/register_external_agent.py \
       --name research-bot \
@@ -219,7 +219,7 @@ def cmd_setup(args) -> int:
     instruction = (
         f"You are external agent '{name}'. Each tick: "
         f"`curl -s -u {creds} -H 'X-Agent-Name: {name}' {base_url}/ping` — "
-        "if unread_count>0, "
+        "if unread>0, "
         f"`curl -s -u {creds} -H 'X-Agent-Name: {name}' -H 'Content-Type: application/json' "
         f"-d '{{\"ids\":<unread_ids>}}' {base_url}/read-inbox` to fetch+mark-read, "
         "do the work, then reply via "
@@ -230,7 +230,7 @@ def cmd_setup(args) -> int:
     )
 
     print("Paste this to your Agent/Claude/Codex:")
-    print(f"```/loop 1m {instruction}```")
+    print(f"```/loop 5m {instruction}```")
     return 0
 
 
@@ -242,7 +242,7 @@ def main() -> int:
         "--capabilities-file", help="Path to JSON file with capabilities list"
     )
     p.add_argument("--capabilities-inline", help="Inline JSON list of capabilities")
-    p.add_argument("--timeout-seconds", type=int, default=300)
+    p.add_argument("--timeout-seconds", type=int, default=1800)
     p.add_argument("--list", action="store_true", help="List registered agents")
     p.add_argument("--deactivate", metavar="NAME", help="Mark an agent as deactivated")
     p.add_argument(

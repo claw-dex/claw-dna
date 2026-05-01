@@ -2,10 +2,11 @@
 """
 memory_ingest.py — Ingest agent memory into long-term semantic store (memvid SDK).
 
-Parses journal.json, cycles.json, and messages/inbox_history.json (sibling of
-the memory dir), chunks them into semantically
-meaningful pieces, and ingests into a .mv2 index via the `memvid_sdk` Python
-package (hybrid lexical + semantic search with bge-base embeddings).
+Parses journal.json, journal_archive.json, and messages/inbox_history.json
+(sibling of the memory dir), chunks them into semantically meaningful pieces,
+and ingests into a .mv2 index via the `memvid_sdk` Python package (hybrid
+lexical + semantic search with bge-base embeddings). cycles.json is no longer
+ingested — cycle metadata is redundant with journal entries.
 
 Usage:
     uv run python scripts/memory_ingest.py --build                          # Full rebuild
@@ -207,9 +208,14 @@ def parse_args(argv):
 
 
 def compose_journal_text(entry: dict) -> str:
-    """Compose readable text from a journal entry for semantic embedding."""
+    """Compose readable text from a journal entry for semantic embedding.
+
+    Caller is expected to have already migrated the entry to the current
+    schema (e.g. via memory_repair.migrate_journal_entry); reads only new
+    field names.
+    """
     parts = []
-    goal = entry.get("goal", "")
+    goal = entry.get("cycle_goal", "")
     if goal:
         parts.append(f"Goal: {goal}")
     summary = entry.get("summary", "")
@@ -218,34 +224,26 @@ def compose_journal_text(entry: dict) -> str:
     actions = entry.get("actions", [])
     if actions:
         parts.append("Actions: " + "; ".join(actions))
-    category = entry.get("category", "")
+    category = entry.get("cycle_category", "")
     if category:
         parts.append(f"Category: {category}")
-    outcome = entry.get("outcome", "")
-    if outcome:
-        parts.append(f"Outcome: {outcome}")
-    learnings = entry.get("learnings", {})
-    if isinstance(learnings, dict) and learnings:
-        for key in ("approach", "key_decisions", "reusable_patterns", "pitfalls"):
-            val = learnings.get(key)
-            if isinstance(val, list):
-                val = "; ".join(str(v) for v in val)
-            if val:
-                parts.append(f"{key.replace('_', ' ').title()}: {val}")
     return "\n".join(parts)
 
 
 def chunk_journal(journal: list) -> list:
     """Convert journal entries into ingestible chunks."""
+    from scripts.memory_repair import migrate_journal_entry
+
     chunks = []
     for entry in journal:
         if not isinstance(entry, dict):
             continue
-        cycle = entry.get("cycle", 0)
+        migrate_journal_entry(entry)
+        cycle = entry.get("cycle_number", 0)
         summary = entry.get("summary", "")
-        ctype = entry.get("type", "")
-        status = entry.get("status", "")
-        category = entry.get("category", "")
+        ctype = entry.get("cycle_type", "")
+        status = entry.get("cycle_status", "")
+        category = entry.get("cycle_category", "")
         timestamp = entry.get("timestamp", "")
 
         text = compose_journal_text(entry)
@@ -285,15 +283,21 @@ def chunk_journal(journal: list) -> list:
 
 def chunk_cycles(cycles: list) -> list:
     """Convert cycle records into ingestible chunks."""
+    from scripts.memory_repair import migrate_cycle_entry
+
     chunks = []
     for entry in cycles:
         if not isinstance(entry, dict):
             continue
-        cycle = entry.get("cycle", 0)
-        summary = entry.get("summary", "")
-        ctype = entry.get("type", "")
-        status = entry.get("status", "")
-        category = entry.get("category", "")
+        migrate_cycle_entry(entry)
+        cycle = entry.get("cycle_number", 0)
+        # Cycle records no longer carry `summary`; surface the planned cycle
+        # goal instead (with a final fallback to a stray `summary` field on
+        # very old completed records).
+        cycle_goal = entry.get("cycle_goal") or entry.get("summary", "")
+        ctype = entry.get("cycle_type", "")
+        status = entry.get("cycle_status", "")
+        category = entry.get("cycle_category", "")
         start = entry.get("start", "")
         end = entry.get("end", "")
         duration = entry.get("duration_seconds")
@@ -305,8 +309,8 @@ def chunk_cycles(cycles: list) -> list:
             parts.append(f"Category: {category}")
         if status:
             parts.append(f"Status: {status}")
-        if summary:
-            parts.append(f"Summary: {summary}")
+        if cycle_goal:
+            parts.append(f"Goal: {cycle_goal}")
         if duration is not None:
             m, s = divmod(int(duration), 60)
             parts.append(f"Duration: {m}m {s}s")
@@ -332,7 +336,7 @@ def chunk_cycles(cycles: list) -> list:
 
         chunks.append(
             {
-                "title": f"Cycle {cycle}: {summary[:80] or ctype}",
+                "title": f"Cycle {cycle}: {cycle_goal[:80] or ctype}",
                 "label": "cycle",
                 "text": text,
                 "tags": tags,
@@ -442,21 +446,17 @@ def chunk_inbox(messages: list) -> list:
 def gather_all_chunks(memory_dir: Path) -> list:
     """Load all memory files and produce a combined list of chunks.
 
-    Ordering is intentional: richest semantic sources first, with cycle
-    records (largely redundant with journal data) added last.
-
-      1. journal.json        — current window (richest, most recent)
-      2. journal-archive.json — historical journal (rich, ordered newest-first)
+      1. journal.json         — current window (richest, most recent)
+      2. journal_archive.json — historical journal (rich, ordered newest-first)
       3. messages/inbox_history.json — archived inbox messages (sibling dir)
-      4. cycles.json         — structured cycle records (lower priority; largely
-                                redundant with journal data and shorter text)
-      5. cycles-archive.json — historical cycle records
 
     All chunkers preserve the source-recorded timestamp in metadata["date"];
     rebuild never substitutes datetime.now().
 
-    Goals (goal.json, goal_history.json) are intentionally excluded from
-    long-term memory.
+    cycles.json / cycles_archive.json are intentionally excluded — cycle
+    metadata is largely redundant with journal entries which already carry
+    richer semantic content. Goals (goal.json, goal_history.json) are also
+    excluded from long-term memory.
     """
     all_chunks = []
 
@@ -466,7 +466,9 @@ def gather_all_chunks(memory_dir: Path) -> list:
         all_chunks.extend(chunk_journal(journal))
 
     # 2. Journal archive — historical entries, newest-first ordering preserved
-    archive = load_json(memory_dir / "journal-archive.json")
+    archive = load_json(memory_dir / "journal_archive.json")
+    if archive is None:
+        archive = load_json(memory_dir / "journal-archive.json")
     if isinstance(archive, list):
         all_chunks.extend(chunk_journal(archive))
 
@@ -478,17 +480,6 @@ def gather_all_chunks(memory_dir: Path) -> list:
     )
     if isinstance(inbox_history, list):
         all_chunks.extend(chunk_inbox(inbox_history))
-
-    # 4. Cycle records — lower priority; added last because cycle metadata
-    #    largely duplicates what journal entries already contain.
-    cycles = load_json(memory_dir / "cycles.json")
-    if isinstance(cycles, list):
-        all_chunks.extend(chunk_cycles(cycles))
-
-    # 5. Cycles archive — historical cycle records
-    cycles_archive = load_json(memory_dir / "cycles-archive.json")
-    if isinstance(cycles_archive, list):
-        all_chunks.extend(chunk_cycles(cycles_archive))
 
     return all_chunks
 
@@ -627,16 +618,13 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
 def _detect_and_chunk(entry: dict) -> list:
     """Auto-detect entry type and route to the correct chunker.
 
-    Detection heuristic:
-      - Has "summary" or "goal" + "actions"/"learnings" → journal entry
+    Detection heuristic (applies to current schema; legacy keys are mapped
+    by the chunkers themselves via memory_repair.migrate_*):
+      - Has "actions" or ("cycle_goal" + "summary") → journal entry
       - Has "start" or "end" or "duration_seconds" → cycle record
-      - Has "content" and "status" (without cycle fields) → goal record
+      - Has "content" and "status" (no cycle fields) → goal record
     """
-    if (
-        "actions" in entry
-        or "learnings" in entry
-        or ("goal" in entry and "summary" in entry)
-    ):
+    if "actions" in entry or ("cycle_goal" in entry and "summary" in entry):
         return chunk_journal([entry])
     if "start" in entry or "end" in entry or "duration_seconds" in entry:
         return chunk_cycles([entry])
@@ -698,7 +686,7 @@ def append_json(mv2_path, entry_source, quiet=False, json_mode=False):
     except Exception as e:
         print(f"WARN: commit failed: {e}", file=sys.stderr)
 
-    cycle = entry.get("cycle", "?")
+    cycle = entry.get("cycle_number", "?")
     if json_mode:
         print(
             json.dumps(

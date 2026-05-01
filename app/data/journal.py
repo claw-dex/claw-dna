@@ -10,14 +10,14 @@ _JOURNAL_CACHE = _register_cache()
 
 
 def _parse_journal_entries():
-    """Load journal.json + journal-archive.json entries, sorted by cycle descending.
+    """Load journal.json + journal_archive.json entries, sorted by cycle descending.
 
     Uses mtime-based caching: re-parses only when either file actually changes.
     More efficient than TTL-based caching — avoids redundant I/O when multiple
     load_journal(limit=N) calls occur within the same render cycle.
     """
     active_path = f"{MEMORY_DIR}/journal.json"
-    archive_path = f"{MEMORY_DIR}/journal-archive.json"
+    archive_path = f"{MEMORY_DIR}/journal_archive.json"
 
     try:
         active_mtime = os.path.getmtime(active_path)
@@ -34,16 +34,22 @@ def _parse_journal_entries():
         if cached_am == active_mtime and cached_arch == archive_mtime:
             return result
 
+    from scripts.memory_repair import migrate_journal_list
+
     active = _read_json_safe(active_path, [])
     if not isinstance(active, list):
         active = []
+    migrate_journal_list(active)
     archived = _read_json_safe(archive_path, [])
     if not isinstance(archived, list):
         archived = []
+    migrate_journal_list(archived)
     # Merge; deduplicate by cycle number (active takes precedence)
-    active_cycles = {e.get("cycle") for e in active}
-    merged = active + [e for e in archived if e.get("cycle") not in active_cycles]
-    merged.sort(key=lambda e: e.get("cycle", 0), reverse=True)
+    active_cycles = {e.get("cycle_number") for e in active}
+    merged = active + [
+        e for e in archived if e.get("cycle_number") not in active_cycles
+    ]
+    merged.sort(key=lambda e: e.get("cycle_number", 0), reverse=True)
 
     _JOURNAL_CACHE["data"] = (merged, active_mtime, archive_mtime)
     return merged

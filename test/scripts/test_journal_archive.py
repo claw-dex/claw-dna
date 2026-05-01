@@ -14,10 +14,12 @@ import journal_archive as ja
 @pytest.fixture
 def patch_paths(monkeypatch, agent_root):
     journal = agent_root / "memory" / "journal.json"
-    archive = agent_root / "memory" / "journal-archive.json"
+    archive = agent_root / "memory" / "journal_archive.json"
+    legacy_archive = agent_root / "memory" / "journal-archive.json"
     monkeypatch.setattr(ja, "MEMORY_DIR", agent_root / "memory")
     monkeypatch.setattr(ja, "JOURNAL", journal)
     monkeypatch.setattr(ja, "ARCHIVE", archive)
+    monkeypatch.setattr(ja, "LEGACY_ARCHIVE", legacy_archive)
     return journal, archive
 
 
@@ -27,7 +29,6 @@ def _make_entries(n, start=1):
             "cycle": i,
             "summary": f"summary-{i}",
             "goal": f"goal-{i}",
-            "outcome": f"outcome-{i}",
             "actions": [f"action-{i}"],
             "timestamp": f"2026-04-{i:02d}T00:00:00Z",
         }
@@ -92,7 +93,7 @@ def test_cmd_archive_writes_files(patch_paths, capsys):
     archived = json.loads(archive.read_text())
     assert len(archived) == 20
     # Archive sorted ascending by cycle
-    cycles = [e["cycle"] for e in archived]
+    cycles = [e["cycle_number"] for e in archived]
     assert cycles == sorted(cycles)
 
 

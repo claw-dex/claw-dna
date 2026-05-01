@@ -206,4 +206,4 @@ Record the failure in your journal entry (via `cycle_close.py`) and update `/age
 
 ## Step 6: Update State
 
-Set status to "recovering" during the fix, then "idle" once verified.
+Set `state.json:agent_status` to `"recovering"` during the fix, then `"idle"` once verified.

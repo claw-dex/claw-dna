@@ -62,20 +62,31 @@ def main():
             print(f"Unknown argument: {args[i]}")
             sys.exit(1)
 
+    from scripts.memory_repair import (
+        migrate_cycles_list,
+        migrate_journal_list,
+        migrate_state_dict,
+    )
+
     state = load_json(MEMORY_DIR / "state.json") or {}
+    migrate_state_dict(state)
     cycles = load_json(MEMORY_DIR / "cycles.json") or []
+    migrate_cycles_list(cycles)
     goals = load_json(MEMORY_DIR / "goal.json") or []
     journal = load_json(MEMORY_DIR / "journal.json") or []
+    migrate_journal_list(journal)
     failures = {
         "failures": [
-            e for e in journal if isinstance(e, dict) and e.get("status") == "failed"
+            e
+            for e in journal
+            if isinstance(e, dict) and e.get("cycle_status") == "failed"
         ]
     }
 
     if last_n:
         cycles = cycles[-last_n:]
 
-    completed = [c for c in cycles if c.get("status") == "completed"]
+    completed = [c for c in cycles if c.get("cycle_status") == "completed"]
     durations = [c["duration_seconds"] for c in completed if c.get("duration_seconds")]
 
     now = datetime.now(timezone.utc)
@@ -86,7 +97,7 @@ def main():
     report = {
         "generated_at": now.isoformat(),
         "current_cycle": state.get("cycle_number", "?"),
-        "agent_status": state.get("status", "?"),
+        "agent_status": state.get("agent_status", "?"),
         "session_duration": format_duration(session_elapsed),
         "total_cycles": len(cycles),
         "completed_cycles": len(completed),
@@ -106,9 +117,9 @@ def main():
         "failure_count": len(failures.get("failures", [])),
         "cycles": [
             {
-                "num": c.get("cycle"),
-                "summary": (c.get("summary") or c.get("goal") or "?"),
-                "status": c.get("status", "?"),
+                "num": c.get("cycle_number"),
+                "summary": (c.get("summary") or c.get("cycle_goal") or "?"),
+                "status": c.get("cycle_status", "?"),
                 "duration": format_duration(c.get("duration_seconds")),
             }
             for c in cycles

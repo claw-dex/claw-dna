@@ -26,11 +26,10 @@ Routes (agent identified via X-Agent-Name header):
                          Server stamps id (uuid4) and fills timestamp if
                          missing. Updates last_ping_at.
   GET  /ping          -> updates last_ping_at + status="online"; returns
-                         {status, unread_ids, unread_count, should_stop_loop}.
+                         {unread} (and unread_ids when unread > 0).
                          If the agent is currently "deactivated", returns
-                         status="deactivated", should_stop_loop=true, and a
-                         "warning" message telling the external agent to halt
-                         its loop (no last_ping_at update in that case).
+                         only a "warning" message telling the external agent
+                         to halt its loop (no last_ping_at update in that case).
   POST /upload        -> upload a file artifact to the main agent workspace.
                          Requires X-Agent-Name (like the other routes) plus
                          X-Filename: <basename> (must match
@@ -54,7 +53,7 @@ Routes (agent identified via X-Agent-Name header):
 Background sweeper:
   Every SWEEP_SECONDS (10s, hardcoded):
     - Lazily flips agents to status=offline if last_ping_at is older than
-      their per-agent timeout_seconds (default 300s).
+      their per-agent timeout_seconds (default 1800s).
     - Forwards each non-deactivated agent's outbox into the main inbox with
       source="external_agent" + reply_to. The forwarded type is prefixed
       with "agent_" (e.g. response → agent_response, needs_human →
@@ -113,7 +112,7 @@ WORKSPACE_UPLOAD_DIR = BASE / "workspace" / "upload"
 PORT = 8083
 MAX_BODY_SIZE = 1_048_576  # 1 MB — applies to JSON routes
 MAX_UPLOAD_SIZE = 25 * 1_048_576  # 25 MB — applies to /upload only
-DEFAULT_TIMEOUT_SECONDS = 300
+DEFAULT_TIMEOUT_SECONDS = 1800
 SWEEP_SECONDS = 10
 # Filenames may only contain these chars; rejects path separators, control
 # bytes, and ".." traversal attempts. The external agent should send a clean
@@ -139,12 +138,12 @@ GET /health
   -> 200 {"status":"ok"}
 
 GET /ping
-  -> 200 {"status":"online",
-          "unread_ids" (array of str),
-          "unread_count" (int)}
+  -> 200 {"unread" (int),
+          "unread_ids" (array of str, only when unread > 0)}
   -> 200 {"status":"deactivated",
-          "should_stop_loop" (bool, true),
-          "warning"}
+          "unread" (int),
+          "unread_ids" (array of str),
+          "warning"}  (when agent is deactivated)
 
 POST /read-inbox
   body: {"ids" (array of str): non-empty, unique, all currently unread}
@@ -931,37 +930,32 @@ class _Handler(BaseHTTPRequestHandler):
             )
 
         if path == "/ping" and method == "GET":
+            ids = _unread_ids(name)
             if agent.get("status") == "deactivated":
                 # Surface a clear stop-looping signal instead of bouncing
                 # the deactivated agent off a bare 403 (which /ping is
-                # explicitly allowed through to deliver).
+                # explicitly allowed through to deliver). Include any
+                # pending unread ids so the agent can drain them before
+                # halting its loop.
                 return self._send_json(
                     200,
                     {
                         "status": "deactivated",
-                        "unread_ids": [],
-                        "unread_count": 0,
-                        "should_stop_loop": True,
+                        "unread_ids": ids,
+                        "unread": len(ids),
                         "warning": (
-                            "This external agent has been deactivated by the "
-                            "operator. Stop your /loop now — read-inbox and "
-                            "write-outbox will return 403. To come back, the "
-                            "operator (or you, via POST /update with "
-                            '{"status":"online"}) must reactivate first.'
+                            "Deactivated. Before stopping your /loop, you "
+                            "must read all unread messages (POST /read-inbox) "
+                            "and finish pending tasks (POST /write-outbox). "
+                            'May reactivate via POST /update {"status":"online"}.'
                         ),
                     },
                 )
             _touch_ping(name)
-            ids = _unread_ids(name)
-            return self._send_json(
-                200,
-                {
-                    "status": "online",
-                    "unread_ids": ids,
-                    "unread_count": len(ids),
-                    "should_stop_loop": False,
-                },
-            )
+            body: dict = {"unread": len(ids)}
+            if ids:
+                body["unread_ids"] = ids
+            return self._send_json(200, body)
 
         if path == "/update" and method == "POST":
             try:

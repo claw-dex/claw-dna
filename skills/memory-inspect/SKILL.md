@@ -11,7 +11,7 @@ Read-only diagnostic tool for the agent's long-term semantic memory `.mv2`
 file (memvid SDK). Reports on-disk footprint, frame counts, segment catalog,
 storage utilisation, source/label/tag distribution, and timestamp span — and
 compares the indexed counts against the source JSON files (`journal.json`,
-`journal-archive.json`, `cycles.json`, `cycles-archive.json`,
+`journal_archive.json`, `cycles.json`, `cycles_archive.json`,
 `messages/inbox_history.json`, `messages/inbox.json`).
 
 The tool exists because the `.mv2` can grow much faster than the underlying

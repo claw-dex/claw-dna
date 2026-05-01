@@ -1,6 +1,6 @@
 # BOOTSTRAP: First Cycle — Evolve Toward Your First Goal
 
-> **Enum Reference:** See `prompts/enum.md` for valid `status` values used during bootstrap.
+> **Enum Reference:** See `prompts/enum.md` for valid `agent_status` values used during bootstrap.
 
 This is your very first cycle. The multi-service gateway is running:
 Caddy (port 8080) and Streamlit (port 8081 at /app/).
@@ -64,8 +64,7 @@ with open('/agent/memory/state.json') as f:
 now = datetime.datetime.now(datetime.timezone.utc).isoformat()
 s.update({'cycle_number': 0, 'status': 'bootstrapping',
           'last_cycle_summary': 'Bootstrap: evolved agent toward first goal',
-          'created_at': now, 'last_heartbeat': now,
-          'last_cycle_run': now, 'last_cycle_end': None})
+          'last_heartbeat': now, 'last_cycle_run': now})
 import tempfile, os
 tmp = '/agent/memory/state.json.tmp'
 with open(tmp, 'w') as f:
@@ -93,8 +92,8 @@ import json
 with open('/agent/memory/state.json') as f:
     s = json.load(f)
 assert 'cycle_number' in s, 'cycle_number not set'
-assert s.get('status'), 'status missing'
-print('state.json OK:', json.dumps({k: s[k] for k in ['cycle_number', 'status', 'last_heartbeat', 'last_cycle_run']}, indent=2))
+assert s.get('agent_status'), 'agent_status missing'
+print('state.json OK:', json.dumps({k: s[k] for k in ['cycle_number', 'agent_status', 'last_heartbeat', 'last_cycle_run']}, indent=2))
 "
 ```
 

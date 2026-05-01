@@ -5,8 +5,8 @@ memory_inspect.py — Inspect a long-term memory `.mv2` file (memvid SDK).
 Read-only diagnostics for a memvid `.mv2` index. Reports on-disk footprint
 (file + sibling artifacts), total frame/entry count, source/label/tag
 distribution, preview-length distribution, and timestamp span. Also compares
-the indexed counts against the source JSON files (journal, cycles, inbox
-history) so you can spot inflation from auto-chunking or stale records.
+the indexed counts against the source JSON files (journal, journal archive,
+inbox history) so you can spot inflation from auto-chunking or stale records.
 
 Usage:
     uv run python scripts/memory_inspect.py
@@ -19,7 +19,7 @@ Usage:
 Optional:
     --mv2 PATH        Path to the .mv2 file (default: /agent/memory/long_term_memory.mv2)
     --memory PATH     Path to the memory directory holding the source JSON files
-                      (journal/cycles/inbox_history). Defaults to the parent
+                      (journal/journal_archive/inbox_history). Defaults to the parent
                       directory of --mv2, so passing --mv2 alone is enough for
                       most cases.
     --limit N         Max entries to iterate via timeline() (default: 200000)
@@ -558,14 +558,22 @@ def _safe_load_list(p: Path) -> int:
         return 0
 
 
+def _load_with_legacy(memory_dir: Path, name: str, legacy_name: str) -> int:
+    """Count entries from `name`, falling back to `legacy_name` if the new file is absent."""
+    new_path = memory_dir / name
+    if new_path.exists():
+        return _safe_load_list(new_path)
+    return _safe_load_list(memory_dir / legacy_name)
+
+
 def inspect_sources(memory_dir: Path) -> dict:
     """Count entries in each source JSON the build path would ingest."""
     msgs_dir = memory_dir.resolve().parent / "messages"
     return {
         "journal.json": _safe_load_list(memory_dir / "journal.json"),
-        "journal-archive.json": _safe_load_list(memory_dir / "journal-archive.json"),
-        "cycles.json": _safe_load_list(memory_dir / "cycles.json"),
-        "cycles-archive.json": _safe_load_list(memory_dir / "cycles-archive.json"),
+        "journal_archive.json": _load_with_legacy(
+            memory_dir, "journal_archive.json", "journal-archive.json"
+        ),
         "messages/inbox_history.json": _safe_load_list(msgs_dir / "inbox_history.json"),
         "messages/inbox.json": _safe_load_list(msgs_dir / "inbox.json"),
     }

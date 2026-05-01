@@ -29,7 +29,7 @@ MEMORY_DIR = Path("/agent/memory")
 WORKSPACE_DIR = Path("/agent/workspace")
 SCRIPTS_DIR = Path("/agent/scripts")
 JOURNAL_PATH = MEMORY_DIR / "journal.json"
-JOURNAL_ARCHIVE = MEMORY_DIR / "journal-archive.json"
+JOURNAL_ARCHIVE = MEMORY_DIR / "journal_archive.json"
 LOGS_DIR = MEMORY_DIR / "logs"
 
 # Thresholds
@@ -44,7 +44,7 @@ def check_memory_integrity():
     """Validate all memory JSON files."""
     results = []
     json_files = {
-        "state.json": {"required": ["cycle_number", "status", "last_heartbeat"]},
+        "state.json": {"required": ["cycle_number", "agent_status", "last_heartbeat"]},
         "cycles.json": {"required": None},  # array
         "goal.json": {"required": None},  # array
     }

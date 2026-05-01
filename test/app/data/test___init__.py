@@ -92,10 +92,10 @@ def test_memory_workspace_system_loaders_resolve():
         assert callable(fn)
 
 
-def test_script_search_suggest_resolve():
-    from app.data import load_scripts, search, load_suggest
+def test_script_suggest_resolve():
+    from app.data import load_scripts, load_suggest
 
-    for fn in (load_scripts, search, load_suggest):
+    for fn in (load_scripts, load_suggest):
         assert callable(fn)
 
 
@@ -158,7 +158,6 @@ def test_module_exposes_expected_names():
         "load_inbox",
         "load_logs",
         "load_scripts",
-        "search",
         "load_suggest",
         "queue_to_inbox",
         "save_portal_config",

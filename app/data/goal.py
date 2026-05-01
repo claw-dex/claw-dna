@@ -52,10 +52,10 @@ def load_goal_stats():
     goal_cycles = [
         c
         for c in cycles
-        if c.get("type") == "goal" and c.get("duration_seconds") is not None
+        if c.get("cycle_type") == "goal" and c.get("duration_seconds") is not None
     ]
     goal_cycle_durations = [
-        (c.get("cycle", "?"), c["duration_seconds"]) for c in goal_cycles
+        (c.get("cycle_number", "?"), c["duration_seconds"]) for c in goal_cycles
     ]
 
     avg_dur = None

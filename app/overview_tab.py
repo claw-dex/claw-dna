@@ -42,19 +42,21 @@ def _render_today_glance(now_utc):
     ]
 
     today_secs = sum(c.get("duration_seconds") or 0 for c in today_cycles)
-    today_completed = sum(1 for c in today_cycles if c.get("status") == "completed")
+    today_completed = sum(
+        1 for c in today_cycles if c.get("cycle_status") == "completed"
+    )
     yesterday_completed = len(
-        [c for c in yesterday_cycles if c.get("status") == "completed"]
+        [c for c in yesterday_cycles if c.get("cycle_status") == "completed"]
     )
 
     # Category breakdown for today
     today_cats: dict[str, int] = {}
     today_types: dict[str, int] = {}
     for c in today_cycles:
-        cat = c.get("category", "")
+        cat = c.get("cycle_category", "")
         if cat:
             today_cats[cat] = today_cats.get(cat, 0) + 1
-        ctype = c.get("type", "unknown")
+        ctype = c.get("cycle_type", "unknown")
         today_types[ctype] = today_types.get(ctype, 0) + 1
 
     # Load journal entries for cycle summaries (journals have richer text than cycles.json)
@@ -119,17 +121,17 @@ def _render_today_glance(now_utc):
 
     # Build journal lookup by cycle number
     journal_by_cycle = {
-        int(je.get("cycle", -1)): je
+        int(je.get("cycle_number", -1)): je
         for je in journal_entries
-        if je.get("cycle") is not None
+        if je.get("cycle_number") is not None
     }
 
     items_html = []
     for c in today_sorted:
-        cn = c.get("cycle", "?")
-        ctype = c.get("type", "?")
-        cat = c.get("category", "")
-        status = c.get("status", "")
+        cn = c.get("cycle_number", "?")
+        ctype = c.get("cycle_type", "?")
+        cat = c.get("cycle_category", "")
+        status = c.get("cycle_status", "")
         dur = c.get("duration_seconds")
         start_ts = str(c.get("start", ""))[11:16]  # HH:MM
 
@@ -447,7 +449,7 @@ def render():
     completed_cycles = [
         c
         for c in cycles_data
-        if c.get("status") == "completed"
+        if c.get("cycle_status") == "completed"
         and c.get("start")
         and c.get("duration_seconds")
     ]
@@ -461,7 +463,7 @@ def render():
 
         # Rolling 5-cycle avg duration
         durs = [c["duration_seconds"] for c in recent_cycles]
-        cycle_nums = [c.get("cycle", "?") for c in recent_cycles]
+        cycle_nums = [c.get("cycle_number", "?") for c in recent_cycles]
 
         max_dur = max(durs) or 1
         n = len(durs)
@@ -484,12 +486,12 @@ def render():
             x = 10 + i * (bar_w + gap)
             bar_h = max(4, int(dur / max_dur * 50))
             y = svg_h - bar_h
-            color = type_colors.get(c.get("type", ""), "#9E9E9E")
+            color = type_colors.get(c.get("cycle_type", ""), "#9E9E9E")
             dur_label = f"{dur}s" if dur < 60 else f"{dur//60}m"
             parts.append(
                 f'<rect x="{x}" y="{y}" width="{bar_w}" height="{bar_h}" '
                 f'fill="{color}" rx="2" opacity="0.8">'
-                f'<title>Cycle {cn} ({c.get("type","?")}): {dur_label}</title></rect>'
+                f'<title>Cycle {cn} ({c.get("cycle_type","?")}): {dur_label}</title></rect>'
             )
             parts.append(
                 f'<text x="{x + bar_w//2}" y="{svg_h + 12}" text-anchor="middle" '
@@ -519,10 +521,14 @@ def render():
         # Summary stats
         avg_all = round(sum(durs) / len(durs))
         evolve_durs = [
-            c["duration_seconds"] for c in recent_cycles if c.get("type") == "evolve"
+            c["duration_seconds"]
+            for c in recent_cycles
+            if c.get("cycle_type") == "evolve"
         ]
         goal_durs = [
-            c["duration_seconds"] for c in recent_cycles if c.get("type") == "goal"
+            c["duration_seconds"]
+            for c in recent_cycles
+            if c.get("cycle_type") == "goal"
         ]
         sc1, sc2, sc3 = st.columns(3)
         with sc1:
@@ -550,7 +556,7 @@ def render():
     # Build a map from cycle number → journal entry for rich summaries
     journal_by_cycle: dict[int, dict] = {}
     for je in journal_entries:
-        cn = je.get("cycle")
+        cn = je.get("cycle_number")
         if cn is not None:
             try:
                 journal_by_cycle[int(cn)] = je
@@ -562,7 +568,8 @@ def render():
     improvement_cycles = [
         c
         for c in all_cycles
-        if c.get("status") == "completed" and c.get("type") in ("evolve", "goal")
+        if c.get("cycle_status") == "completed"
+        and c.get("cycle_type") in ("evolve", "goal")
     ]
     improvement_cycles.sort(key=lambda c: c.get("start", ""), reverse=True)
 
@@ -579,9 +586,9 @@ def render():
         st.info("No completed evolve or goal cycles yet.")
     else:
         for c in improvement_cycles:
-            cycle_num = c.get("cycle", "?")
-            ctype = c.get("type", "evolve")
-            category = c.get("category", "")
+            cycle_num = c.get("cycle_number", "?")
+            ctype = c.get("cycle_type", "evolve")
+            category = c.get("cycle_category", "")
             start = str(c.get("start", ""))[:16].replace("T", " ")
             dur = c.get("duration_seconds")
 

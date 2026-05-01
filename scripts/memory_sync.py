@@ -104,15 +104,18 @@ def render_services() -> str:
 
 
 def render_state() -> str:
+    from scripts.memory_repair import migrate_state_dict
+
     data = load_json(MEMORY / "state.json")
     if not isinstance(data, dict):
         return ""
+    migrate_state_dict(data)
     md = frontmatter(
         "Current State",
-        "This assistant's current cycle number, status, and last heartbeat timestamp",
+        "This assistant's current cycle number, agent status, and last heartbeat timestamp",
     )
     md += f"- **Cycle**: {data.get('cycle_number', '?')}\n"
-    md += f"- **Status**: {data.get('status', '?')}\n"
+    md += f"- **Agent status**: {data.get('agent_status', '?')}\n"
     md += f"- **Last heartbeat**: {data.get('last_heartbeat', 'N/A')}\n"
     md += f"- **Last cycle run**: {data.get('last_cycle_run', 'N/A')}\n"
     summary = data.get("last_cycle_summary", "")
@@ -125,9 +128,12 @@ def render_state() -> str:
 
 
 def render_cycles() -> str:
+    from scripts.memory_repair import migrate_cycles_list
+
     data = load_json(MEMORY / "cycles.json")
     if not isinstance(data, list):
         return ""
+    migrate_cycles_list(data)
     md = frontmatter(
         "Recent Cycles",
         "This assistant's recent cycle history with type, category, status, and duration",
@@ -137,10 +143,10 @@ def render_cycles() -> str:
         md += "No cycles recorded yet.\n"
         return md
     for c in reversed(recent):
-        cycle_num = c.get("cycle", "?")
-        ctype = c.get("type", "?")
-        status = c.get("status", "?")
-        cat = c.get("category", "")
+        cycle_num = c.get("cycle_number", "?")
+        ctype = c.get("cycle_type", "?")
+        status = c.get("cycle_status", "?")
+        cat = c.get("cycle_category", "")
         dur = c.get("duration_seconds")
         summary = c.get("summary", "")
         dur_str = f" ({_fmt_dur(dur)})" if dur else ""
@@ -155,9 +161,12 @@ def render_cycles() -> str:
 
 
 def render_journal() -> str:
+    from scripts.memory_repair import migrate_journal_list
+
     data = load_json(MEMORY / "journal.json")
     if not isinstance(data, list):
         return ""
+    migrate_journal_list(data)
     md = frontmatter(
         "Journal",
         "This assistant's recent journal entries from completed cycles with full details",
@@ -167,16 +176,14 @@ def render_journal() -> str:
         md += "No journal entries yet.\n"
         return md
     for e in reversed(recent):
-        cycle = e.get("cycle", "?")
+        cycle = e.get("cycle_number", "?")
         ts = (e.get("timestamp", "") or "")[:16]
-        ctype = e.get("type", "")
-        status = e.get("status", "")
-        goal = e.get("goal", "")
+        ctype = e.get("cycle_type", "")
+        status = e.get("cycle_status", "")
+        goal = e.get("cycle_goal", "")
         summary = e.get("summary", "")
-        category = e.get("category", "")
+        category = e.get("cycle_category", "")
         actions = e.get("actions", [])
-        outcome = e.get("outcome", "")
-        learnings = e.get("learnings", {})
 
         # Header with cycle, type, status, category
         header_parts = [f"**Cycle {cycle}**"]
@@ -202,23 +209,6 @@ def render_journal() -> str:
             md += "**Actions**:\n"
             for action in actions:
                 md += f"- {action}\n"
-            md += "\n"
-
-        # Outcome
-        if outcome:
-            md += f"**Outcome**: {outcome}\n\n"
-
-        # Learnings
-        if learnings and isinstance(learnings, dict):
-            md += "**Learnings**:\n"
-            if learnings.get("approach"):
-                md += f"- **Approach**: {learnings['approach']}\n"
-            if learnings.get("key_decisions"):
-                md += f"- **Key decisions**: {learnings['key_decisions']}\n"
-            if learnings.get("reusable_patterns"):
-                md += f"- **Reusable patterns**: {learnings['reusable_patterns']}\n"
-            if learnings.get("pitfalls"):
-                md += f"- **Pitfalls**: {learnings['pitfalls']}\n"
             md += "\n"
 
         md += "---\n\n"

@@ -58,9 +58,8 @@ def ago(ts_str: str) -> str:
 
 def summarize_state(state: dict) -> dict:
     return {
-        "cycle": state.get("cycle_number"),
-        "status": state.get("status"),
-        "goal_status": state.get("goal_status"),
+        "cycle_number": state.get("cycle_number"),
+        "agent_status": state.get("agent_status"),
         "last_heartbeat": state.get("last_heartbeat"),
         "last_cycle_summary": state.get("last_cycle_summary", "")[:120],
     }
@@ -83,12 +82,14 @@ def summarize_goals(goals_data: list) -> dict:
 def summarize_cycles(cycles: list) -> dict:
     if not cycles:
         return {}
-    by_type = Counter(c.get("type", "unknown") for c in cycles)
-    evolve_cycles = [c for c in cycles if c.get("type") == "evolve"]
-    by_category = Counter(c.get("category", "unknown") for c in evolve_cycles)
+    by_type = Counter(c.get("cycle_type", "unknown") for c in cycles)
+    evolve_cycles = [c for c in cycles if c.get("cycle_type") == "evolve"]
+    by_category = Counter(c.get("cycle_category", "unknown") for c in evolve_cycles)
 
     completed = [
-        c for c in cycles if c.get("status") == "completed" and "duration_seconds" in c
+        c
+        for c in cycles
+        if c.get("cycle_status") == "completed" and "duration_seconds" in c
     ]
     avg_dur = (
         sum(c["duration_seconds"] for c in completed) / len(completed)
@@ -213,7 +214,14 @@ def main():
     short_mode = "--short" in args
 
     # Load all memory files
+    from scripts.memory_repair import (
+        migrate_cycles_list,
+        migrate_journal_list,
+        migrate_state_dict,
+    )
+
     state = load_json(MEMORY / "state.json") or {}
+    migrate_state_dict(state)
     goals_raw = load_json(MEMORY / "goal.json")
     goals_list = (
         goals_raw
@@ -221,10 +229,14 @@ def main():
         else (goals_raw.get("goals", []) if isinstance(goals_raw, dict) else [])
     )
     cycles = load_json(MEMORY / "cycles.json") or []
+    migrate_cycles_list(cycles)
     journal = load_json(MEMORY / "journal.json") or []
+    migrate_journal_list(journal)
     failures_raw = {
         "failures": [
-            e for e in journal if isinstance(e, dict) and e.get("status") == "failed"
+            e
+            for e in journal
+            if isinstance(e, dict) and e.get("cycle_status") == "failed"
         ]
     }
     capabilities_raw = load_json(MEMORY / "capabilities.json")
@@ -289,7 +301,6 @@ def main():
     print(f"\n[STATE]")
     print(f"  Cycle:         {s.get('cycle', '?')}")
     print(f"  Status:        {s.get('status', '?')}")
-    print(f"  Goal status:   {s.get('goal_status', '?')}")
     print(f"  Last HB:       {hb}")
     print(f"  Last summary:  {s.get('last_cycle_summary', '')[:100]}")
 

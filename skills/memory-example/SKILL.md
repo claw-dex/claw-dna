@@ -491,7 +491,7 @@ Entry:
   ],
   "responsibilities": "Run web research, source-check claims, and summarise long PDFs",
   "status": "online",
-  "timeout_seconds": 300,
+  "timeout_seconds": 1800,
   "last_ping_at": "2026-04-30T12:34:56+00:00"
 }
 ```
@@ -505,7 +505,7 @@ Entry:
   - `online`: pinging within the timeout window; eligible for delegation. Surfaced in the goal-mode `[AGENTS]` section of `cycle_start.py`.
   - `offline`: missed the ping window; the sweeper still forwards its outbox if it shows up, but the main agent should avoid assigning new work.
   - `deactivated`: the agent has been deactivated (either by the main agent or itself)
-- `timeout_seconds`: how long without a ping before status flips to `offline`. Default 300s. Per-agent.
+- `timeout_seconds`: how long without a ping before status flips to `offline`. Default 1800s (30 minutes). Per-agent.
 - `last_ping_at`: ISO8601 UTC timestamp of the most recent successful ping. `null` until the agent's first ping.
 
 ---

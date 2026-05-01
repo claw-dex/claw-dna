@@ -61,22 +61,16 @@ def test_parse_args_missing_value(capsys):
 def test_compose_journal_text():
     text = mi.compose_journal_text(
         {
-            "goal": "G",
+            "cycle_goal": "G",
             "summary": "S",
             "actions": ["a1", "a2"],
-            "outcome": "O",
-            "category": "explore",
-            "learnings": {
-                "approach": "ap",
-                "key_decisions": ["k1"],
-                "pitfalls": "watch out",
-            },
+            "cycle_category": "explore",
         }
     )
     assert "Goal: G" in text
+    assert "Summary: S" in text
     assert "Actions: a1; a2" in text
-    assert "Outcome: O" in text
-    assert "Approach: ap" in text
+    assert "Category: explore" in text
 
 
 def test_chunk_journal_skips_short():
@@ -184,6 +178,13 @@ def test_gather_all_chunks(tmp_path):
     (mem / "journal.json").write_text(
         json.dumps([{"cycle": 1, "summary": "ok work done here", "actions": ["a"]}])
     )
+    (mem / "journal_archive.json").write_text(
+        json.dumps(
+            [{"cycle": 0, "summary": "older entry text content", "actions": ["b"]}]
+        )
+    )
+    # cycles.json is intentionally written but ignored — gather_all_chunks
+    # no longer ingests cycle records.
     (mem / "cycles.json").write_text(
         json.dumps(
             [{"cycle": 1, "summary": "ok work done here", "start": "2026-01-01"}]
@@ -193,12 +194,10 @@ def test_gather_all_chunks(tmp_path):
         json.dumps([{"content": "an inbox message body", "type": "user"}])
     )
     chunks = mi.gather_all_chunks(mem)
-    # Should have at least journal + cycles + inbox
-    assert len(chunks) >= 3
     sources = {c["metadata"]["source"] for c in chunks}
     assert "journal" in sources
-    assert "cycle" in sources
     assert "inbox" in sources
+    assert "cycle" not in sources
 
 
 def test_detect_and_chunk_journal_route():

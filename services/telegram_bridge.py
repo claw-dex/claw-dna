@@ -878,7 +878,12 @@ def handle_status_command(
         goals = json.loads(goals_path.read_text()) if goals_path.exists() else []
         cycles = json.loads(cycles_path.read_text()) if cycles_path.exists() else []
 
-        status = state.get("status", "unknown")
+        from scripts.memory_repair import migrate_state_dict
+
+        if isinstance(state, dict):
+            migrate_state_dict(state)
+
+        status = state.get("agent_status", "unknown")
         cycle_num = state.get("cycle_number", "?")
         last_hb = state.get("last_heartbeat", "unknown")
         summary = state.get("last_cycle_summary", "")
@@ -1077,14 +1082,18 @@ def handle_today_command(
         # --- Cycles run today ---
         cycles_path = BASE / "memory" / "cycles.json"
         cycles = json.loads(cycles_path.read_text()) if cycles_path.exists() else []
+        from scripts.memory_repair import migrate_cycles_list
+
+        if isinstance(cycles, list):
+            migrate_cycles_list(cycles)
         cycles_today = [
             c
             for c in cycles
-            if c.get("status") == "completed"
+            if c.get("cycle_status") == "completed"
             and (c.get("end_time") or c.get("start_time") or "") >= cutoff_str
         ]
-        evolve_today = [c for c in cycles_today if c.get("type") == "evolve"]
-        goal_today = [c for c in cycles_today if c.get("type") == "goal"]
+        evolve_today = [c for c in cycles_today if c.get("cycle_type") == "evolve"]
+        goal_today = [c for c in cycles_today if c.get("cycle_type") == "goal"]
 
         lines = [
             f"📅 *Today's Summary* _\\(last 24h as of {escape_markdown_v2(now.strftime('%H:%M'))} UTC\\)_\n"
@@ -1219,8 +1228,12 @@ def handle_cycles_command(
             append_chat_message(chat_history, from_chat, "bot", response)
             return
 
+        from scripts.memory_repair import migrate_cycles_list
+
+        migrate_cycles_list(cycles)
+
         # Filter to completed cycles only, most recent first
-        completed = [c for c in cycles if c.get("status") == "completed"]
+        completed = [c for c in cycles if c.get("cycle_status") == "completed"]
         recent = completed[-limit:][::-1]  # last N, reversed to newest-first
 
         total = len(completed)
@@ -1236,9 +1249,9 @@ def handle_cycles_command(
         lines = [header]
 
         for c in recent:
-            num = c.get("cycle", "?")
-            ctype = c.get("type", "unknown")
-            cat = c.get("category", "")
+            num = c.get("cycle_number", "?")
+            ctype = c.get("cycle_type", "unknown")
+            cat = c.get("cycle_category", "")
             dur = c.get("duration_seconds")
             summary = (c.get("summary", "") or "")[:120]
             if len(c.get("summary", "") or "") > 120:

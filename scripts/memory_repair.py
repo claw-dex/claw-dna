@@ -32,17 +32,23 @@ def _now():
 
 
 # ── Defaults for reconstruction ────────────────────────────────────────────────
+#
+# state.json defaults are duplicated from app/shared.py:STATE_DEFAULTS so that
+# memory_repair can run when the app/ package itself is unimportable (the
+# whole point of a recovery tool). Keep these two in sync — fields here that
+# diverge from STATE_DEFAULTS are scoped to repair-time only:
+#   - last_cycle_summary  → marker so post-repair journals identify the source
+#   - last_heartbeat / last_cycle_run → timestamped to "now" instead of None,
+#     because a freshly-repaired state implies the agent just ran.
 
 DEFAULTS = {
     "state.json": {
-        "cycle_number": 1,
-        "status": "idle",
+        "cycle_number": 0,
+        "agent_status": "idle",
         "current_goal": None,
         "last_cycle_summary": "Reconstructed by memory_repair.py",
-        "created_at": _now(),
         "last_heartbeat": _now(),
         "last_cycle_run": _now(),
-        "last_cycle_end": None,
         "services": {},
     },
     "cycles.json": [],
@@ -57,6 +63,86 @@ STATUS_OK = "ok"
 STATUS_REPAIRED = "repaired"
 STATUS_FAILED = "failed"
 STATUS_BACKUP = "backed-up"
+
+
+# ── Schema migration helpers ───────────────────────────────────────────────────
+#
+# Field renames to keep names consistent and disambiguated across the three
+# memory files (state.json / cycles.json / journal.json). Every loader should
+# call the appropriate migrate_* function on each loaded record so readers
+# only ever see the new names — writers also emit only new names. When data
+# gets rewritten to disk the legacy keys are dropped permanently.
+#
+# Old → new key maps:
+_STATE_KEY_RENAMES = {"status": "agent_status"}
+_CYCLE_KEY_RENAMES = {
+    "cycle": "cycle_number",
+    "status": "cycle_status",
+    "type": "cycle_type",
+    "category": "cycle_category",
+    "goal": "cycle_goal",  # carried forward from the prior round
+}
+_JOURNAL_KEY_RENAMES = {
+    "cycle": "cycle_number",
+    "status": "cycle_status",
+    "type": "cycle_type",
+    "category": "cycle_category",
+    "goal": "cycle_goal",
+}
+
+
+def _apply_renames(entry: dict, mapping: dict) -> bool:
+    """Rename legacy keys on ``entry`` in place. Returns True if any change.
+
+    If both old and new keys are present, prefer the new value and drop the
+    legacy one (idempotent — safe to call repeatedly).
+    """
+    changed = False
+    for old, new in mapping.items():
+        if old in entry:
+            if new not in entry:
+                entry[new] = entry.pop(old)
+            else:
+                del entry[old]
+            changed = True
+    return changed
+
+
+def migrate_state_dict(state: dict) -> dict:
+    """Migrate state.json field names in place. Returns the same dict."""
+    if isinstance(state, dict):
+        _apply_renames(state, _STATE_KEY_RENAMES)
+    return state
+
+
+def migrate_cycle_entry(entry: dict) -> dict:
+    """Migrate a single cycles.json entry in place. Returns the same dict."""
+    if isinstance(entry, dict):
+        _apply_renames(entry, _CYCLE_KEY_RENAMES)
+    return entry
+
+
+def migrate_journal_entry(entry: dict) -> dict:
+    """Migrate a single journal.json entry in place. Returns the same dict."""
+    if isinstance(entry, dict):
+        _apply_renames(entry, _JOURNAL_KEY_RENAMES)
+    return entry
+
+
+def migrate_cycles_list(cycles: list) -> list:
+    """Migrate every entry in a cycles.json list. Mutates and returns it."""
+    if isinstance(cycles, list):
+        for entry in cycles:
+            migrate_cycle_entry(entry)
+    return cycles
+
+
+def migrate_journal_list(journal: list) -> list:
+    """Migrate every entry in a journal.json list. Mutates and returns it."""
+    if isinstance(journal, list):
+        for entry in journal:
+            migrate_journal_entry(entry)
+    return journal
 
 
 # ── Core helpers (stateless) ───────────────────────────────────────────────────
@@ -375,30 +461,43 @@ def _check_journal(results: list, dry_run: bool):
 
 
 def _normalize_statuses(results: list, dry_run: bool):
-    """Normalize legacy 'in-progress' (hyphen) → 'in_progress' (underscore) in
-    goal.json and cycles.json. No-op once all entries are already normalized."""
-    for filename in ("goal.json", "cycles.json"):
+    """Normalize legacy 'in-progress' (hyphen) → 'in_progress' (underscore) and
+    apply schema-key renames (cycles → cycle_status etc.). No-op once
+    everything is already normalized.
+
+    Acts on goal.json (status field), cycles.json (cycle_status after
+    rename), and journal.json (cycle_status after rename).
+    """
+    targets = [
+        ("goal.json", None, "status"),
+        ("cycles.json", migrate_cycles_list, "cycle_status"),
+        ("journal.json", migrate_journal_list, "cycle_status"),
+    ]
+    for filename, migrator, status_key in targets:
         path = MEMORY_DIR / filename
         if not path.exists():
             continue
         valid, data = _is_valid_json(path)
         if not valid or not isinstance(data, list):
             continue
-        updated = []
         changed = False
-        for entry in data:
-            if isinstance(entry, dict) and entry.get("status") == "in-progress":
-                entry = {**entry, "status": "in_progress"}
+        if migrator is not None:
+            before = json.dumps(data, sort_keys=True)
+            migrator(data)
+            if json.dumps(data, sort_keys=True) != before:
                 changed = True
-            updated.append(entry)
+        for entry in data:
+            if isinstance(entry, dict) and entry.get(status_key) == "in-progress":
+                entry[status_key] = "in_progress"
+                changed = True
         if changed and not dry_run:
-            _write_safe(path, updated)
+            _write_safe(path, data)
             results.append(
                 {
                     "file": filename,
                     "status": STATUS_REPAIRED,
                     "action": "status-normalized",
-                    "detail": "migrated 'in-progress' → 'in_progress'",
+                    "detail": "migrated keys/values to current schema",
                 }
             )
 

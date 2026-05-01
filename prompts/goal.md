@@ -17,11 +17,14 @@ uv run python scripts/cycle_start.py --mode goal \
 # Omit --goal only if you genuinely don't know yet what you'll work on (rare in goal mode).
 ```
 
-The `--goal` text is stored on the in-progress cycle entry in `cycles.json` and is picked
-up automatically by `cycle_close.py` when it writes the journal entry — so you don't need
-to repeat it at close time. The goal must describe the *plan* ("Implement X for user
-request Y", "Continue in-progress goal Z"), not the outcome — the outcome belongs in
-`--summary` at close. See `prompts/cycle-close.md` for the full rule on goal vs summary.
+The `--goal` text is stored on the in-progress cycle entry in `cycles.json` under the
+`cycle_goal` field. `cycle_close.py` reads it from there when writing the journal entry,
+so you don't need to repeat it at close — pass `--goal` at close only if the plan
+diverged or no `cycle_goal` was recorded at start. The goal must describe the *plan*
+("Implement X for user request Y", "Continue in-progress goal Z"), not the outcome —
+the outcome belongs in `--summary` at close. `state.current_goal` is the dynamic
+in-flight sub-task (the agent may update it mid-cycle); it is not what gets written
+to the journal. See `prompts/cycle-close.md` for the full rule on goal vs summary.
 
 Review the output before proceeding. If memory-repair reports any fixes, note them in your journal.
 
@@ -177,7 +180,7 @@ After processing `<new_goals_to_start>` and `<your_inbox_messages>` (or if both 
 2. Read `state.json` -> `last_cycle_summary` — this tells you what was done last cycle
 3. Read `journal.json` for the recent entries to understand current progress
 4. Continue working from where you left off
-5. Update `state.json` -> `status` and `current_goal` as you make progress
+5. Update `state.json` -> `agent_status` and `current_goal` as you make progress
 6. If the goal is complete, update `/agent/memory/goal.json` to set status to "completed" and `updated_at` to now
 7. After completing a non-trivial goal, read `/agent/prompts/post-goal-review.md` and add a Review line to your journal
 
@@ -219,8 +222,8 @@ If a goal is too large for one cycle:
    - Current phase completed
    - Next phase to start
    - Any blockers or decisions needed
-4. Set goal status to "in_progress" (not "completed") and `goal_status` in state.json to "in_progress"
-5. The next cycle reads state.json and journal to continue — write as if the reader has no memory of this cycle
+4. Set the goal's `status` to `"in_progress"` (not `"completed"`) in `goal.json` so the next cycle can resume it.
+5. The next cycle reads `state.json` and `journal.json` to continue — write as if the reader has no memory of this cycle.
 
 ## Rules
 

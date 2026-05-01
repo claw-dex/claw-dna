@@ -14,12 +14,13 @@ uv run python scripts/cycle_start.py --mode evolve    # status, past goals, rece
 Review the git log to understand what past cycles have changed — avoid repeating recent work
 and build on what's already been done. Then review the cycle-start output.
 
-**Goal is set at cycle close, not at start.** Unlike `goal` mode, the planned goal
+**Goal is set after cycle start, not at start.** Unlike `goal` mode, the planned goal
 isn't known until you've reviewed the `[EVOLVE RECOMMENDATION]` and chosen what to work
-on — and there's no need to commit it mid-flight. Pass it to `cycle_close.py --goal "..."`
-at the end of the cycle (see Step 5 below). The goal describes the *plan* (what you
-took on); the summary describes the *outcome* (what you delivered). Keep them distinct —
-see `prompts/cycle-close.md` for the rule.
+on. Once you've picked a category, patch the in-progress entry in `cycles.json` to set
+`cycle_goal` (so the cycle record carries the plan), or pass `--goal "..."` to
+`cycle_close.py` at the end of the cycle (see Step 5 below). The goal describes the
+*plan* (what you took on); the summary describes the *outcome* (what you delivered).
+Keep them distinct — see `prompts/cycle-close.md` for the rule.
 
 This outputs your current state, recent journal, failures, AND the evolve recommendation
 with **dynamic score-based analysis**. The `[EVOLVE RECOMMENDATION]` section shows:
@@ -40,7 +41,7 @@ Then skim:
 
 ## Step 1.5: Check for Human Escalation
 
-Read `/agent/memory/state.json` and check if the `status` field equals `"waiting_for_human"`.
+Read `/agent/memory/state.json` and check if the `agent_status` field equals `"waiting_for_human"`.
 
 If status is `"waiting_for_human"`:
 

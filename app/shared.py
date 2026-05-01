@@ -109,18 +109,22 @@ _CRITICAL_DIRS = [
     f"{AGENT_DIR}/web",
     f"{AGENT_DIR}/workspace",
 ]
+# Canonical defaults for /agent/memory/state.json. Single source of truth —
+# scripts/app_check.py imports this; scripts/memory_repair.py keeps a
+# parallel copy (with timestamps) because it must run even when app/ is
+# unimportable, and that copy carries a comment pointing back here.
+STATE_DEFAULTS = {
+    "cycle_number": 0,
+    "agent_status": "idle",
+    "current_goal": None,
+    "last_cycle_summary": None,
+    "last_heartbeat": None,
+    "last_cycle_run": None,
+    "services": {},
+}
+
 _CRITICAL_FILES = {
-    f"{MEMORY_DIR}/state.json": {
-        "cycle_number": 0,
-        "status": "idle",
-        "current_goal": None,
-        "last_cycle_summary": None,
-        "created_at": None,
-        "last_heartbeat": None,
-        "last_cycle_run": None,
-        "last_cycle_end": None,
-        "services": {},
-    },
+    f"{MEMORY_DIR}/state.json": dict(STATE_DEFAULTS),
     f"{MEMORY_DIR}/cycles.json": [],
     GOALS_PATH: [],
     HISTORY_PATH: [],

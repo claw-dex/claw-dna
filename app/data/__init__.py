@@ -60,9 +60,6 @@ from app.data.system import (  # noqa: F401
 # Scripts
 from app.data.script import load_scripts  # noqa: F401
 
-# Search
-from app.data.search import search  # noqa: F401
-
 # Suggestions
 from app.data.suggest import load_suggest  # noqa: F401
 

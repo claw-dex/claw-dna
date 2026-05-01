@@ -33,26 +33,26 @@ def _write_json(path, obj):
 
 def test_load_state_returns_default_when_missing(memory_dir):
     result = state.load_state()
-    assert result == {"status": "awaiting_first_heartbeat", "cycle_number": 0}
+    assert result == {"agent_status": "awaiting_first_heartbeat", "cycle_number": 0}
 
 
 def test_load_state_reads_existing_json(memory_dir):
     _write_json(
         memory_dir / "state.json",
-        {"status": "running", "cycle_number": 7, "services": {}},
+        {"agent_status": "running", "cycle_number": 7, "services": {}},
     )
     result = state.load_state()
-    assert result["status"] == "running"
+    assert result["agent_status"] == "running"
     assert result["cycle_number"] == 7
 
 
 def test_load_state_uses_cache_on_unchanged_mtime(memory_dir):
     state_path = memory_dir / "state.json"
-    _write_json(state_path, {"status": "a", "cycle_number": 1})
+    _write_json(state_path, {"agent_status": "a", "cycle_number": 1})
     first = state.load_state()
     # Mutate file content but DO NOT change mtime (cache should be served)
     mtime = os.path.getmtime(state_path)
-    _write_json(state_path, {"status": "different", "cycle_number": 99})
+    _write_json(state_path, {"agent_status": "different", "cycle_number": 99})
     os.utime(state_path, (mtime, mtime))
     second = state.load_state()
     assert second == first

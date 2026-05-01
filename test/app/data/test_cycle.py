@@ -39,10 +39,10 @@ def _write(p, obj):
 def test_load_cycles_returns_list(patch_cycle_paths):
     _write(
         patch_cycle_paths["memory"] / "cycles.json",
-        [{"cycle": 1, "status": "completed"}],
+        [{"cycle_number": 1, "cycle_status": "completed"}],
     )
     cache_mod._cache_clear_all()
-    assert cycle_mod.load_cycles() == [{"cycle": 1, "status": "completed"}]
+    assert cycle_mod.load_cycles() == [{"cycle_number": 1, "cycle_status": "completed"}]
 
 
 def test_load_cycles_missing_returns_empty(patch_cycle_paths):
