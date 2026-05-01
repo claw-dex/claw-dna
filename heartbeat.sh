@@ -286,8 +286,7 @@ PUBLIC
 build_task_prompt() {
     local mode="$1"
 
-    echo "This is cycle #${CYCLE_NUM}. Current date and time: ${USER_TIME} (${USER_TZ})."
-    echo ""
+    # ── STATIC PREFIX (cache-friendly: identical across cycles for a given mode) ──
     echo "CRITICAL: ONE cycle per heartbeat. Run cycle_start.py exactly once at the start"
     echo "and cycle_close.py exactly once at the end. Never create additional cycle entries"
     echo "in cycles.json. If you discover new goals or inbox items, leave them for the next"
@@ -298,9 +297,6 @@ build_task_prompt() {
         bootstrap)
             cat /agent/prompts/bootstrap.md
             echo ""
-            echo "<your_goals>"
-            cat /agent/memory/goal.json 2>/dev/null || echo '[]'
-            echo "</your_goals>"
             echo "Read this goal carefully. Incorporate it into your bootstrap plan."
             echo "You MAY modify server.py and app/*.py to customise the Streamlit UI for this goal."
             ;;
@@ -308,18 +304,10 @@ build_task_prompt() {
             local symptom="${mode#heal:}"
             cat /agent/prompts/self-heal.md
             echo ""
-            echo "## Detected Symptom"
-            echo "Health check result: \`${symptom}\`"
-            echo ""
             case "$symptom" in
                 app_error)
                     echo "The Streamlit server process is running but server.py raised an exception during headless render."
                     echo "This means a broken import, missing dependency, or error in init."
-                    echo ""
-                    echo "App check result:"
-                    echo '```json'
-                    cat /agent/memory/app_check_result.json 2>/dev/null || echo "{}"
-                    echo '```'
                     echo ""
                     echo "Reproduce: cd /agent && uv run python scripts/app_check.py"
                     ;;
@@ -332,7 +320,39 @@ build_task_prompt() {
             ;;
         goal)
             cat /agent/prompts/goal.md
-            echo ""
+            ;;
+        evolve)
+            cat /agent/prompts/evolve.md
+            ;;
+        dream)
+            cat /agent/prompts/dream.md
+            ;;
+    esac
+
+    # ── DYNAMIC SUFFIX (changes every cycle — kept at the end so prefix cache hits) ──
+    echo ""
+    echo "This is cycle #${CYCLE_NUM}. Current date and time: ${USER_TIME} (${USER_TZ})."
+    echo ""
+
+    case "$mode" in
+        bootstrap)
+            echo "<your_goals>"
+            cat /agent/memory/goal.json 2>/dev/null || echo '[]'
+            echo "</your_goals>"
+            ;;
+        heal:*)
+            local symptom="${mode#heal:}"
+            echo "## Detected Symptom"
+            echo "Health check result: \`${symptom}\`"
+            if [ "$symptom" = "app_error" ]; then
+                echo ""
+                echo "App check result:"
+                echo '```json'
+                cat /agent/memory/app_check_result.json 2>/dev/null || echo "{}"
+                echo '```'
+            fi
+            ;;
+        goal)
             echo "<your_inbox_messages>"
             echo "(sorted by priority, 1=highest)"
             jq '[.[] | select(.type != "goal")] | sort_by(.priority // 3)' /agent/messages/inbox.json 2>/dev/null || echo '[]'
@@ -348,8 +368,6 @@ build_task_prompt() {
             echo "</previous_unfinished_goals>"
             ;;
         evolve)
-            cat /agent/prompts/evolve.md
-            echo ""
             echo "<your_current_goals>"
             echo "(active goals from goal.json — pending/in-progress)"
             jq '[.[] | select(.status == "pending" or .status == "in-progress" or .status == "in_progress")]' /agent/memory/goal.json 2>/dev/null || echo '[]'
@@ -365,8 +383,6 @@ build_task_prompt() {
             echo "</your_past_goals>"
             ;;
         dream)
-            cat /agent/prompts/dream.md
-            echo ""
             echo "<your_past_failed_goals>"
             echo "(all failed goals from goal.json + goal_history.json, sorted by created_at)"
             jq -s '

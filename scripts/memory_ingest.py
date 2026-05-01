@@ -410,6 +410,18 @@ def chunk_inbox_entry(entry: dict) -> dict | None:
     date_part = ts[:10] if ts else ""
     msg_id = entry.get("id")
 
+    cycle_raw = entry.get("cycle_number")
+    cycle_int: int | None = None
+    if isinstance(cycle_raw, bool):
+        cycle_int = None
+    elif isinstance(cycle_raw, int):
+        cycle_int = cycle_raw
+    elif isinstance(cycle_raw, str) and cycle_raw.strip().isdigit():
+        try:
+            cycle_int = int(cycle_raw)
+        except ValueError:
+            cycle_int = None
+
     tags = ["inbox", f"type:{msg_type}"]
     if source:
         tags.append(f"inbox_source:{source}")
@@ -417,19 +429,25 @@ def chunk_inbox_entry(entry: dict) -> dict | None:
         tags.append(f"date:{date_part}")
     if msg_id:
         tags.append(f"id:{msg_id}")
+    if cycle_int is not None:
+        tags.append(f"cycle:{cycle_int}")
+
+    metadata = {
+        "source": "inbox",
+        "message_type": msg_type,
+        "inbox_source": source,
+        "id": str(msg_id) if msg_id else "",
+        "date": ts,
+    }
+    if cycle_int is not None:
+        metadata["cycle"] = str(cycle_int)
 
     return {
         "title": f"Inbox {msg_type}: {content[:80]}",
         "label": "inbox",
         "text": content,
         "tags": tags,
-        "metadata": {
-            "source": "inbox",
-            "message_type": msg_type,
-            "inbox_source": source,
-            "id": str(msg_id) if msg_id else "",
-            "date": ts,
-        },
+        "metadata": metadata,
     }
 
 

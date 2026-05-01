@@ -252,7 +252,7 @@ def render():
     with col1:
         st.metric(
             "Agent Status",
-            f"{_status_icon(state.get('status', 'unknown'))} {state.get('status', 'unknown')}",
+            f"{_status_icon(state.get('agent_status', 'unknown'))} {state.get('agent_status', 'unknown')}",
         )
     with col2:
         st.metric("Heartbeat", f"{hb_icon} {hb_age}")

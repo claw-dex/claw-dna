@@ -230,7 +230,7 @@ st_autorefresh(interval=60_000, key="global_refresh")
 # ── Header ────────────────────────────────────────────────────
 state = load_state() or {}
 cycle_num = state.get("cycle_number", 0)
-agent_status = state.get("status", "unknown")
+agent_status = state.get("agent_status", "unknown")
 last_heartbeat = state.get("last_heartbeat", "—")
 current_goal = state.get("current_goal", "")
 

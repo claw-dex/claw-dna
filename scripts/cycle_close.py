@@ -224,13 +224,22 @@ def _is_pre_cycle_item(msg, cutoff_dt):
     return ra_dt <= cutoff_dt
 
 
-def _archive_inbox(cycle_start_ts=None, ingest_buffer: list = None):
+def _archive_inbox(
+    cycle_start_ts=None,
+    ingest_buffer: list = None,
+    cycle_number: int | None = None,
+):
     """Archive pre-cycle items in /agent/messages/inbox.json to inbox_history.json.
 
     Items whose ``received_at`` is on or before ``cycle_start_ts`` are archived
     and ingested into long-term memory (best-effort). Items that arrived
     mid-cycle (after ``cycle_start_ts``) are left in inbox.json so the next
     cycle can process them.
+
+    When ``cycle_number`` is provided, each archived item gets ``cycle_number``
+    stamped on it (if absent) before being written to ``inbox_history.json`` and
+    converted to a memvid chunk, so the value is preserved on both the rebuild
+    path (read back from inbox_history.json) and the live append path.
 
     All inbox read/partition/rewrite happens under an exclusive lock on
     ``inbox.json.lock`` (the same lock used by ``services.shared.write_to_inbox``
@@ -269,6 +278,14 @@ def _archive_inbox(cycle_start_ts=None, ingest_buffer: list = None):
                     return 0
 
                 kept = [m for m in items if not _is_pre_cycle_item(m, cutoff_dt)]
+
+                # Stamp the closing cycle number onto each archived message so
+                # the value travels into both inbox_history.json and the
+                # memvid chunk (chunk_inbox_entry reads entry["cycle_number"]).
+                if cycle_number is not None:
+                    for m in to_archive:
+                        if isinstance(m, dict) and "cycle_number" not in m:
+                            m["cycle_number"] = cycle_number
 
                 # Rewrite inbox.json FIRST (still under the lock). If this
                 # fails we abort without touching history, so no duplicates.
@@ -988,6 +1005,7 @@ def main():
         archived_n = _archive_inbox(
             cycle_start_ts=cycle_entry.get("start"),
             ingest_buffer=memvid_buffer,
+            cycle_number=cycle_n,
         )
         if archived_n > 0:
             print(
