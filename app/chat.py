@@ -796,10 +796,9 @@ def render():
             else:
                 st.caption("Streaming...")
 
-    # Clear chat button — visual reset; keeps SDK session and chat_session_id
-    # alive so server-side context survives. If a turn is mid-stream, ask the
-    # SDK to interrupt it so the abandoned `claude` work actually stops on the
-    # server (otherwise tool calls keep running invisibly until the next turn).
+    # Clear chat button — fully discard the current SDK session (interrupt any
+    # in-flight turn, close the singleton, wipe persisted session_id) so the
+    # next rerun spawns a brand-new `claude` session with no resumed context.
     if st.session_state.chat_messages:
         if st.button("Clear chat", key="clear_chat"):
             if st.session_state.chat_streaming and session is not None:
@@ -807,11 +806,36 @@ def render():
                     session.interrupt()
                 except Exception:
                     pass
+            # Tear down the cached singleton so a fresh ClaudeChat is built.
+            try:
+                _get_chat_singleton.clear()
+            except Exception:
+                pass
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+                if session._thread is not None and session._thread.is_alive():
+                    try:
+                        _shutdown_chat_resources(
+                            session._loop, session._sdk, session._thread
+                        )
+                    except Exception:
+                        pass
+            # Wipe persisted resume id so the new singleton starts fresh.
+            try:
+                _write_json_atomic(CHAT_META_PATH, {}, indent=2)
+            except Exception:
+                pass
             st.session_state.chat_messages = []
             _save_chat_history([])
             st.session_state.chat_streaming = False
             st.session_state.chat_stream_text = ""
             st.session_state.chat_stream_events = []
+            st.session_state.pop("chat_session", None)
+            st.session_state.pop("chat_session_id", None)
+            st.session_state.pop("chat_connect_failed", None)
             st.rerun()
 
     # Handle pending prompts from other components (e.g. "Ask AI" buttons)

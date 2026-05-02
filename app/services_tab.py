@@ -292,6 +292,19 @@ def render():
                 edit_content = st.text_area(
                     "Content", value=content, key=f"sched_edit_content_{idx}"
                 )
+                inbox_options = ["goal", "message"]
+                current_inbox = task.get("type", "goal")
+                inbox_idx = (
+                    inbox_options.index(current_inbox)
+                    if current_inbox in inbox_options
+                    else 0
+                )
+                edit_inbox_type = st.selectbox(
+                    "Inbox Type",
+                    inbox_options,
+                    index=inbox_idx,
+                    key=f"sched_edit_inbox_{idx}",
+                )
                 e1, e2 = st.columns(2)
                 with e1:
                     edit_priority = st.number_input(
@@ -324,7 +337,11 @@ def render():
                     else:
                         edit_interval = None
                 if st.button("Save Changes", key=f"sched_save_{idx}", type="primary"):
-                    updates = {"content": edit_content, "priority": edit_priority}
+                    updates = {
+                        "content": edit_content,
+                        "priority": edit_priority,
+                        "type": edit_inbox_type,
+                    }
                     if ttype == "interval" and edit_interval is not None:
                         updates["interval_minutes"] = edit_interval
                     elif ttype == "cron" and edit_interval is not None:

@@ -221,42 +221,6 @@ def test_detect_and_transform_goal_route():
     assert chunk is not None and chunk["metadata"]["source"] == "goal"
 
 
-def test_smart_commit_check_default_threshold(tmp_path):
-    mv2 = tmp_path / "ltm.mv2"
-    counter = mv2.parent / f"{mv2.name}.put_counter"
-    # Each call below the default threshold (50) returns False.
-    assert mi._smart_commit_check(mv2, 25) is False
-    state = json.loads(counter.read_text())
-    assert state == {"count": 25, "threshold": 50}
-    # Crossing the threshold returns True and resets the counter to 0.
-    assert mi._smart_commit_check(mv2, 26) is True
-    state = json.loads(counter.read_text())
-    assert state == {"count": 0, "threshold": 50}
-
-
-def test_smart_commit_check_respects_persisted_threshold(tmp_path):
-    mv2 = tmp_path / "ltm.mv2"
-    counter = mv2.parent / f"{mv2.name}.put_counter"
-    counter.write_text(json.dumps({"count": 0, "threshold": 5}))
-    # Below the custom threshold → no fire.
-    assert mi._smart_commit_check(mv2, 5) is False
-    # One more put crosses 5 → fires.
-    assert mi._smart_commit_check(mv2, 1) is True
-    state = json.loads(counter.read_text())
-    assert state["count"] == 0
-    assert state["threshold"] == 5
-
-
-def test_smart_commit_check_corrupt_file_falls_back(tmp_path):
-    mv2 = tmp_path / "ltm.mv2"
-    counter = mv2.parent / f"{mv2.name}.put_counter"
-    counter.write_text("not json")
-    # Falls back to defaults, doesn't raise.
-    assert mi._smart_commit_check(mv2, 1) is False
-    state = json.loads(counter.read_text())
-    assert state == {"count": 1, "threshold": 50}
-
-
 def test_main_no_args_exits(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["memory_ingest.py"])
     with pytest.raises(SystemExit):

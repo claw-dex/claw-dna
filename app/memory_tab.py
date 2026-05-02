@@ -1,8 +1,43 @@
 """Tab: Memory — consolidated Journal + Logs + Goals + Memory Files."""
 
 import io
+import json
+import os
+import re
 
 import streamlit as st
+
+from app.shared import MEMORY_DIR
+
+
+def _format_size(num_bytes: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if num_bytes < 1024:
+            return (
+                f"{num_bytes:.0f} {unit}" if unit == "B" else f"{num_bytes:.1f} {unit}"
+            )
+        num_bytes /= 1024
+    return f"{num_bytes:.1f} TB"
+
+
+def _file_size(path: str) -> str:
+    try:
+        return _format_size(os.path.getsize(path))
+    except OSError:
+        return "—"
+
+
+def _json_count(path: str) -> int:
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return len(data)
+        if isinstance(data, dict):
+            return len(data)
+        return 0
+    except (OSError, ValueError):
+        return 0
 
 
 def _show_image(path: str, caption: str) -> None:
@@ -29,6 +64,38 @@ def render():
         load_memory_files,
         read_memory_file,
     )
+
+    # ── Memory Overview (top section) ─────────────────────────
+    ltm_path = f"{MEMORY_DIR}/long_term_memory.mv2"
+    journal_path = f"{MEMORY_DIR}/journal.json"
+    journal_archive_path = f"{MEMORY_DIR}/journal_archive.json"
+    inbox_history_path = f"{MEMORY_DIR}/inbox_history.json"
+    outbox_history_path = f"{MEMORY_DIR}/outbox_history.json"
+    cycles_path = f"{MEMORY_DIR}/cycles.json"
+
+    journal_n = _json_count(journal_path)
+    archive_n = _json_count(journal_archive_path)
+    inbox_n = _json_count(inbox_history_path)
+    outbox_n = _json_count(outbox_history_path)
+    cycles_n = _json_count(cycles_path)
+
+    st.subheader("Memory Overview")
+    o1, o2, o3, o4, o5 = st.columns(5)
+    with o1:
+        st.metric("Long-term Memory", _file_size(ltm_path))
+        st.caption("long_term_memory.mv2")
+    with o2:
+        st.metric("Journal Entries", f"{journal_n + archive_n}")
+        st.caption(f"{journal_n} active · {archive_n} archived")
+    with o3:
+        st.metric("Inbox History", f"{inbox_n}")
+        st.caption(_file_size(inbox_history_path))
+    with o4:
+        st.metric("Outbox History", f"{outbox_n}")
+        st.caption(_file_size(outbox_history_path))
+    with o5:
+        st.metric("Cycles", f"{cycles_n}")
+        st.caption(_file_size(cycles_path))
 
     st.divider()
 
@@ -290,10 +357,10 @@ def render():
     # ── Memory Files sub-tab ──────────────────────────────────
     with tab_memfiles:
         st.subheader("Memory Files")
-        memory_files = load_memory_files() or []
+        memory_files = [f for f in (load_memory_files() or []) if f.endswith(".md")]
 
         if not memory_files:
-            st.caption("No memory files found in /agent/memory/")
+            st.caption("No markdown memory files found in /agent/memory/")
         else:
             selected_mem = st.selectbox(
                 "Select file", memory_files, key="mem_file_select"
@@ -302,13 +369,7 @@ def render():
                 content = read_memory_file(selected_mem)
                 if content is None:
                     st.error(f"Could not read: {selected_mem}")
-                elif isinstance(content, dict) and content.get("__type__") == "image":
-                    _show_image(content["path"], selected_mem)
                 else:
-                    if selected_mem.endswith(".json"):
-                        st.code(content, language="json")
-                    elif selected_mem.endswith(".md"):
-                        st.markdown(content)
-                    else:
-                        st.code(content, language="text")
+                    fixed = re.sub(r"(?<![A-Za-z0-9_/])/agent/", "/_/agent/", content)
+                    st.markdown(fixed)
                     st.caption(f"Size: {len(content)} chars")

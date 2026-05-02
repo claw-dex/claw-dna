@@ -124,47 +124,6 @@ def _put_kwargs(compress: bool) -> dict:
     return kwargs
 
 
-_SMART_COMMIT_DEFAULT_THRESHOLD = 50
-
-
-def _smart_commit_check(mv2: Path, puts_added: int) -> bool:
-    """Increment the put counter for `mv2` by `puts_added` and decide whether
-    to commit now.
-
-    Counter state lives at ``<mv2>.put_counter`` as JSON:
-    ``{"count": int, "threshold": int}``. Threshold defaults to
-    ``_SMART_COMMIT_DEFAULT_THRESHOLD`` (50) on first use and is read back
-    on every call, so the user can edit the file to tune the cadence
-    without code changes.
-
-    Returns True when the new count exceeds the threshold (counter is
-    reset to 0 and persisted before returning). Otherwise persists the
-    new count and returns False.
-    """
-    counter_path = mv2.parent / f"{mv2.name}.put_counter"
-    count = 0
-    threshold = _SMART_COMMIT_DEFAULT_THRESHOLD
-    if counter_path.exists():
-        try:
-            data = json.loads(counter_path.read_text())
-            if isinstance(data, dict):
-                if isinstance(data.get("count"), int) and data["count"] >= 0:
-                    count = data["count"]
-                if isinstance(data.get("threshold"), int) and data["threshold"] > 0:
-                    threshold = data["threshold"]
-        except Exception:
-            pass
-    count += max(0, puts_added)
-    fire = count > threshold
-    if fire:
-        count = 0
-    try:
-        counter_path.write_text(json.dumps({"count": count, "threshold": threshold}))
-    except Exception:
-        pass
-    return fire
-
-
 def load_json(path: Path):
     """Load a JSON file, return None if missing or invalid."""
     try:
@@ -643,42 +602,43 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
         if not quiet:
             print(f"[INGEST] Created {mv2}")
 
-        # Compression threshold is checked per-chunk because the file grows
-        # during the build loop.
-        put_base_kwargs: dict = {"enable_embedding": ENABLE_EMBEDDING}
+        # Single Rust-side batch: ~100x faster than a Python put-loop. The
+        # SDK commits once at the end of put_many; we still call seal()
+        # afterward to force a final flush before this process exits.
+        requests = [
+            {
+                "title": ch["title"],
+                "label": ch["label"],
+                "text": ch["text"],
+                "tags": list(ch.get("tags") or []),
+                "metadata": dict(ch.get("metadata") or {}),
+            }
+            for ch in chunks
+        ]
+        opts: dict = {
+            "enable_embedding": ENABLE_EMBEDDING,
+            # 3 = SDK default zstd level when compression is enabled, 0 = off.
+            # Mirrors the per-chunk ``vector_compression`` flag the loop used.
+            "compression_level": 3 if _should_compress(mv2) else 0,
+        }
         if EMBED_MODEL is not None:
-            put_base_kwargs["embedding_model"] = EMBED_MODEL
-        ok, fail = 0, 0
-        for i, ch in enumerate(chunks):
-            merged_meta = dict(ch.get("metadata") or {})
-            # Fold tags into metadata so they're queryable (SDK accepts tags= too)
-            try:
-                mem.put(
-                    title=ch["title"],
-                    label=ch["label"],
-                    text=ch["text"],
-                    tags=ch["tags"],
-                    metadata=merged_meta,
-                    vector_compression=_should_compress(mv2),
-                    **put_base_kwargs,
-                )
-                ok += 1
-            except Exception as e:
-                fail += 1
-                if not quiet:
-                    print(
-                        f"  WARN: chunk {i} failed: {str(e)[:120]}",
-                        file=sys.stderr,
-                    )
-            if not quiet and (i + 1) % 20 == 0:
-                print(f"[INGEST] Ingested {i + 1}/{len(chunks)} chunks...")
-            if (i + 1) % 1000 == 0:
-                mem.commit()
-
-        # Commit WAL → searchable index (REQUIRED — without this, put() calls are
-        # buffered in the WAL and never appear in find()/ask() results).
+            opts["embedding_model"] = EMBED_MODEL
         try:
-            mem.seal()  # same as commit() in memvid_sdk
+            frame_ids = mem.put_many(requests, opts=opts)
+            # put_many is all-or-nothing at the FFI boundary: either it
+            # returns a frame_id per request or raises. So fail is always
+            # 0 here; partial success would surface via the except branch.
+            ok = len(frame_ids)
+            fail = len(requests) - ok
+        except Exception as e:
+            ok, fail = 0, len(requests)
+            if not quiet:
+                print(f"  WARN: put_many failed: {str(e)[:200]}", file=sys.stderr)
+
+        # Terminal finalize before process exit. seal() forces a final
+        # commit + index flush so the .mv2 is fully searchable on close.
+        try:
+            mem.seal()
             if not quiet:
                 print(f"[INGEST] Committed {ok} frames to index")
         except Exception as e:
@@ -742,15 +702,12 @@ def _detect_and_transform(entry: dict) -> dict | None:
     return transform_journal_entry(entry)
 
 
-def append_json(
-    mv2_path, entry_source, quiet=False, json_mode=False, smart_commit: bool = False
-):
+def append_json(mv2_path, entry_source, quiet=False, json_mode=False):
     """Append a single JSON entry to the existing .mv2 index (journal, cycle, or goal).
 
-    When ``smart_commit`` is True, the post-put commit is gated by
-    :func:`_smart_commit_check` — commit only fires when the persisted
-    put-counter exceeds its threshold. When False, commits unconditionally
-    (existing behavior).
+    No explicit commit is issued — the SDK auto-checkpoints internally
+    (every ~1000 puts or when the WAL reaches 75% capacity), so manual
+    commits would only cause unnecessary segment-catalog rewrites.
     """
     mv2 = Path(mv2_path)
     if not mv2.exists():
@@ -794,12 +751,6 @@ def append_json(
         print(f"ERROR: memvid put failed: {e}", file=sys.stderr)
         sys.exit(1)
 
-    if not smart_commit or _smart_commit_check(mv2, 1):
-        try:
-            mem.commit()
-        except Exception as e:
-            print(f"WARN: commit failed: {e}", file=sys.stderr)
-
     cycle = entry.get("cycle_number", "?")
     if json_mode:
         print(
@@ -822,24 +773,18 @@ def append_json(
 # ---------------------------------------------------------------------------
 
 
-def append_many(
-    mv2_path, chunks: list, *, quiet: bool = True, smart_commit: bool = False
-) -> tuple:
-    """Ingest multiple chunks under a single open + ONE final commit.
+def append_many(mv2_path, chunks: list, *, quiet: bool = True) -> tuple:
+    """Ingest multiple chunks via a single ``put_many`` FFI call.
 
-    Each per-call commit on the memvid `.mv2` rewrites the footer/segment
-    catalog and reserves significant on-disk space, so callers that need to
-    ingest several records at once should batch them through this function
-    instead of looping on `append_*` (which commits per-record).
+    Routes the entire batch through the SDK's Rust-side bulk path
+    (~100x faster than a Python ``for`` + ``put`` loop) which commits
+    once at the end. The SDK's auto-checkpoint (every ~1000 puts or 75%
+    WAL full) handles durability between calls; no manual ``commit()``
+    is issued here.
 
     The caller is responsible for ensuring the `.mv2` exists — a missing
     file is treated as a no-op so we don't trigger a hidden full rebuild
     inside an unrelated code path.
-
-    When ``smart_commit`` is True, the final commit is gated by
-    :func:`_smart_commit_check` — counter is incremented by the number of
-    successful puts and the commit only fires when the new count exceeds
-    the persisted threshold.
 
     Returns ``(ok, fail)`` counts.
     """
@@ -848,32 +793,35 @@ def append_many(
     if not mv2.exists() or not chunks:
         return (0, 0)
     mem = _open_or_create(mv2)
-    ok, fail = 0, 0
-    for ch in chunks:
-        try:
-            mem.put(
-                title=ch["title"],
-                label=ch["label"],
-                text=ch["text"],
-                tags=ch["tags"],
-                metadata=dict(ch.get("metadata") or {}),
-                **_put_kwargs(_should_compress(mv2)),
-            )
-            ok += 1
-        except Exception as e:
-            fail += 1
-            if not quiet:
-                print(f"WARN: put failed: {e}", file=sys.stderr)
-    if ok == 0:
-        # Nothing landed — skip the commit so we don't reserve a footer
-        # segment for an empty batch.
-        return (ok, fail)
-    if not smart_commit or _smart_commit_check(mv2, ok):
-        try:
-            mem.commit()
-        except Exception as e:
-            if not quiet:
-                print(f"WARN: commit failed: {e}", file=sys.stderr)
+    requests = [
+        {
+            "title": ch["title"],
+            "label": ch["label"],
+            "text": ch["text"],
+            "tags": list(ch.get("tags") or []),
+            "metadata": dict(ch.get("metadata") or {}),
+        }
+        for ch in chunks
+    ]
+    opts: dict = {
+        "enable_embedding": ENABLE_EMBEDDING,
+        # Mirror the per-chunk vector_compression flag the loop used:
+        # 3 = SDK default zstd level when compressed, 0 = uncompressed.
+        "compression_level": 3 if _should_compress(mv2) else 0,
+    }
+    if EMBED_MODEL is not None:
+        opts["embedding_model"] = EMBED_MODEL
+    try:
+        # put_many is all-or-nothing at the FFI boundary: returns a
+        # frame_id per request, or raises. Partial success surfaces only
+        # via the except branch.
+        frame_ids = mem.put_many(requests, opts=opts)
+    except Exception as e:
+        if not quiet:
+            print(f"WARN: put_many failed: {e}", file=sys.stderr)
+        return (0, len(requests))
+    ok = len(frame_ids)
+    fail = len(requests) - ok
     return (ok, fail)
 
 
@@ -882,15 +830,12 @@ def append_many(
 # ---------------------------------------------------------------------------
 
 
-def append_inbox_message(
-    mv2_path, message: dict, quiet: bool = True, smart_commit: bool = False
-) -> bool:
+def append_inbox_message(mv2_path, message: dict, quiet: bool = True) -> bool:
     """Ingest a single inbox message into the .mv2 using the shared chunk
     schema. The message's own timestamp field is used (never datetime.now()),
     so live ingestion and rebuild produce identical records.
 
-    When ``smart_commit`` is True, the post-put commit is gated by
-    :func:`_smart_commit_check`; otherwise commit fires unconditionally.
+    The SDK auto-checkpoints internally; no explicit commit is issued.
 
     Returns True on success, False if the message was skipped (too short /
     not a dict) or the put failed.
@@ -912,8 +857,6 @@ def append_inbox_message(
             metadata=chunk["metadata"],
             **_put_kwargs(_should_compress(mv2)),
         )
-        if not smart_commit or _smart_commit_check(mv2, 1):
-            mem.commit()
         return True
     except Exception as e:
         if not quiet:
@@ -926,19 +869,10 @@ def append_inbox_message(
 # ---------------------------------------------------------------------------
 
 
-def append_text(
-    mv2_path,
-    text,
-    title=None,
-    tags=None,
-    quiet=False,
-    json_mode=False,
-    smart_commit: bool = False,
-):
+def append_text(mv2_path, text, title=None, tags=None, quiet=False, json_mode=False):
     """Ingest raw text directly into the .mv2 index.
 
-    When ``smart_commit`` is True, the post-put commit is gated by
-    :func:`_smart_commit_check`; otherwise commit fires unconditionally.
+    The SDK auto-checkpoints internally; no explicit commit is issued.
     """
     mv2 = Path(mv2_path)
     if not mv2.exists():
@@ -971,12 +905,6 @@ def append_text(
         print(f"ERROR: memvid put failed: {e}", file=sys.stderr)
         sys.exit(1)
 
-    if not smart_commit or _smart_commit_check(mv2, 1):
-        try:
-            mem.commit()
-        except Exception as e:
-            print(f"WARN: commit failed: {e}", file=sys.stderr)
-
     if json_mode:
         print(
             json.dumps(
@@ -1000,18 +928,11 @@ def append_text(
 
 
 def append_file(
-    mv2_path,
-    filepath,
-    title=None,
-    tags=None,
-    quiet=False,
-    json_mode=False,
-    smart_commit: bool = False,
+    mv2_path, filepath, title=None, tags=None, quiet=False, json_mode=False
 ):
     """Ingest a file directly into the .mv2 index.
 
-    When ``smart_commit`` is True, the post-put commit is gated by
-    :func:`_smart_commit_check`; otherwise commit fires unconditionally.
+    The SDK auto-checkpoints internally; no explicit commit is issued.
     """
     mv2 = Path(mv2_path)
     if not mv2.exists():
@@ -1052,12 +973,6 @@ def append_file(
     except Exception as e:
         print(f"ERROR: memvid put failed: {e}", file=sys.stderr)
         sys.exit(1)
-
-    if not smart_commit or _smart_commit_check(mv2, 1):
-        try:
-            mem.commit()
-        except Exception as e:
-            print(f"WARN: commit failed: {e}", file=sys.stderr)
 
     try:
         size_kb = fpath.stat().st_size / 1024

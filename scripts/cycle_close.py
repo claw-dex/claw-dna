@@ -10,7 +10,12 @@ Automates the repetitive boilerplate from cycle-close.md:
   5. Archives inbox.json items to inbox_history.json, then clears inbox.json
   6. Checks for stale tab/test/script counts and warns when drift is found
   7. Auto-backs up memory files if last backup >1h old (inlined — no subprocess)
-  8. Reports what was written
+  8. Dispatches the long-term-memory (memvid) flush in a detached background
+     process so the script returns immediately. The .mv2 becomes durable a
+     few seconds after "Done." prints. Logs to /agent/memory/.memvid_flush.log.
+     Use --no-bg-memvid to flush inline (e.g., when a downstream caller needs
+     the .mv2 fully written before exit).
+  9. Reports what was written
 
 Usage:
     uv run python scripts/cycle_close.py \\
@@ -45,6 +50,8 @@ Optional flags:
                           state.current_goal is the dynamic in-flight task and
                           is NOT consulted here.
     --no-normalize        Skip cycles.json normalization after writing
+    --no-bg-memvid        Run the memvid flush inline instead of in a detached
+                            background process (default: background)
     --dry-run             Print what would be written, but write nothing
 
 Exit codes: 0 = success, 1 = error (missing required args, write failure)
@@ -333,6 +340,7 @@ def parse_args(argv):
         "actions": [],
         "status": "completed",
         "no_normalize": False,
+        "no_bg_memvid": False,
         "dry_run": False,
         "help": False,
     }
@@ -370,6 +378,8 @@ def parse_args(argv):
             continue
         elif a == "--no-normalize":
             result["no_normalize"] = True
+        elif a == "--no-bg-memvid":
+            result["no_bg_memvid"] = True
         elif a == "--dry-run":
             result["dry_run"] = True
         i += 1
@@ -679,20 +689,18 @@ def _entry_chunks_for_memvid(entry: dict) -> list:
 
 
 def _flush_memvid_buffer(chunks: list) -> None:
-    """Write all buffered chunks to the .mv2 in a single open + smart commit.
+    """Write all buffered chunks to the .mv2 via a single ``put_many`` call.
 
-    Per-call commits on the memvid `.mv2` rewrite the segment catalog and
-    reserve significant on-disk space, so cycle_close batches every record
-    it would ingest (inbox messages + journal entry) into a single buffer
-    and flushes them here at the end of the cycle. Cycle records are not
-    buffered — cycles.json is excluded from long-term memory.
+    cycle_close batches every record it would ingest (inbox messages +
+    journal entry) into a single buffer and flushes them here at the end
+    of the cycle. Cycle records are not buffered — cycles.json is excluded
+    from long-term memory.
 
-    Uses ``smart_commit=True`` so the actual ``mem.commit()`` only fires
-    once the persisted put-counter exceeds its threshold (default 50);
-    intervening cycles still ``put()`` (data lands in the WAL) but skip
-    the segment-catalog rewrite that drives file-size growth. The
-    threshold lives next to the .mv2 in ``<mv2>.put_counter`` and can be
-    tuned without code changes.
+    The SDK auto-checkpoints internally (every ~1000 puts or when the
+    WAL reaches 75% capacity), so no manual commit is issued here.
+    Segment-catalog rewrites only happen when the SDK decides — typically
+    every few hundred cycles rather than every cycle — which keeps the
+    .mv2 from growing unboundedly fast.
 
     On first run the .mv2 doesn't exist; we run a one-shot ``build()`` from
     the source JSON files (journal/journal_archive/inbox_history). Steps 1,
@@ -726,8 +734,8 @@ def _flush_memvid_buffer(chunks: list) -> None:
         return
 
     try:
-        ok, fail = append_many(DEFAULT_MV2, chunks, quiet=True, smart_commit=True)
-        msg = f"  ✓ memvid — batched {ok} chunk(s) (smart_commit)"
+        ok, fail = append_many(DEFAULT_MV2, chunks, quiet=True)
+        msg = f"  ✓ memvid — batched {ok} chunk(s) (auto-checkpoint)"
         if fail:
             msg += f" ({fail} failed)"
         print(msg)
@@ -737,10 +745,158 @@ def _flush_memvid_buffer(chunks: list) -> None:
         print(f"  ⚠ memvid flush — failed: {e}")
 
 
+# ── Background flush dispatcher ──────────────────────────────────────────────
+
+
+def _sweep_stale_memvid_buffers() -> None:
+    """Delete leftover .memvid_buffer_* temp files older than 1h.
+
+    Defensive cleanup in case a prior background child died before unlinking
+    its buffer.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+    try:
+        for p in MEMORY.glob(".memvid_buffer_*.json"):
+            try:
+                mtime = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)
+                if mtime < cutoff:
+                    p.unlink(missing_ok=True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _dispatch_memvid_flush_bg(chunks: list, cycle_n: int) -> None:
+    """Spawn a detached subprocess to run ``_flush_memvid_buffer`` and return.
+
+    Cycle-close has no remaining steps after the memvid flush, so blocking on
+    its 5–10s commit just delays the user-facing "done" message. We stage the
+    chunks to a JSON temp file and launch a detached child process to run the
+    actual flush in the background. Failures fall back to an inline flush.
+    """
+    try:
+        from scripts.memory_ingest import DEFAULT_MV2
+    except Exception as e:
+        print(f"  ⚠ memvid bg — import failed ({e}); flushing inline")
+        _flush_memvid_buffer(chunks)
+        return
+
+    if not chunks and DEFAULT_MV2.exists():
+        return
+
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    buf_path = MEMORY / f".memvid_buffer_{cycle_n}_{ts}.json"
+    log_path = MEMORY / ".memvid_flush.log"
+
+    try:
+        buf_path.write_text(json.dumps(chunks))
+    except Exception as e:
+        print(f"  ⚠ memvid bg — failed to stage buffer ({e}); flushing inline")
+        _flush_memvid_buffer(chunks)
+        return
+
+    try:
+        with open(log_path, "ab") as log_f:
+            proc = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "--__flush-memvid",
+                    str(buf_path),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=log_f,
+                stderr=log_f,
+                start_new_session=True,
+                close_fds=True,
+            )
+        print(
+            f"  ✓ memvid — flush dispatched in background "
+            f"(pid={proc.pid}, durable in ~5–10s, log={log_path})"
+        )
+    except Exception as e:
+        print(f"  ⚠ memvid bg — spawn failed ({e}); flushing inline")
+        buf_path.unlink(missing_ok=True)
+        _flush_memvid_buffer(chunks)
+
+
+def _flush_memvid_child(buf_path: Path) -> int:
+    """Background-mode entry point: load chunks, flush memvid under a lock.
+
+    Holds an exclusive ``flock`` on ``<mv2>.flush.lock`` for the duration of
+    the flush so a back-to-back cycle-close can't have two children writing
+    the same .mv2 concurrently. The lock waits rather than fails — cycles are
+    sequential in normal operation, so contention is rare and serialization
+    is the correct behavior.
+    """
+    try:
+        from scripts.memory_ingest import DEFAULT_MV2
+    except Exception as e:
+        print(f"⚠ bg flush — import failed: {e}", flush=True)
+        return 1
+
+    started = datetime.now(timezone.utc).isoformat()
+    print(f"[{started}] memvid bg flush starting (buf={buf_path.name})", flush=True)
+
+    # Validate buf_path: must live under MEMORY and match the staging pattern.
+    # The flag is internal, but defending against a stray invocation prevents
+    # the finally-block unlink from touching arbitrary files.
+    try:
+        resolved = buf_path.resolve()
+        if (
+            resolved.parent != MEMORY.resolve()
+            or not resolved.name.startswith(".memvid_buffer_")
+            or not resolved.name.endswith(".json")
+        ):
+            print(
+                f"[{started}] ⚠ bg flush — refusing buf path outside MEMORY: {resolved}",
+                flush=True,
+            )
+            return 1
+    except Exception as e:
+        print(f"[{started}] ⚠ bg flush — buf path validation failed: {e}", flush=True)
+        return 1
+
+    try:
+        chunks = json.loads(buf_path.read_text()) if buf_path.exists() else []
+    except Exception as e:
+        print(f"[{started}] ⚠ bg flush — failed to read buffer: {e}", flush=True)
+        chunks = []
+
+    lock_path = str(DEFAULT_MV2) + ".flush.lock"
+    rc = 0
+    try:
+        with open(lock_path, "a+") as lock_f:
+            fcntl.flock(lock_f, fcntl.LOCK_EX)
+            try:
+                _flush_memvid_buffer(chunks)
+            finally:
+                fcntl.flock(lock_f, fcntl.LOCK_UN)
+    except Exception as e:
+        print(f"[{started}] ⚠ bg flush — failed: {e}", flush=True)
+        rc = 1
+    finally:
+        try:
+            buf_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        ended = datetime.now(timezone.utc).isoformat()
+        print(f"[{ended}] memvid bg flush done (rc={rc})", flush=True)
+    return rc
+
+
 # ── Main ────────────────────────────────────────────────────────────────────
 
 
 def main():
+    # Internal re-entry: background memvid flush spawned by
+    # _dispatch_memvid_flush_bg. Runs only the flush, then exits.
+    if len(sys.argv) >= 3 and sys.argv[1] == "--__flush-memvid":
+        sys.exit(_flush_memvid_child(Path(sys.argv[2])))
+
+    _sweep_stale_memvid_buffers()
+
     opts = parse_args(sys.argv)
 
     if opts["help"]:
@@ -1028,7 +1184,10 @@ def main():
     #    cycle records are no longer ingested — cycles.json is excluded from
     #    long-term memory.
     memvid_buffer.extend(_entry_chunks_for_memvid(journal_entry))
-    _flush_memvid_buffer(memvid_buffer)
+    if opts["no_bg_memvid"]:
+        _flush_memvid_buffer(memvid_buffer)
+    else:
+        _dispatch_memvid_flush_bg(memvid_buffer, cycle_n)
 
     print(f"\n[cycle-close] Done. Cycle {cycle_n} closed.\n")
 
