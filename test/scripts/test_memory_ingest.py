@@ -73,14 +73,16 @@ def test_compose_journal_text():
     assert "Category: explore" in text
 
 
-def test_chunk_journal_skips_short():
-    chunks = mi.chunk_journal([{"cycle": 1}, "not a dict", {"cycle": 2, "summary": ""}])
+def test_transform_journal_skips_short():
+    chunks = mi.transform_journal(
+        [{"cycle": 1}, "not a dict", {"cycle": 2, "summary": ""}]
+    )
     # All are too short / non-dict
     assert chunks == []
 
 
-def test_chunk_journal_basic():
-    chunks = mi.chunk_journal(
+def test_transform_journal_basic():
+    chunks = mi.transform_journal(
         [
             {
                 "cycle": 1,
@@ -103,8 +105,8 @@ def test_chunk_journal_basic():
     assert "date:2026-04-01" in c["tags"]
 
 
-def test_chunk_cycles_basic():
-    chunks = mi.chunk_cycles(
+def test_transform_cycles_basic():
+    chunks = mi.transform_cycles(
         [
             {
                 "cycle": 5,
@@ -122,12 +124,12 @@ def test_chunk_cycles_basic():
     assert "cycle" in chunks[0]["tags"]
 
 
-def test_chunk_cycles_skips_short():
-    assert mi.chunk_cycles([{"cycle": 1}]) == []
+def test_transform_cycles_skips_short():
+    assert mi.transform_cycles([{"cycle": 1}]) == []
 
 
-def test_chunk_goals():
-    chunks = mi.chunk_goals(
+def test_transform_goals():
+    chunks = mi.transform_goals(
         [{"content": "achieve X", "status": "pending", "id": "g1"}, {"content": ""}]
     )
     assert len(chunks) == 1
@@ -135,13 +137,13 @@ def test_chunk_goals():
     assert "id:g1" in chunks[0]["tags"]
 
 
-def test_chunk_inbox_entry_skip_short():
-    assert mi.chunk_inbox_entry({"content": "x"}) is None
-    assert mi.chunk_inbox_entry("not a dict") is None
+def test_transform_inbox_entry_skip_short():
+    assert mi.transform_inbox_entry({"content": "x"}) is None
+    assert mi.transform_inbox_entry("not a dict") is None
 
 
-def test_chunk_inbox_entry_basic():
-    c = mi.chunk_inbox_entry(
+def test_transform_inbox_entry_basic():
+    c = mi.transform_inbox_entry(
         {
             "content": "Hello world from user",
             "type": "user",
@@ -156,8 +158,8 @@ def test_chunk_inbox_entry_basic():
     assert "id:msg1" in c["tags"]
 
 
-def test_chunk_inbox_iterates():
-    chunks = mi.chunk_inbox(
+def test_transform_inbox_iterates():
+    chunks = mi.transform_inbox(
         [
             {
                 "content": "valid message here",
@@ -200,23 +202,59 @@ def test_gather_all_chunks(tmp_path):
     assert "cycle" not in sources
 
 
-def test_detect_and_chunk_journal_route():
-    chunks = mi._detect_and_chunk(
+def test_detect_and_transform_journal_route():
+    chunk = mi._detect_and_transform(
         {"cycle": 1, "summary": "ok cycle work", "actions": ["a"]}
     )
-    assert chunks and chunks[0]["metadata"]["source"] == "journal"
+    assert chunk is not None and chunk["metadata"]["source"] == "journal"
 
 
-def test_detect_and_chunk_cycle_route():
-    chunks = mi._detect_and_chunk(
+def test_detect_and_transform_cycle_route():
+    chunk = mi._detect_and_transform(
         {"cycle": 1, "summary": "x", "start": "2026-01-01", "type": "evolve"}
     )
-    assert chunks and chunks[0]["metadata"]["source"] == "cycle"
+    assert chunk is not None and chunk["metadata"]["source"] == "cycle"
 
 
-def test_detect_and_chunk_goal_route():
-    chunks = mi._detect_and_chunk({"content": "do this thing", "status": "pending"})
-    assert chunks and chunks[0]["metadata"]["source"] == "goal"
+def test_detect_and_transform_goal_route():
+    chunk = mi._detect_and_transform({"content": "do this thing", "status": "pending"})
+    assert chunk is not None and chunk["metadata"]["source"] == "goal"
+
+
+def test_smart_commit_check_default_threshold(tmp_path):
+    mv2 = tmp_path / "ltm.mv2"
+    counter = mv2.parent / f"{mv2.name}.put_counter"
+    # Each call below the default threshold (50) returns False.
+    assert mi._smart_commit_check(mv2, 25) is False
+    state = json.loads(counter.read_text())
+    assert state == {"count": 25, "threshold": 50}
+    # Crossing the threshold returns True and resets the counter to 0.
+    assert mi._smart_commit_check(mv2, 26) is True
+    state = json.loads(counter.read_text())
+    assert state == {"count": 0, "threshold": 50}
+
+
+def test_smart_commit_check_respects_persisted_threshold(tmp_path):
+    mv2 = tmp_path / "ltm.mv2"
+    counter = mv2.parent / f"{mv2.name}.put_counter"
+    counter.write_text(json.dumps({"count": 0, "threshold": 5}))
+    # Below the custom threshold → no fire.
+    assert mi._smart_commit_check(mv2, 5) is False
+    # One more put crosses 5 → fires.
+    assert mi._smart_commit_check(mv2, 1) is True
+    state = json.loads(counter.read_text())
+    assert state["count"] == 0
+    assert state["threshold"] == 5
+
+
+def test_smart_commit_check_corrupt_file_falls_back(tmp_path):
+    mv2 = tmp_path / "ltm.mv2"
+    counter = mv2.parent / f"{mv2.name}.put_counter"
+    counter.write_text("not json")
+    # Falls back to defaults, doesn't raise.
+    assert mi._smart_commit_check(mv2, 1) is False
+    state = json.loads(counter.read_text())
+    assert state == {"count": 1, "threshold": 50}
 
 
 def test_main_no_args_exits(monkeypatch, capsys):

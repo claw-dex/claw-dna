@@ -240,7 +240,7 @@ def cmd_setup(args) -> int:
     )
 
     print("Paste this to your Agent/Claude/Codex:")
-    print(f"```/loop 5m {instruction}```")
+    print(f"```/loop 10m {instruction}```")
     return 0
 
 

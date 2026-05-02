@@ -20,15 +20,13 @@ Usage:
 Exit codes: 0 = healthy, 1 = memory issues found (check output).
 
 Enum Reference: See prompts/enum.md for agent status values and other enums.
-
-Added in cycle 14 (efficiency): replaces two separate uv run invocations at cycle start.
-Enhanced in cycle 129 (efficiency): inlined journal_archive logic — saves ~1.5s uv-run startup when auto-archive triggers (every ~5 cycles).
 """
 
 import json
 import os
 import sys
 import datetime
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from collections import Counter
 
@@ -477,7 +475,7 @@ def _compute_roi_bonus(cat: str, cycles: list) -> int:
 
 
 def _compute_maturity_penalty(cat: str, capabilities: dict) -> tuple[int, str]:
-    """0-40: graduated penalty based on maturity indicators. Returns (penalty, reason)."""
+    """0-20: graduated penalty based on maturity indicators. Returns (penalty, reason)."""
     caps = capabilities or {}
     penalty = 0
     reasons = []
@@ -542,7 +540,7 @@ def evolve_recommendation(
       - recency_boost (0-25): cycles since this category was last picked
       - goal_alignment (0-25): unfinished goals that need this category
       - roi_bonus (0-10): historical success rate
-      - maturity_penalty (0-40): graduated penalty for mature areas
+      - maturity_penalty (0-20): graduated penalty for mature areas
 
     Writes memory/evolution_weights.json with full score breakdown.
     Falls back to least-done if scoring fails.
@@ -718,9 +716,9 @@ def _build_recall_queries(inbox, goals) -> list:
 def _fetch_old_memories(limit: int = 50, inbox=None, goals=None) -> list:
     """Fetch memories older than 24h from long-term semantic memory.
 
-    Issues one recall() per inbox message + most recent in-progress/pending goal,
-    dedupes hits by frame_id (fallback: title+snippet), and stops once the
-    combined result count reaches `limit`.
+    Issues all recall() queries in parallel (one per inbox message + most recent
+    in-progress/pending goal), dedupes hits by frame_id (fallback: title+snippet),
+    and trims to `limit` after merging.
     """
     if not MV2_PATH.exists():
         return []
@@ -734,25 +732,31 @@ def _fetch_old_memories(limit: int = 50, inbox=None, goals=None) -> list:
     except Exception:
         return []
 
+    # Run all recall queries concurrently — each is an independent SDK call.
+    # max_workers=min(len(queries), 5) avoids creating excess threads for large inboxes.
+    def _safe_recall(q: str) -> list:
+        try:
+            return recall(q, until=until_ts)
+        except Exception:
+            return []
+
+    with ThreadPoolExecutor(max_workers=min(len(queries), 5)) as ex:
+        per_query_hits = list(ex.map(_safe_recall, queries))
+
     combined: list = []
     seen_keys: set = set()
-    for q in queries:
-        if len(combined) >= limit:
-            break
-        try:
-            # get only 5 results (default) to save memory for other queries
-            hits = recall(q, until=until_ts)
-        except Exception:
-            continue
+    for hits in per_query_hits:
         for h in hits:
+            if len(combined) >= limit:
+                break
             fid = h.get("frame_id")
             key = ("fid", fid) if fid else ("ts", h.get("title"), h.get("snippet"))
             if key in seen_keys:
                 continue
             seen_keys.add(key)
             combined.append(h)
-            if len(combined) >= limit:
-                break
+        if len(combined) >= limit:
+            break
     combined.sort(key=lambda h: h.get("score", 0.0), reverse=True)
     for i, h in enumerate(combined, 1):
         h["rank"] = i

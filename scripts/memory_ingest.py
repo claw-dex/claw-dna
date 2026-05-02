@@ -124,6 +124,47 @@ def _put_kwargs(compress: bool) -> dict:
     return kwargs
 
 
+_SMART_COMMIT_DEFAULT_THRESHOLD = 50
+
+
+def _smart_commit_check(mv2: Path, puts_added: int) -> bool:
+    """Increment the put counter for `mv2` by `puts_added` and decide whether
+    to commit now.
+
+    Counter state lives at ``<mv2>.put_counter`` as JSON:
+    ``{"count": int, "threshold": int}``. Threshold defaults to
+    ``_SMART_COMMIT_DEFAULT_THRESHOLD`` (50) on first use and is read back
+    on every call, so the user can edit the file to tune the cadence
+    without code changes.
+
+    Returns True when the new count exceeds the threshold (counter is
+    reset to 0 and persisted before returning). Otherwise persists the
+    new count and returns False.
+    """
+    counter_path = mv2.parent / f"{mv2.name}.put_counter"
+    count = 0
+    threshold = _SMART_COMMIT_DEFAULT_THRESHOLD
+    if counter_path.exists():
+        try:
+            data = json.loads(counter_path.read_text())
+            if isinstance(data, dict):
+                if isinstance(data.get("count"), int) and data["count"] >= 0:
+                    count = data["count"]
+                if isinstance(data.get("threshold"), int) and data["threshold"] > 0:
+                    threshold = data["threshold"]
+        except Exception:
+            pass
+    count += max(0, puts_added)
+    fire = count > threshold
+    if fire:
+        count = 0
+    try:
+        counter_path.write_text(json.dumps({"count": count, "threshold": threshold}))
+    except Exception:
+        pass
+    return fire
+
+
 def load_json(path: Path):
     """Load a JSON file, return None if missing or invalid."""
     try:
@@ -230,167 +271,167 @@ def compose_journal_text(entry: dict) -> str:
     return "\n".join(parts)
 
 
-def chunk_journal(journal: list) -> list:
-    """Convert journal entries into ingestible chunks."""
+def transform_journal_entry(entry: dict) -> dict | None:
+    """Convert a single journal entry into an ingest chunk, or None if unusable."""
     from scripts.memory_repair import migrate_journal_entry
 
-    chunks = []
-    for entry in journal:
-        if not isinstance(entry, dict):
-            continue
-        migrate_journal_entry(entry)
-        cycle = entry.get("cycle_number", 0)
-        summary = entry.get("summary", "")
-        ctype = entry.get("cycle_type", "")
-        status = entry.get("cycle_status", "")
-        category = entry.get("cycle_category", "")
-        timestamp = entry.get("timestamp", "")
+    if not isinstance(entry, dict):
+        return None
+    migrate_journal_entry(entry)
+    cycle = entry.get("cycle_number", 0)
+    summary = entry.get("summary", "")
+    ctype = entry.get("cycle_type", "")
+    status = entry.get("cycle_status", "")
+    category = entry.get("cycle_category", "")
+    timestamp = entry.get("timestamp", "")
 
-        text = compose_journal_text(entry)
-        if not text or len(text.strip()) < 10:
-            continue
+    text = compose_journal_text(entry)
+    if not text or len(text.strip()) < 10:
+        return None
 
-        tags = ["journal"]
-        if ctype:
-            tags.append(f"type:{ctype}")
-        if category:
-            tags.append(f"category:{category}")
-        if status:
-            tags.append(f"status:{status}")
-        tags.append(f"cycle:{cycle}")
-        if timestamp:
-            date_part = timestamp[:10]
-            tags.append(f"date:{date_part}")
+    tags = ["journal"]
+    if ctype:
+        tags.append(f"type:{ctype}")
+    if category:
+        tags.append(f"category:{category}")
+    if status:
+        tags.append(f"status:{status}")
+    tags.append(f"cycle:{cycle}")
+    if timestamp:
+        date_part = timestamp[:10]
+        tags.append(f"date:{date_part}")
 
-        chunks.append(
-            {
-                "title": f"Cycle {cycle}: {summary[:100]}",
-                "label": ctype or "journal",
-                "text": text,
-                "tags": tags,
-                "metadata": {
-                    "source": "journal",
-                    "cycle": str(cycle),
-                    "type": ctype,
-                    "status": status,
-                    "category": category,
-                    "date": timestamp,
-                },
-            }
-        )
-    return chunks
+    return {
+        "title": f"Cycle {cycle}: {summary[:100]}",
+        "label": ctype or "journal",
+        "text": text,
+        "tags": tags,
+        "metadata": {
+            "source": "journal",
+            "cycle": str(cycle),
+            "type": ctype,
+            "status": status,
+            "category": category,
+            "date": timestamp,
+        },
+    }
 
 
-def chunk_cycles(cycles: list) -> list:
-    """Convert cycle records into ingestible chunks."""
+def transform_journal(journal: list) -> list:
+    """Batch-transform journal entries into ingestible chunks."""
+    return [c for c in (transform_journal_entry(e) for e in journal) if c is not None]
+
+
+def transform_cycle_entry(entry: dict) -> dict | None:
+    """Convert a single cycle record into an ingest chunk, or None if unusable."""
     from scripts.memory_repair import migrate_cycle_entry
 
-    chunks = []
-    for entry in cycles:
-        if not isinstance(entry, dict):
-            continue
-        migrate_cycle_entry(entry)
-        cycle = entry.get("cycle_number", 0)
-        # Cycle records no longer carry `summary`; surface the planned cycle
-        # goal instead (with a final fallback to a stray `summary` field on
-        # very old completed records).
-        cycle_goal = entry.get("cycle_goal") or entry.get("summary", "")
-        ctype = entry.get("cycle_type", "")
-        status = entry.get("cycle_status", "")
-        category = entry.get("cycle_category", "")
-        start = entry.get("start", "")
-        end = entry.get("end", "")
-        duration = entry.get("duration_seconds")
+    if not isinstance(entry, dict):
+        return None
+    migrate_cycle_entry(entry)
+    cycle = entry.get("cycle_number", 0)
+    # Cycle records no longer carry `summary`; surface the planned cycle
+    # goal instead (with a final fallback to a stray `summary` field on
+    # very old completed records).
+    cycle_goal = entry.get("cycle_goal") or entry.get("summary", "")
+    ctype = entry.get("cycle_type", "")
+    status = entry.get("cycle_status", "")
+    category = entry.get("cycle_category", "")
+    start = entry.get("start", "")
+    end = entry.get("end", "")
+    duration = entry.get("duration_seconds")
 
-        parts = [f"Cycle {cycle}"]
-        if ctype:
-            parts.append(f"Type: {ctype}")
-        if category:
-            parts.append(f"Category: {category}")
-        if status:
-            parts.append(f"Status: {status}")
-        if cycle_goal:
-            parts.append(f"Goal: {cycle_goal}")
-        if duration is not None:
-            m, s = divmod(int(duration), 60)
-            parts.append(f"Duration: {m}m {s}s")
-        if start:
-            parts.append(f"Started: {start[:19]}")
-        if end:
-            parts.append(f"Ended: {end[:19]}")
+    parts = [f"Cycle {cycle}"]
+    if ctype:
+        parts.append(f"Type: {ctype}")
+    if category:
+        parts.append(f"Category: {category}")
+    if status:
+        parts.append(f"Status: {status}")
+    if cycle_goal:
+        parts.append(f"Goal: {cycle_goal}")
+    if duration is not None:
+        m, s = divmod(int(duration), 60)
+        parts.append(f"Duration: {m}m {s}s")
+    if start:
+        parts.append(f"Started: {start[:19]}")
+    if end:
+        parts.append(f"Ended: {end[:19]}")
 
-        text = "\n".join(parts)
-        if len(text.strip()) < 10:
-            continue
+    text = "\n".join(parts)
+    if len(text.strip()) < 10:
+        return None
 
-        tags = ["cycle"]
-        if ctype:
-            tags.append(f"type:{ctype}")
-        if category:
-            tags.append(f"category:{category}")
-        if status:
-            tags.append(f"status:{status}")
-        tags.append(f"cycle:{cycle}")
-        if start:
-            tags.append(f"date:{start[:10]}")
+    tags = ["cycle"]
+    if ctype:
+        tags.append(f"type:{ctype}")
+    if category:
+        tags.append(f"category:{category}")
+    if status:
+        tags.append(f"status:{status}")
+    tags.append(f"cycle:{cycle}")
+    if start:
+        tags.append(f"date:{start[:10]}")
 
-        chunks.append(
-            {
-                "title": f"Cycle {cycle}: {cycle_goal[:80] or ctype}",
-                "label": "cycle",
-                "text": text,
-                "tags": tags,
-                "metadata": {
-                    "source": "cycle",
-                    "cycle": str(cycle),
-                    "type": ctype,
-                    "status": status,
-                    "category": category,
-                    "date": start,
-                },
-            }
-        )
-    return chunks
+    return {
+        "title": f"Cycle {cycle}: {cycle_goal[:80] or ctype}",
+        "label": "cycle",
+        "text": text,
+        "tags": tags,
+        "metadata": {
+            "source": "cycle",
+            "cycle": str(cycle),
+            "type": ctype,
+            "status": status,
+            "category": category,
+            "date": start,
+        },
+    }
 
 
-def chunk_goals(goals: list) -> list:
-    """Convert goal records into ingestible chunks."""
-    chunks = []
-    for entry in goals:
-        if not isinstance(entry, dict):
-            continue
-        content = entry.get("content") or entry.get("goal") or ""
-        status = entry.get("status", "unknown")
-        goal_id = entry.get("id", "")
-
-        if not content or len(content.strip()) < 5:
-            continue
-
-        text = f"Goal: {content}\nStatus: {status}"
-        tags = ["goal", f"status:{status}"]
-        if goal_id:
-            tags.append(f"id:{goal_id}")
-
-        chunks.append(
-            {
-                "title": content[:100],
-                "label": "goal",
-                "text": text,
-                "tags": tags,
-                "metadata": {
-                    "source": "goal",
-                    "status": status,
-                    "id": goal_id,
-                },
-            }
-        )
-    return chunks
+def transform_cycles(cycles: list) -> list:
+    """Batch-transform cycle records into ingestible chunks."""
+    return [c for c in (transform_cycle_entry(e) for e in cycles) if c is not None]
 
 
-def chunk_inbox_entry(entry: dict) -> dict | None:
+def transform_goal_entry(entry: dict) -> dict | None:
+    """Convert a single goal record into an ingest chunk, or None if unusable."""
+    if not isinstance(entry, dict):
+        return None
+    content = entry.get("content") or entry.get("goal") or ""
+    status = entry.get("status", "unknown")
+    goal_id = entry.get("id", "")
+
+    if not content or len(content.strip()) < 5:
+        return None
+
+    text = f"Goal: {content}\nStatus: {status}"
+    tags = ["goal", f"status:{status}"]
+    if goal_id:
+        tags.append(f"id:{goal_id}")
+
+    return {
+        "title": content[:100],
+        "label": "goal",
+        "text": text,
+        "tags": tags,
+        "metadata": {
+            "source": "goal",
+            "status": status,
+            "id": goal_id,
+        },
+    }
+
+
+def transform_goals(goals: list) -> list:
+    """Batch-transform goal records into ingestible chunks."""
+    return [c for c in (transform_goal_entry(e) for e in goals) if c is not None]
+
+
+def transform_inbox_entry(entry: dict) -> dict | None:
     """Convert a single inbox message dict into an ingest chunk.
 
-    Shared by rebuild (chunk_inbox) and live ingestion
+    Shared by rebuild (transform_inbox) and live ingestion
     (cycle_close._inbox_chunks_for_memvid → append_many) so both paths
     produce identical records. The timestamp always comes from the entry —
     never datetime.now() — so rebuilds preserve original message times.
@@ -451,14 +492,9 @@ def chunk_inbox_entry(entry: dict) -> dict | None:
     }
 
 
-def chunk_inbox(messages: list) -> list:
-    """Convert archived inbox messages into ingestible chunks (rebuild path)."""
-    chunks = []
-    for entry in messages:
-        chunk = chunk_inbox_entry(entry)
-        if chunk is not None:
-            chunks.append(chunk)
-    return chunks
+def transform_inbox(messages: list) -> list:
+    """Batch-transform archived inbox messages into ingestible chunks (rebuild path)."""
+    return [c for c in (transform_inbox_entry(m) for m in messages) if c is not None]
 
 
 def gather_all_chunks(memory_dir: Path) -> list:
@@ -468,7 +504,7 @@ def gather_all_chunks(memory_dir: Path) -> list:
       2. journal_archive.json — historical journal (rich, ordered newest-first)
       3. messages/inbox_history.json — archived inbox messages (sibling dir)
 
-    All chunkers preserve the source-recorded timestamp in metadata["date"];
+    All transformers preserve the source-recorded timestamp in metadata["date"];
     rebuild never substitutes datetime.now().
 
     cycles.json / cycles_archive.json are intentionally excluded — cycle
@@ -481,14 +517,14 @@ def gather_all_chunks(memory_dir: Path) -> list:
     # 1. Current journal window — most recent, richest semantic content
     journal = load_json(memory_dir / "journal.json")
     if isinstance(journal, list):
-        all_chunks.extend(chunk_journal(journal))
+        all_chunks.extend(transform_journal(journal))
 
     # 2. Journal archive — historical entries, newest-first ordering preserved
     archive = load_json(memory_dir / "journal_archive.json")
     if archive is None:
         archive = load_json(memory_dir / "journal-archive.json")
     if isinstance(archive, list):
-        all_chunks.extend(chunk_journal(archive))
+        all_chunks.extend(transform_journal(archive))
 
     # 3. Inbox history — archived messages live in the sibling messages/ dir.
     #    Each message was also live-ingested at arrival; rebuild reconstructs
@@ -497,7 +533,7 @@ def gather_all_chunks(memory_dir: Path) -> list:
         Path(memory_dir).resolve().parent / "messages" / "inbox_history.json"
     )
     if isinstance(inbox_history, list):
-        all_chunks.extend(chunk_inbox(inbox_history))
+        all_chunks.extend(transform_inbox(inbox_history))
 
     return all_chunks
 
@@ -505,6 +541,43 @@ def gather_all_chunks(memory_dir: Path) -> list:
 # ---------------------------------------------------------------------------
 # Build — ingest chunks via memvid SDK
 # ---------------------------------------------------------------------------
+
+
+def _rollback_build(
+    mv2: Path, backup: Path | None, err: BaseException, quiet: bool
+) -> None:
+    """Restore the pre-rebuild state after a failed/aborted build.
+
+    If a backup was taken (an .mv2 existed before the rebuild started), copy it
+    back over the partial .mv2. If no backup existed (fresh build), just remove
+    the partial file. Best-effort — rollback failures are reported to stderr but
+    do not mask the original exception (the caller re-raises ``err``).
+    """
+    err_label = f"{type(err).__name__}: {err}"
+    try:
+        if backup is not None and backup.exists():
+            shutil.copy2(backup, mv2)
+            if not quiet:
+                print(
+                    f"[INGEST] Rebuild failed ({err_label}) — restored "
+                    f"{mv2.name} from {backup.name}",
+                    file=sys.stderr,
+                )
+        else:
+            if mv2.exists():
+                mv2.unlink()
+            if not quiet:
+                print(
+                    f"[INGEST] Rebuild failed ({err_label}) — no backup to "
+                    f"restore; removed partial {mv2.name}",
+                    file=sys.stderr,
+                )
+    except Exception as rb_err:
+        print(
+            f"[INGEST] Rollback ALSO failed: {type(rb_err).__name__}: {rb_err} "
+            f"(original error: {err_label})",
+            file=sys.stderr,
+        )
 
 
 def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
@@ -551,7 +624,11 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
                 )
         return
 
-    # Backup existing .mv2 before full rebuild
+    # Backup existing .mv2 before full rebuild. The backup is also our
+    # rollback source: if the rebuild raises (or a per-chunk loop is killed
+    # mid-flight by Ctrl-C / OOM), we copy the backup back over the partial
+    # .mv2 so the index is never left in a half-written state.
+    backup: Path | None = None
     if mv2.exists():
         backup = mv2.with_suffix(mv2.suffix + ".backup")
         shutil.copy2(mv2, backup)
@@ -560,51 +637,59 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
         mv2.unlink()
 
     mv2.parent.mkdir(parents=True, exist_ok=True)
-    mem = memvid_sdk.create(str(mv2), enable_vec=True, enable_lex=True)
-    if not quiet:
-        print(f"[INGEST] Created {mv2}")
 
-    # Compression threshold is checked per-chunk because the file grows
-    # during the build loop.
-    put_base_kwargs: dict = {"enable_embedding": ENABLE_EMBEDDING}
-    if EMBED_MODEL is not None:
-        put_base_kwargs["embedding_model"] = EMBED_MODEL
-    ok, fail = 0, 0
-    for i, ch in enumerate(chunks):
-        merged_meta = dict(ch.get("metadata") or {})
-        # Fold tags into metadata so they're queryable (SDK accepts tags= too)
-        try:
-            mem.put(
-                title=ch["title"],
-                label=ch["label"],
-                text=ch["text"],
-                tags=ch["tags"],
-                metadata=merged_meta,
-                vector_compression=_should_compress(mv2),
-                **put_base_kwargs,
-            )
-            ok += 1
-        except Exception as e:
-            fail += 1
-            if not quiet:
-                print(
-                    f"  WARN: chunk {i} failed: {str(e)[:120]}",
-                    file=sys.stderr,
-                )
-        if not quiet and (i + 1) % 20 == 0:
-            print(f"[INGEST] Ingested {i + 1}/{len(chunks)} chunks...")
-        if (i + 1) % 1000 == 0:
-            mem.commit()
-
-    # Commit WAL → searchable index (REQUIRED — without this, put() calls are
-    # buffered in the WAL and never appear in find()/ask() results).
     try:
-        mem.seal()  # same as commit() in memvid_sdk
+        mem = memvid_sdk.create(str(mv2), enable_vec=True, enable_lex=True)
         if not quiet:
-            print(f"[INGEST] Committed {ok} frames to index")
-    except Exception as e:
-        if not quiet:
-            print(f"  WARN: commit failed: {e}", file=sys.stderr)
+            print(f"[INGEST] Created {mv2}")
+
+        # Compression threshold is checked per-chunk because the file grows
+        # during the build loop.
+        put_base_kwargs: dict = {"enable_embedding": ENABLE_EMBEDDING}
+        if EMBED_MODEL is not None:
+            put_base_kwargs["embedding_model"] = EMBED_MODEL
+        ok, fail = 0, 0
+        for i, ch in enumerate(chunks):
+            merged_meta = dict(ch.get("metadata") or {})
+            # Fold tags into metadata so they're queryable (SDK accepts tags= too)
+            try:
+                mem.put(
+                    title=ch["title"],
+                    label=ch["label"],
+                    text=ch["text"],
+                    tags=ch["tags"],
+                    metadata=merged_meta,
+                    vector_compression=_should_compress(mv2),
+                    **put_base_kwargs,
+                )
+                ok += 1
+            except Exception as e:
+                fail += 1
+                if not quiet:
+                    print(
+                        f"  WARN: chunk {i} failed: {str(e)[:120]}",
+                        file=sys.stderr,
+                    )
+            if not quiet and (i + 1) % 20 == 0:
+                print(f"[INGEST] Ingested {i + 1}/{len(chunks)} chunks...")
+            if (i + 1) % 1000 == 0:
+                mem.commit()
+
+        # Commit WAL → searchable index (REQUIRED — without this, put() calls are
+        # buffered in the WAL and never appear in find()/ask() results).
+        try:
+            mem.seal()  # same as commit() in memvid_sdk
+            if not quiet:
+                print(f"[INGEST] Committed {ok} frames to index")
+        except Exception as e:
+            if not quiet:
+                print(f"  WARN: commit failed: {e}", file=sys.stderr)
+    except BaseException as e:
+        # Catch BaseException so KeyboardInterrupt / SystemExit also trigger
+        # rollback before propagating — a half-built .mv2 is worse than no
+        # change at all when we have a known-good backup.
+        _rollback_build(mv2, backup, e, quiet)
+        raise
 
     size_kb = mv2.stat().st_size / 1024 if mv2.exists() else 0
 
@@ -633,29 +718,40 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
 # ---------------------------------------------------------------------------
 
 
-def _detect_and_chunk(entry: dict) -> list:
-    """Auto-detect entry type and route to the correct chunker.
+def _detect_and_transform(entry: dict) -> dict | None:
+    """Auto-detect entry type and route to the correct transformer.
 
     Detection heuristic (applies to current schema; legacy keys are mapped
-    by the chunkers themselves via memory_repair.migrate_*):
+    by the transformers themselves via memory_repair.migrate_*):
       - Has "actions" or ("cycle_goal" + "summary") → journal entry
       - Has "start" or "end" or "duration_seconds" → cycle record
       - Has "content" and "status" (no cycle fields) → goal record
+
+    Returns a single chunk dict or None if the entry produced nothing
+    ingestible (e.g. text too short).
     """
     if "actions" in entry or ("cycle_goal" in entry and "summary" in entry):
-        return chunk_journal([entry])
+        return transform_journal_entry(entry)
     if "start" in entry or "end" in entry or "duration_seconds" in entry:
-        return chunk_cycles([entry])
+        return transform_cycle_entry(entry)
     if "content" in entry or (
         "goal" in entry and "status" in entry and "summary" not in entry
     ):
-        return chunk_goals([entry])
+        return transform_goal_entry(entry)
     # Fallback: treat as journal entry
-    return chunk_journal([entry])
+    return transform_journal_entry(entry)
 
 
-def append_json(mv2_path, entry_source, quiet=False, json_mode=False):
-    """Append a single JSON entry to the existing .mv2 index (journal, cycle, or goal)."""
+def append_json(
+    mv2_path, entry_source, quiet=False, json_mode=False, smart_commit: bool = False
+):
+    """Append a single JSON entry to the existing .mv2 index (journal, cycle, or goal).
+
+    When ``smart_commit`` is True, the post-put commit is gated by
+    :func:`_smart_commit_check` — commit only fires when the persisted
+    put-counter exceeds its threshold. When False, commits unconditionally
+    (existing behavior).
+    """
     mv2 = Path(mv2_path)
     if not mv2.exists():
         print(f"ERROR: {mv2} not found. Run --build first.", file=sys.stderr)
@@ -679,12 +775,11 @@ def append_json(mv2_path, entry_source, quiet=False, json_mode=False):
             print(f"ERROR: Invalid JSON: {e}", file=sys.stderr)
             sys.exit(1)
 
-    chunks = _detect_and_chunk(entry)
-    if not chunks:
-        print("ERROR: Entry produced no ingestible chunks.", file=sys.stderr)
+    ch = _detect_and_transform(entry)
+    if ch is None:
+        print("ERROR: Entry produced no ingestible chunk.", file=sys.stderr)
         sys.exit(1)
 
-    ch = chunks[0]
     mem = _open_or_create(mv2)
     try:
         mem.put(
@@ -699,10 +794,11 @@ def append_json(mv2_path, entry_source, quiet=False, json_mode=False):
         print(f"ERROR: memvid put failed: {e}", file=sys.stderr)
         sys.exit(1)
 
-    try:
-        mem.commit()
-    except Exception as e:
-        print(f"WARN: commit failed: {e}", file=sys.stderr)
+    if not smart_commit or _smart_commit_check(mv2, 1):
+        try:
+            mem.commit()
+        except Exception as e:
+            print(f"WARN: commit failed: {e}", file=sys.stderr)
 
     cycle = entry.get("cycle_number", "?")
     if json_mode:
@@ -726,7 +822,9 @@ def append_json(mv2_path, entry_source, quiet=False, json_mode=False):
 # ---------------------------------------------------------------------------
 
 
-def append_many(mv2_path, chunks: list, *, quiet: bool = True) -> tuple:
+def append_many(
+    mv2_path, chunks: list, *, quiet: bool = True, smart_commit: bool = False
+) -> tuple:
     """Ingest multiple chunks under a single open + ONE final commit.
 
     Each per-call commit on the memvid `.mv2` rewrites the footer/segment
@@ -737,6 +835,11 @@ def append_many(mv2_path, chunks: list, *, quiet: bool = True) -> tuple:
     The caller is responsible for ensuring the `.mv2` exists — a missing
     file is treated as a no-op so we don't trigger a hidden full rebuild
     inside an unrelated code path.
+
+    When ``smart_commit`` is True, the final commit is gated by
+    :func:`_smart_commit_check` — counter is incremented by the number of
+    successful puts and the commit only fires when the new count exceeds
+    the persisted threshold.
 
     Returns ``(ok, fail)`` counts.
     """
@@ -765,11 +868,12 @@ def append_many(mv2_path, chunks: list, *, quiet: bool = True) -> tuple:
         # Nothing landed — skip the commit so we don't reserve a footer
         # segment for an empty batch.
         return (ok, fail)
-    try:
-        mem.commit()
-    except Exception as e:
-        if not quiet:
-            print(f"WARN: commit failed: {e}", file=sys.stderr)
+    if not smart_commit or _smart_commit_check(mv2, ok):
+        try:
+            mem.commit()
+        except Exception as e:
+            if not quiet:
+                print(f"WARN: commit failed: {e}", file=sys.stderr)
     return (ok, fail)
 
 
@@ -778,10 +882,15 @@ def append_many(mv2_path, chunks: list, *, quiet: bool = True) -> tuple:
 # ---------------------------------------------------------------------------
 
 
-def append_inbox_message(mv2_path, message: dict, quiet: bool = True) -> bool:
+def append_inbox_message(
+    mv2_path, message: dict, quiet: bool = True, smart_commit: bool = False
+) -> bool:
     """Ingest a single inbox message into the .mv2 using the shared chunk
     schema. The message's own timestamp field is used (never datetime.now()),
     so live ingestion and rebuild produce identical records.
+
+    When ``smart_commit`` is True, the post-put commit is gated by
+    :func:`_smart_commit_check`; otherwise commit fires unconditionally.
 
     Returns True on success, False if the message was skipped (too short /
     not a dict) or the put failed.
@@ -790,7 +899,7 @@ def append_inbox_message(mv2_path, message: dict, quiet: bool = True) -> bool:
     mv2 = Path(mv2_path)
     if not mv2.exists():
         return False
-    chunk = chunk_inbox_entry(message)
+    chunk = transform_inbox_entry(message)
     if chunk is None:
         return False
     mem = _open_or_create(mv2)
@@ -803,7 +912,8 @@ def append_inbox_message(mv2_path, message: dict, quiet: bool = True) -> bool:
             metadata=chunk["metadata"],
             **_put_kwargs(_should_compress(mv2)),
         )
-        mem.commit()
+        if not smart_commit or _smart_commit_check(mv2, 1):
+            mem.commit()
         return True
     except Exception as e:
         if not quiet:
@@ -816,8 +926,20 @@ def append_inbox_message(mv2_path, message: dict, quiet: bool = True) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def append_text(mv2_path, text, title=None, tags=None, quiet=False, json_mode=False):
-    """Ingest raw text directly into the .mv2 index."""
+def append_text(
+    mv2_path,
+    text,
+    title=None,
+    tags=None,
+    quiet=False,
+    json_mode=False,
+    smart_commit: bool = False,
+):
+    """Ingest raw text directly into the .mv2 index.
+
+    When ``smart_commit`` is True, the post-put commit is gated by
+    :func:`_smart_commit_check`; otherwise commit fires unconditionally.
+    """
     mv2 = Path(mv2_path)
     if not mv2.exists():
         print(f"ERROR: {mv2} not found. Run --build first.", file=sys.stderr)
@@ -849,10 +971,11 @@ def append_text(mv2_path, text, title=None, tags=None, quiet=False, json_mode=Fa
         print(f"ERROR: memvid put failed: {e}", file=sys.stderr)
         sys.exit(1)
 
-    try:
-        mem.commit()
-    except Exception as e:
-        print(f"WARN: commit failed: {e}", file=sys.stderr)
+    if not smart_commit or _smart_commit_check(mv2, 1):
+        try:
+            mem.commit()
+        except Exception as e:
+            print(f"WARN: commit failed: {e}", file=sys.stderr)
 
     if json_mode:
         print(
@@ -877,9 +1000,19 @@ def append_text(mv2_path, text, title=None, tags=None, quiet=False, json_mode=Fa
 
 
 def append_file(
-    mv2_path, filepath, title=None, tags=None, quiet=False, json_mode=False
+    mv2_path,
+    filepath,
+    title=None,
+    tags=None,
+    quiet=False,
+    json_mode=False,
+    smart_commit: bool = False,
 ):
-    """Ingest a file directly into the .mv2 index."""
+    """Ingest a file directly into the .mv2 index.
+
+    When ``smart_commit`` is True, the post-put commit is gated by
+    :func:`_smart_commit_check`; otherwise commit fires unconditionally.
+    """
     mv2 = Path(mv2_path)
     if not mv2.exists():
         print(f"ERROR: {mv2} not found. Run --build first.", file=sys.stderr)
@@ -920,10 +1053,11 @@ def append_file(
         print(f"ERROR: memvid put failed: {e}", file=sys.stderr)
         sys.exit(1)
 
-    try:
-        mem.commit()
-    except Exception as e:
-        print(f"WARN: commit failed: {e}", file=sys.stderr)
+    if not smart_commit or _smart_commit_check(mv2, 1):
+        try:
+            mem.commit()
+        except Exception as e:
+            print(f"WARN: commit failed: {e}", file=sys.stderr)
 
     try:
         size_kb = fpath.stat().st_size / 1024

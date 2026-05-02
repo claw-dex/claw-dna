@@ -3,7 +3,6 @@
   "includeCoAuthoredBy": false,
   "enableAllProjectMcpServers": true,
   "awaySummaryEnabled": false,
-  "autoDreamEnabled": false,
   "autoUpdatesChannel": "latest",
   "autoMemoryDirectory": "/agent/memory",
   "env": {

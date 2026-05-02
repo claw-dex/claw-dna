@@ -49,18 +49,7 @@ Optional flags:
 
 Exit codes: 0 = success, 1 = error (missing required args, write failure)
 
-Added in cycle 24 (efficiency): replaces manual Python one-liners at end of every cycle.
-Enhanced in cycle 66 (efficiency): fixed python3→uv run python.
-Enhanced in cycle 79 (efficiency): stub start uses state.last_cycle_run (with last_heartbeat fallback) for accurate durations.
-Enhanced in cycle 86 (efficiency): --cycle is now optional (auto-detected from state.json).
-Enhanced in cycle 114 (prompt_evolution): auto stale-count check runs every cycle — warns when
-    tab count, test count, or script count in AGENTS.md/prompts diverges from actual values.
-Enhanced in cycle 117 (efficiency): test count cached by self_test.py mtime — avoids 1.4s
-    subprocess on cycles where self_test.py hasn't changed (typical case).
-Enhanced in cycle 119 (efficiency): inlined normalize_cycles and outbox-history logic —
-    eliminates 2 `uv run python` subprocesses per cycle (~150ms overhead removed).
-Enhanced in cycle 167 (efficiency): auto-backup memory files if last backup >1h old —
-    eliminates the recurring ⚠ STALE BACKUP warning in cycle_start.py.
+Enum Reference: See prompts/enum.md for agent status values and other enums.
 """
 
 import fcntl
@@ -185,13 +174,13 @@ def _inbox_chunks_for_memvid(items: list) -> list:
     if not items:
         return []
     try:
-        from scripts.memory_ingest import chunk_inbox_entry
+        from scripts.memory_ingest import transform_inbox_entry
     except Exception as e:
         print(f"  ⚠ inbox memvid — import skipped: {e}")
         return []
     out = []
     for msg in items:
-        c = chunk_inbox_entry(msg)
+        c = transform_inbox_entry(msg)
         if c is not None:
             out.append(c)
     return out
@@ -281,7 +270,7 @@ def _archive_inbox(
 
                 # Stamp the closing cycle number onto each archived message so
                 # the value travels into both inbox_history.json and the
-                # memvid chunk (chunk_inbox_entry reads entry["cycle_number"]).
+                # memvid chunk (transform_inbox_entry reads entry["cycle_number"]).
                 if cycle_number is not None:
                     for m in to_archive:
                         if isinstance(m, dict) and "cycle_number" not in m:
@@ -670,31 +659,40 @@ def _sync_auto_memory() -> None:
 def _entry_chunks_for_memvid(entry: dict) -> list:
     """Convert a cycle/journal/goal entry into memvid chunks (no I/O).
 
-    Routes through ``memory_ingest._detect_and_chunk`` so the chunk schema
-    matches the rebuild path exactly. Returns ``[]`` on import failure.
+    Routes through ``memory_ingest._detect_and_transform`` so the chunk
+    schema matches the rebuild path exactly. Returns ``[]`` on import
+    failure or when the entry produced no ingestible chunk.
     """
     if not entry:
         return []
     try:
-        from scripts.memory_ingest import _detect_and_chunk
+        from scripts.memory_ingest import _detect_and_transform
     except Exception as e:
         print(f"  ⚠ memvid — import skipped: {e}")
         return []
     try:
-        return list(_detect_and_chunk(entry) or [])
+        chunk = _detect_and_transform(entry)
     except Exception as e:
-        print(f"  ⚠ memvid — chunking failed: {e}")
+        print(f"  ⚠ memvid — transform failed: {e}")
         return []
+    return [chunk] if chunk is not None else []
 
 
 def _flush_memvid_buffer(chunks: list) -> None:
-    """Write all buffered chunks to the .mv2 in a single open + ONE commit.
+    """Write all buffered chunks to the .mv2 in a single open + smart commit.
 
     Per-call commits on the memvid `.mv2` rewrite the segment catalog and
     reserve significant on-disk space, so cycle_close batches every record
     it would ingest (inbox messages + journal entry) into a single buffer
     and flushes them here at the end of the cycle. Cycle records are not
     buffered — cycles.json is excluded from long-term memory.
+
+    Uses ``smart_commit=True`` so the actual ``mem.commit()`` only fires
+    once the persisted put-counter exceeds its threshold (default 50);
+    intervening cycles still ``put()`` (data lands in the WAL) but skip
+    the segment-catalog rewrite that drives file-size growth. The
+    threshold lives next to the .mv2 in ``<mv2>.put_counter`` and can be
+    tuned without code changes.
 
     On first run the .mv2 doesn't exist; we run a one-shot ``build()`` from
     the source JSON files (journal/journal_archive/inbox_history). Steps 1,
@@ -728,8 +726,8 @@ def _flush_memvid_buffer(chunks: list) -> None:
         return
 
     try:
-        ok, fail = append_many(DEFAULT_MV2, chunks, quiet=True)
-        msg = f"  ✓ memvid — batched {ok} chunk(s) in 1 commit"
+        ok, fail = append_many(DEFAULT_MV2, chunks, quiet=True, smart_commit=True)
+        msg = f"  ✓ memvid — batched {ok} chunk(s) (smart_commit)"
         if fail:
             msg += f" ({fail} failed)"
         print(msg)
