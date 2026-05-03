@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -43,14 +44,36 @@ BASE = Path("/agent")
 STATE_FILE = BASE / "memory" / "whatsapp_state.json"
 INBOX_FILE = BASE / "messages" / "inbox.json"
 OUTBOX_FILE = BASE / "messages" / "outbox.json"
-INBOX_HISTORY_FILE = BASE / "memory" / "whatsapp_inbox_history.json"
-OUTBOX_HISTORY_FILE = BASE / "memory" / "whatsapp_outbox_history.json"
-CHAT_HISTORY_FILE = BASE / "memory" / "whatsapp_chat_history.json"
+BRIDGE_DIR = BASE / "messages" / "bridge" / "whatsapp"
+INBOX_HISTORY_FILE = BRIDGE_DIR / "inbox_history.json"
+OUTBOX_HISTORY_FILE = BRIDGE_DIR / "outbox_history.json"
+CHAT_HISTORY_FILE = BRIDGE_DIR / "chat_history.json"
 STATE_JSON = BASE / "memory" / "state.json"
 MEDIA_DIR = BASE / "workspace" / "whatsapp"
 
 # Logger is a child of webhook_receiver — propagates to the receiver's handlers.
 log = logging.getLogger("webhook_receiver.whatsapp")
+
+
+def _migrate_legacy_message_files():
+    """Move pre-existing message records from /agent/memory/ to BRIDGE_DIR.
+
+    Idempotent: skips when the new path already exists. Non-fatal on errors.
+    """
+    legacy_pairs = [
+        (BASE / "memory" / "whatsapp_inbox_history.json", INBOX_HISTORY_FILE),
+        (BASE / "memory" / "whatsapp_outbox_history.json", OUTBOX_HISTORY_FILE),
+        (BASE / "memory" / "whatsapp_chat_history.json", CHAT_HISTORY_FILE),
+    ]
+    for old, new in legacy_pairs:
+        try:
+            if old.exists() and not new.exists():
+                new.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(old), str(new))
+                log.info(f"Migrated {old} -> {new}")
+        except (OSError, shutil.Error) as exc:
+            log.warning(f"Failed to migrate {old} -> {new}: {exc}")
+
 
 # --- Constants ---
 KEEPASS_WHATSAPP_ACCESS_TOKEN = "WHATSAPP_ACCESS_TOKEN"
@@ -914,6 +937,9 @@ class WhatsAppBridgeHandler:
     def start(self):
         """Load credentials + state; spawn outbox poller. Self-disables if creds missing."""
         log.info("Starting WhatsApp bridge handler...")
+
+        BRIDGE_DIR.mkdir(parents=True, exist_ok=True)
+        _migrate_legacy_message_files()
 
         token = keepass_get(KEEPASS_WHATSAPP_ACCESS_TOKEN)
         phone_number_id = keepass_get(KEEPASS_WHATSAPP_PHONE_NUMBER_ID)

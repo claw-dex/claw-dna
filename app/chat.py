@@ -39,17 +39,21 @@ def _build_system_prompt(chat_history: list[dict] | None = None) -> str:
     """Build system prompt from system.md + constitution.md + public URL + optional chat history.
 
     Sections are wrapped in XML tags so that boundaries remain unambiguous when
-    concatenated with other markdown content (e.g. by agent.sh).
+    concatenated with other markdown content (e.g. by agent.sh). The first three
+    sections (`agent_system_prompt`, `agent_constitution`, `public_url`) are
+    kept in lock-step — same tag names, same order — with `heartbeat.sh`'s
+    `build_system_prompt`, so all three entry points (heartbeat shell agent,
+    chat tab, internal-agent daemon) hand the SDK an identically-shaped header.
     """
     parts: list[str] = []
     if SYSTEM_MD.exists():
-        parts.append("<system_info>")
+        parts.append("<agent_system_prompt>")
         parts.append(SYSTEM_MD.read_text())
-        parts.append("</system_info>")
+        parts.append("</agent_system_prompt>")
     if CONSTITUTION_MD.exists():
-        parts.append("<constitution>")
+        parts.append("<agent_constitution>")
         parts.append(CONSTITUTION_MD.read_text())
-        parts.append("</constitution>")
+        parts.append("</agent_constitution>")
     # Inject public hostname if configured
     if PORTAL_CONFIG.exists():
         try:

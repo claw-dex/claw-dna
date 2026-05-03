@@ -847,12 +847,12 @@ def _print_online_agents() -> None:
         print(f"      outbox:           {a.get('outbox') or '?'}")
     print(
         "  → To delegate: append a JSON object "
-        '{"id":"<uuid>","type":"goal"|"message","content":"...","timestamp":"<iso>","read":false} '
+        '{"id":"<uuid>","type":"goal"|"message","content":"...","timestamp":"<iso>"} '
         'to the agent\'s inbox path. Use type="goal" when assigning a new task '
         '(e.g. "Research about the topics of autonomous AI agent, produce a pdf report and upload it to my workspace"); use type="message" for a '
         'conversational note or status request (e.g. "Report your current '
         'progress back to me"). Replies surface in the main inbox.json with '
-        "source=external_agent."
+        'source: "external_agent" | "internal_agent".'
     )
 
 

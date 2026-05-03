@@ -30,6 +30,7 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
@@ -48,9 +49,10 @@ BASE = Path("/agent")
 STATE_FILE = BASE / "memory" / "telegram_state.json"
 INBOX_FILE = BASE / "messages" / "inbox.json"
 OUTBOX_FILE = BASE / "messages" / "outbox.json"
-INBOX_HISTORY_FILE = BASE / "memory" / "telegram_inbox_history.json"
-OUTBOX_HISTORY_FILE = BASE / "memory" / "outbox_history.json"
-CHAT_HISTORY_FILE = BASE / "memory" / "telegram_chat_history.json"
+BRIDGE_DIR = BASE / "messages" / "bridge" / "telegram"
+INBOX_HISTORY_FILE = BRIDGE_DIR / "inbox_history.json"
+OUTBOX_HISTORY_FILE = BRIDGE_DIR / "outbox_history.json"
+CHAT_HISTORY_FILE = BRIDGE_DIR / "chat_history.json"
 LOG_DIR = BASE / "memory" / "logs"
 LOG_FILE = LOG_DIR / "telegram_bridge.log"
 HEARTBEAT_DIR = BASE / "memory" / "heartbeats"
@@ -69,6 +71,7 @@ def _setup_logging():
     """
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     HEARTBEAT_DIR.mkdir(parents=True, exist_ok=True)
+    BRIDGE_DIR.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
@@ -77,6 +80,26 @@ def _setup_logging():
             logging.StreamHandler(sys.stdout),
         ],
     )
+
+
+def _migrate_legacy_message_files():
+    """Move pre-existing message records from /agent/memory/ to BRIDGE_DIR.
+
+    Idempotent: skips when the new path already exists. Non-fatal on errors.
+    """
+    legacy_pairs = [
+        (BASE / "memory" / "telegram_inbox_history.json", INBOX_HISTORY_FILE),
+        (BASE / "memory" / "outbox_history.json", OUTBOX_HISTORY_FILE),
+        (BASE / "memory" / "telegram_chat_history.json", CHAT_HISTORY_FILE),
+    ]
+    for old, new in legacy_pairs:
+        try:
+            if old.exists() and not new.exists():
+                new.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(old), str(new))
+                log.info(f"Migrated {old} -> {new}")
+        except (OSError, shutil.Error) as exc:
+            log.warning(f"Failed to migrate {old} -> {new}: {exc}")
 
 
 def _write_heartbeat():
@@ -2260,6 +2283,7 @@ def _format_outbox_msg(msg: dict) -> str:
 
 def main():
     _setup_logging()
+    _migrate_legacy_message_files()
     # --- Singleton lock: prevent multiple instances from running simultaneously ---
     # Open in append mode so existing content (PID) is not truncated before we read it
     lock_fh = open(LOCK_FILE, "a+")

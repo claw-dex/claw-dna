@@ -29,6 +29,20 @@
     "stdout_log": "/agent/memory/logs/service-external_agent_api.stdout.log",
     "stderr_log": "/agent/memory/logs/service-external_agent_api.stderr.log"
   },
+  "internal_agent_chat": {
+    "pid": null,
+    "port": null,
+    "auto_start": true,
+    "command": [
+      "uv",
+      "run",
+      "python",
+      "/agent/services/internal_agent_chat.py"
+    ],
+    "started": null,
+    "stdout_log": "/agent/memory/logs/service-internal_agent_chat.stdout.log",
+    "stderr_log": "/agent/memory/logs/service-internal_agent_chat.stderr.log"
+  },
   "scheduler_daemon": {
     "pid": null,
     "port": null,

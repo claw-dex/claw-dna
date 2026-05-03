@@ -466,7 +466,12 @@ Entry:
 
 ### agents.json
 
-Registry of **external agents** (separate, out-of-process LLM sessions like another Claude Code or Codex instance) that talk to the main agent over the `external_agent_api` HTTP service. Managed by `scripts/register_external_agent.py` and the `register-external-agent` skill — do not hand-edit unless repairing.
+Registry of **agents** the main agent can collaborate with. Two `type`s coexist in the same list:
+
+- `external` — separate, out-of-process LLM sessions (another Claude Code, Codex, …) that talk to the main agent over the `external_agent_api` HTTP service. Managed by `scripts/register_external_agent.py`.
+- `internal` — long-lived in-process `claude_agent_sdk` sessions hosted by the `internal_agent_chat` daemon. Each runs with the **same fixed SDK options as `app/chat.py`** (system prompt, allowed_tools, permission_mode, cwd) — the only per-agent customization is an optional `system_prompt` text appended to the shared prompt, plus an `outbox_routing_rules` list that shapes the description of the agent's `send_reply` MCP tool. Managed by `scripts/register_internal_agent.py`.
+
+Do not hand-edit unless repairing.
 
 ```json
 []
@@ -496,8 +501,8 @@ Entry:
 }
 ```
 
-- `type`: always `external` for now (reserved value `internal` is unused).
-- `name`: stable identifier; matches the directory under `/agent/messages/external/<name>/` and is sent on every API call as the `X-Agent-Name` header. Must match `^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$`.
+- `type`: `external` (HTTP-polled) or `internal` (in-process SDK session — see internal-agent entry shape below).
+- `name`: stable identifier; matches the directory under `/agent/messages/external/<name>/` (or `/agent/messages/internal/<name>/`) and, for external agents, is sent on every API call as the `X-Agent-Name` header. Must match `^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$`. The reserved name `main` is **never** registered — it always refers to the main agent (`/agent/messages/inbox.json`).
 - `inbox` / `outbox`: absolute paths to the per-agent message files. The same directory also holds `inbox_history.json` and `outbox_history.json` (archives written by the sweeper).
 - `capabilities`: list of capability objects shaped like entries in `memory/capabilities.json` (`id`, `name`, `description`, `category`, `enabled`).
 - `responsibilities`: free-text duties — write it from the perspective of "what kind of task should the main agent delegate to this agent?".
@@ -507,6 +512,29 @@ Entry:
   - `deactivated`: the agent has been deactivated (either by the main agent or itself)
 - `timeout_seconds`: how long without a ping before status flips to `offline`. Default 1800s (30 minutes). Per-agent.
 - `last_ping_at`: ISO8601 UTC timestamp of the most recent successful ping. `null` until the agent's first ping.
+
+#### Internal-agent entry
+
+```json
+{
+  "type": "internal",
+  "name": "planner",
+  "status": "online",
+  "inbox": "/agent/messages/internal/planner/inbox.json",
+  "responsibilities": "Decompose multi-step requests into ordered subtasks",
+  "system_prompt": "You are the planner. Output a numbered plan.",
+  "outbox_routing_rules": [
+    {"description": "Send the final numbered plan back to the main agent.", "agent": "main"},
+    {"description": "Hand off web research subtasks.", "agent": "research-bot"}
+  ]
+}
+```
+
+- `inbox`: absolute path to the per-agent inbox file. Senders drop an envelope into this file (see *internal-agent inbox.json* below) and the daemon picks it up within ~10 s.
+- `responsibilities`: free-text duties — written from the perspective of "what kind of task should the main agent delegate to this agent?".
+- `status`: `online` | `offline` | `deactivated`. Setting `deactivated` causes the daemon to tear down the session at the next sweep tick; the inbox/history files on disk are preserved.
+- `system_prompt` (optional): per-agent text **appended** to the shared system prompt (`system.md` + `constitution.md` + `public_url` + prior chat history + `claude-system-prompt.md`). It does **not** replace the shared prompt. Everything else about the SDK options is fixed and identical to `app/chat.py`.
+- `outbox_routing_rules` (optional): list of `{"description": "...", "agent": "<name>"}` entries. Each rule contributes one bullet to the description of the agent's per-session `send_reply` MCP tool, telling the LLM when to use that named recipient. The reserved name `main` is always available even with no rules; any other `agent` value must be present in this list **and** registered in `agents.json` with an `inbox` field.
 
 ---
 
@@ -533,7 +561,7 @@ Entry (base shape):
 
 - `type`: `goal` | `message` | `event` | `agent_response` | `agent_needs_human` | `agent_error` | `agent_info`
   - The `agent_*` types arrive only when an external agent forwards an outbox entry (see below). They are the external agent's own outbox type (`response` / `needs_human` / `error` / `info`) prefixed with `agent_` so the main agent's inbox triage can distinguish forwarded entries from base inbox types (`goal` / `message` / `event`) at a glance.
-- `source`: `user` | `scheduler` | `telegram` | `whatsapp` | `webhook` | `external_agent` | other
+- `source`: `user` | `scheduler` | `telegram` | `whatsapp` | `webhook` | `external_agent` | `internal_agent` | other
 - Scheduler-injected entries may include `task_id`.
 - `event` entries (source `webhook`) carry the sanitized HTTP payload in `content`: method, path, filtered headers, and body (truncated at 4 KB). Full payload is in `webhook_receiver.log`.
 - `received_at`: **Required.** ISO-8601 UTC timestamp set by the writer the moment the item lands in `inbox.json`. This field is the cutoff `cycle_close.py` uses to decide which items the agent has already seen vs. which arrived **mid-cycle** and must be carried forward to the next cycle. Items with `received_at <= cycle.start` are archived to `inbox_history.json` and ingested into long-term memory; items with `received_at > cycle.start` stay in `inbox.json` so they are not silently dropped without processing. All writers (`app/data/write.py::queue_to_inbox`, `services/shared.py::write_to_inbox`, scheduler, webhook, telegram, whatsapp bridges, external_agent_api) set this; `write_to_inbox` stamps it as a fallback. Items missing `received_at` are treated as pre-existing and archived on the next goal cycle close.

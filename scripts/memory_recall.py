@@ -362,7 +362,7 @@ def _entry_to_dict(entry) -> dict:
     if is_dataclass(entry):
         return asdict(entry)
     if isinstance(entry, dict):
-        return entry
+        return dict(entry)
     # Fallback: pull known attributes
     return {
         "frame_id": getattr(entry, "frame_id", None),
@@ -371,6 +371,38 @@ def _entry_to_dict(entry) -> dict:
         "uri": getattr(entry, "uri", None),
         "child_frames": list(getattr(entry, "child_frames", []) or []),
     }
+
+
+def _enrich_timeline_entry(entry: dict, mem) -> dict:
+    """Add `title` and `tags` to a timeline entry via a per-frame lookup.
+
+    `mem.timeline()` returns a `TimelineEntry` (SDK TypedDict) which only
+    carries frame_id/uri/timestamp/preview/child_frames — no tags or
+    title. To match the shape semantic search returns, we issue one
+    `mem.frame(uri)` lookup per entry and merge the frame's `title` /
+    `tags` (and a parsed `cycle` convenience field) into the entry. The
+    `preview` is also passed through `_clean_snippet` so the inline
+    metadata block the SDK appends gets stripped, matching what semantic
+    search shows.
+    """
+    enriched = dict(entry)
+    enriched["preview"] = _clean_snippet(enriched.get("preview") or "")
+    uri = entry.get("uri")
+    if not uri:
+        return enriched
+    try:
+        frame = mem.frame(uri) or {}
+    except Exception:
+        # Frame lookup is best-effort; missing enrichment is preferable
+        # to crashing the whole timeline call.
+        return enriched
+    enriched["title"] = frame.get("title") or ""
+    tags = list(frame.get("tags") or [])
+    enriched["tags"] = tags
+    cycle_tag = next((t for t in tags if t.startswith("cycle:")), "")
+    if cycle_tag:
+        enriched["cycle"] = cycle_tag.split(":", 1)[1]
+    return enriched
 
 
 def _run_timeline(opts, mv2):
@@ -391,7 +423,9 @@ def _run_timeline(opts, mv2):
         print(f"ERROR: memvid timeline failed: {e}", file=sys.stderr)
         sys.exit(1)
 
-    items = [_entry_to_dict(e) for e in (entries or [])]
+    # Enrich each entry with title/tags via a per-frame lookup so the
+    # output carries the same metadata semantic search returns.
+    items = [_enrich_timeline_entry(_entry_to_dict(e), mem) for e in (entries or [])]
 
     if opts["json_mode"]:
         print(
@@ -415,8 +449,20 @@ def _run_timeline(opts, mv2):
         for entry in items:
             ts = entry.get("timestamp", "")
             frame_id = entry.get("frame_id", "?")
-            preview = (entry.get("preview") or "")[:80]
-            print(f"  [ts={ts}] Frame {frame_id}: {preview}")
+            title = entry.get("title") or "untitled"
+            tags = entry.get("tags") or []
+            cycle_tag = next((t for t in tags if t.startswith("cycle:")), "")
+            date_tag = next((t for t in tags if t.startswith("date:")), "")
+            header = f"  [ts={ts}] Frame {frame_id}"
+            if cycle_tag:
+                header += f" | {cycle_tag}"
+            if date_tag:
+                header += f" | {date_tag}"
+            print(f"{header}")
+            print(f"    {title}")
+            preview = (entry.get("preview") or "")[:160]
+            if preview:
+                print(f"    {preview}")
         print(f"\n[MEMORY TIMELINE] Done.")
 
 

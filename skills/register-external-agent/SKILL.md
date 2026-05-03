@@ -1,6 +1,6 @@
 ---
 name: register-external-agent
-description: Onboard, list, deactivate, and generate connection prompts for **external agents** — separate, out-of-process LLM sessions (e.g. another Claude Code or Codex instance running elsewhere) that talk to the main agent over the external_agent_api HTTP service at /external-agent/*. Use when the user asks to "register an external agent", "delegate work to an external agent", "connect another Claude Code / Codex external agent", "list registered external agents", or to deactivate / re-onboard one. NOT for in-process subagents spawned via the Agent / Task tool, NOT for skills, and NOT for entries in memory/capabilities.json — those are all internal to this agent and unrelated to the external-agent registry.
+description: Register, onboard, list, deactivate, and generate connection prompts for **external agents** — separate, out-of-process LLM sessions (e.g. another Claude Code or Codex instance running elsewhere) that talk to the main agent over the external_agent_api HTTP service at /external-agent/*. Use when the user asks to "register an external agent", "delegate work to an external agent", "connect another Claude Code / Codex external agent", "list registered external agents", or to deactivate / re-onboard one. NOT for in-process subagents spawned via the Agent / Task tool, NOT for skills, and NOT for entries in memory/capabilities.json — those are all internal to this agent and unrelated to the external-agent registry.
 ---
 
 # register-external-agent
@@ -67,7 +67,24 @@ uv run python scripts/register_external_agent.py --list
 
 Look at each row's `status` and `last_ping_at`. Only delegate to `online` agents whose `responsibilities` match the task. Agents whose `last_ping_at` is older than `timeout_seconds` will be flipped to `offline` by the sweeper on its next pass.
 
-### 3. Stop forwarding from a misbehaving agent
+### 3. Send the agent a task
+
+There is no helper for this — write the envelope yourself follow sample below:
+
+```json
+{
+  "type": "goal",
+  "content": "User command or the entire description the task that the agent should take up",
+  "timestamp": "2026-03-05T10:00:00+00:00",
+  "received_at": "2026-03-05T10:00:01+00:00",
+  "priority": 3,
+  "source": "user"
+}
+```
+
+(see `memory-example` skill for more samples).
+
+### 4. Stop forwarding from a misbehaving agent
 
 ```bash
 uv run python scripts/register_external_agent.py --deactivate research-bot
@@ -75,7 +92,7 @@ uv run python scripts/register_external_agent.py --deactivate research-bot
 
 The agent's outbox stops draining into the main inbox, and any incoming `read-inbox` / `write-outbox` calls return 403. The agent itself can come back by calling `POST /update` with `{"status":"online"}` (operator can also re-run `--name research-bot ...` to reactivate from this side).
 
-### 4. Re-issue the connection prompt
+### 5. Re-issue the connection prompt
 
 If the remote session was lost, just rerun `--setup` — it reads live config + credentials, so the printed instruction always reflects the current host and password.
 

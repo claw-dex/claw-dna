@@ -24,6 +24,8 @@ def agent_root(tmp_path: Path) -> Path:
     for sub in (
         "messages",
         "messages/external",
+        "messages/bridge/telegram",
+        "messages/bridge/whatsapp",
         "memory",
         "memory/heartbeats",
         "memory/logs",
@@ -175,19 +177,11 @@ def patch_telegram_paths(monkeypatch, agent_root, patch_shared_paths):
     monkeypatch.setattr(tb, "STATE_FILE", agent_root / "memory" / "telegram_state.json")
     monkeypatch.setattr(tb, "INBOX_FILE", agent_root / "messages" / "inbox.json")
     monkeypatch.setattr(tb, "OUTBOX_FILE", agent_root / "messages" / "outbox.json")
-    monkeypatch.setattr(
-        tb,
-        "INBOX_HISTORY_FILE",
-        agent_root / "memory" / "telegram_inbox_history.json",
-    )
-    monkeypatch.setattr(
-        tb, "OUTBOX_HISTORY_FILE", agent_root / "memory" / "outbox_history.json"
-    )
-    monkeypatch.setattr(
-        tb,
-        "CHAT_HISTORY_FILE",
-        agent_root / "memory" / "telegram_chat_history.json",
-    )
+    bridge_dir = agent_root / "messages" / "bridge" / "telegram"
+    monkeypatch.setattr(tb, "BRIDGE_DIR", bridge_dir)
+    monkeypatch.setattr(tb, "INBOX_HISTORY_FILE", bridge_dir / "inbox_history.json")
+    monkeypatch.setattr(tb, "OUTBOX_HISTORY_FILE", bridge_dir / "outbox_history.json")
+    monkeypatch.setattr(tb, "CHAT_HISTORY_FILE", bridge_dir / "chat_history.json")
     monkeypatch.setattr(tb, "LOG_DIR", agent_root / "memory" / "logs")
     monkeypatch.setattr(
         tb, "LOG_FILE", agent_root / "memory" / "logs" / "telegram_bridge.log"
@@ -214,24 +208,53 @@ def patch_whatsapp_paths(monkeypatch, agent_root, patch_shared_paths):
     monkeypatch.setattr(wa, "STATE_FILE", agent_root / "memory" / "whatsapp_state.json")
     monkeypatch.setattr(wa, "INBOX_FILE", agent_root / "messages" / "inbox.json")
     monkeypatch.setattr(wa, "OUTBOX_FILE", agent_root / "messages" / "outbox.json")
-    monkeypatch.setattr(
-        wa,
-        "INBOX_HISTORY_FILE",
-        agent_root / "memory" / "whatsapp_inbox_history.json",
-    )
-    monkeypatch.setattr(
-        wa,
-        "OUTBOX_HISTORY_FILE",
-        agent_root / "memory" / "whatsapp_outbox_history.json",
-    )
-    monkeypatch.setattr(
-        wa,
-        "CHAT_HISTORY_FILE",
-        agent_root / "memory" / "whatsapp_chat_history.json",
-    )
+    bridge_dir = agent_root / "messages" / "bridge" / "whatsapp"
+    monkeypatch.setattr(wa, "BRIDGE_DIR", bridge_dir)
+    monkeypatch.setattr(wa, "INBOX_HISTORY_FILE", bridge_dir / "inbox_history.json")
+    monkeypatch.setattr(wa, "OUTBOX_HISTORY_FILE", bridge_dir / "outbox_history.json")
+    monkeypatch.setattr(wa, "CHAT_HISTORY_FILE", bridge_dir / "chat_history.json")
     monkeypatch.setattr(wa, "STATE_JSON", agent_root / "memory" / "state.json")
     monkeypatch.setattr(wa, "MEDIA_DIR", agent_root / "workspace" / "whatsapp")
     return wa
+
+
+@pytest.fixture
+def patch_iac_paths(monkeypatch, agent_root, patch_shared_paths):
+    """Redirect internal_agent_chat's hardcoded /agent paths into agent_root."""
+    import internal_agent_chat as iac
+
+    monkeypatch.setattr(iac, "BASE", agent_root)
+    # internal_agent_chat does `from shared import INBOX_FILE, MESSAGES_DIR`,
+    # so the rebound names in `iac`'s namespace must be patched alongside
+    # the originals on `shared` — `patch_shared_paths` only catches the
+    # latter.
+    monkeypatch.setattr(iac, "INBOX_FILE", agent_root / "messages" / "inbox.json")
+    monkeypatch.setattr(iac, "MESSAGES_DIR", agent_root / "messages")
+    monkeypatch.setattr(iac, "AGENTS_FILE", agent_root / "memory" / "agents.json")
+    monkeypatch.setattr(iac, "INTERNAL_DIR", agent_root / "messages" / "internal")
+    monkeypatch.setattr(
+        iac, "SESSIONS_DIR", agent_root / "memory" / "sessions" / "internal"
+    )
+    monkeypatch.setattr(iac, "LOG_DIR", agent_root / "memory" / "logs")
+    monkeypatch.setattr(
+        iac, "LOG_FILE", agent_root / "memory" / "logs" / "internal_agent_chat.log"
+    )
+    monkeypatch.setattr(iac, "HEARTBEAT_DIR", agent_root / "memory" / "heartbeats")
+    monkeypatch.setattr(
+        iac,
+        "HEARTBEAT_FILE",
+        agent_root / "memory" / "heartbeats" / "internal_agent_chat.heartbeat",
+    )
+    # System prompt source files — point them at non-existing paths so the
+    # builder produces an empty prompt unless the test seeds them.
+    monkeypatch.setattr(iac, "SYSTEM_MD", agent_root / "system.md")
+    monkeypatch.setattr(iac, "CONSTITUTION_MD", agent_root / "constitution.md")
+    monkeypatch.setattr(iac, "PORTAL_CONFIG", agent_root / "portal_config.json")
+    monkeypatch.setattr(
+        iac, "CLAUDE_SYSTEM_PROMPT_MD", agent_root / "claude-system-prompt.md"
+    )
+    (agent_root / "messages" / "internal").mkdir(parents=True, exist_ok=True)
+    return iac
 
 
 @pytest.fixture
