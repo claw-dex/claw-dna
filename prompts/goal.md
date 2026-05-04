@@ -84,6 +84,7 @@ For each item in `<new_goals_to_start>`:
       | Start / manage a background service or long-running process | `scripts/service_manager.py start <name> <port> -- <cmd>` |
       | System maintenance / housekeeping | `scripts/maintain.py --fix` |
       | Agent growth summary / milestone report | `scripts/milestone_report.py` |
+      | Goal best handled by an online registered agent | Follow "Delegated Goals" — append to delegate's inbox AND record `delegated_to` in goal.json |
    g. Execute all steps (or as much as fits in one cycle)
    h. Update `state.json` -> `current_goal` with the current goal/task in this format: `{goal-id} A short task description no more than 20 words` (concise and short)
    i. Write journal entry with plan and progress
@@ -104,6 +105,56 @@ When a goal spans phases:
 - Write a clear handoff note in `state.json` -> `last_cycle_summary` (future you reads this)
 - Set goal status to "in_progress" between phases
 - Begin each subsequent cycle by reading journal for last phase's output before continuing
+
+### Delegated Goals
+
+Some goals are best executed by a registered peer agent (internal chat-daemon
+agent or external HTTP-API agent). The `[AGENTS]` section of `cycle_start.py`
+output lists every online agent with its `name`, `type`, `responsibilities`,
+`capabilities`, and `inbox`/`outbox` paths.
+
+Two delegation triggers are valid:
+
+- **Agent-initiated:** you decide to delegate when an online agent's
+  responsibilities/capabilities clearly match the goal.
+- **User-instructed:** the inbox `goal` content explicitly names a delegate
+  (e.g. *"delegate this to research-bot"*). You MUST honour the named target
+  if that agent is online; if the named agent is offline or unknown, do NOT
+  silently re-route — write a `needs_human` to outbox explaining the issue
+  and leave the goal `pending`.
+
+Delegation flow:
+
+1. Generate a UUID4 for the delegated message.
+2. Append the message to the delegate's `inbox.json` (path from `[AGENTS]`):
+   `{"id":"<uuid>","type":"goal","content":"<task>","timestamp":"<iso>"}`.
+   Use `type:"goal"` for assigning new work; use `type:"message"` for a
+   conversational status request to an existing in-flight delegated goal.
+3. Create the `goal.json` entry as usual (with id, content, created_at,
+   etc.) **and** populate the optional fields:
+   - `delegated_to: {name, type}` — copy from the agent's registry entry
+   - `delegated_at` — current ISO 8601 UTC timestamp
+   - `delegated_message_id` — the UUID generated in step 1
+   Set initial `status = "in_progress"` (work is in progress from your
+   perspective — the wait counts).
+4. Update `state.json -> current_goal` to
+   `"{goal-id} Delegated to {name}: <short task>"`.
+5. Move on. Do NOT block on the delegate's reply within the same cycle.
+
+Replies surface in the main `inbox.json` with `source: "external_agent"` or
+`source: "internal_agent"` and `type` prefixed `agent_` (e.g.
+`agent_response`, `agent_error`). The polling step in "Continue In-Progress
+Goals" matches these back to your goal via `reply_to_id`:
+
+- For **internal** delegates, the chat daemon preserves the inbound message
+  `id` you supplied; when the peer replies via `send_reply(message_id=…)` the
+  daemon stamps `reply_to_id: <your-uuid>` on the forwarded envelope.
+- For **external** delegates, the agent should pass `reply_to_id: <your-uuid>`
+  when calling `POST /write-outbox`; the sweeper copies it onto the
+  forwarded main-inbox entry.
+
+Either way, set the goal's `delegated_message_id` to the **same UUID** you
+appended to the delegate's inbox so the correlation works.
 
 ### Inbox Messages
 
@@ -155,6 +206,29 @@ Each goal entry in goal.json follows this schema:
 
 To generate the `id`, compute: `sha256(content)` and take the first 8 hex characters.
 
+#### Optional Delegation Fields
+
+When the goal is being executed by a registered peer agent (see "Delegated
+Goals" below), add these optional fields. Their **presence** is the signal
+that this goal is awaiting another agent rather than being executed locally.
+
+```json
+{
+  "delegated_to": {"name": "research-bot", "type": "external"},
+  "delegated_at": "2026-02-18T10:00:01+00:00",
+  "delegated_message_id": "<uuid of the message appended to delegate's inbox>"
+}
+```
+
+- `delegated_to.type` ∈ {`internal`, `external`} — see `prompts/enum.md` →
+  Goal Delegate Type. Must match the `type` field of the matching entry in
+  `/agent/memory/agents.json`.
+- `delegated_at` is the ISO 8601 UTC timestamp of when the message was placed
+  on the delegate's inbox.
+- `delegated_message_id` is the `id` of the JSON object you appended to the
+  delegate's `inbox.json`; it lets the polling step (see "Continue
+  In-Progress Goals") match a forwarded reply back to this goal.
+
 ### Duplicate Detection
 
 Before adding a new goal to goal.json, check existing goals for duplicates.
@@ -177,6 +251,38 @@ update the `status` and `updated_at` fields, then write the file back.
 ## Continue In-Progress Goals
 
 After processing `<new_goals_to_start>` and `<your_inbox_messages>` (or if both are empty), work through `<previous_unfinished_goals>`:
+
+#### Step 0: Poll Delegated Goals (run before picking a goal)
+
+For each `in_progress` goal in `goal.json` that has a `delegated_to` field:
+
+1. Look up the delegate by `delegated_to.name` in `/agent/memory/agents.json`.
+   - If the agent's `status != "online"` and `last_ping_at` is older than its
+     `timeout_seconds` (or older than `delegated_at + timeout_seconds`),
+     **auto-mark the goal `failed`**: update `status` and `updated_at`, write
+     a journal entry citing the offline/timeout reason, and append a
+     `type: "error"` (or `type: "needs_human"` if user action could revive
+     the delegate) note to `outbox.json`.
+2. Otherwise, scan `<your_inbox_messages>` and recent `inbox_history.json`
+   for items where `source` is `external_agent`/`internal_agent` AND
+   `reply_to_id == <goal.delegated_message_id>`. The sweeper (external) and
+   the `send_reply` MCP tool (internal) both stamp `reply_to_id` on the
+   forwarded main-inbox envelope — that is the canonical correlation key.
+   As a fallback when `reply_to_id` is absent (e.g. a peer agent that never
+   replies via `message_id=`), match on the delegate's `from`/`reply_to`
+   path plus a content reference.
+3. Map the forwarded `type` to a status update:
+   - `agent_response` → `status = "completed"`; write outbox `type: "response"`
+     summarizing the delivered outcome.
+   - `agent_error` → `status = "failed"`; write outbox `type: "error"` with
+     the delegate's reason.
+   - `agent_needs_human` → leave `in_progress`; the sweeper has already
+     mirrored a `needs_human` to the main outbox — just journal the wait.
+   - `agent_info` → leave `in_progress`; journal the progress note.
+4. On any status change, set `updated_at = now()` and write a journal entry
+   citing the delegate.
+
+Then continue with the normal in-progress flow:
 
 1. Pick the oldest goal with status "in_progress" (or "pending" if none in-progress) from `<previous_unfinished_goals>`
 2. Read `state.json` -> `last_cycle_summary` — this tells you what was done last cycle

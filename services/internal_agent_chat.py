@@ -49,7 +49,7 @@ import sys
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import json
@@ -94,9 +94,14 @@ CLAUDE_SYSTEM_PROMPT_MD = Path("/home/agent/claude-system-prompt.md")
 # --- Config ---
 SWEEP_SECONDS = 10
 TURN_TIMEOUT_SECONDS = 600  # safety cap on a single turn
-CHAT_HISTORY_MAX = 1000
 INBOX_HISTORY_MAX = 500
 SDK_CONNECT_TIMEOUT = 30
+# System-prompt history selection: include every chat record from the last
+# CHAT_HISTORY_RECENT_HOURS regardless of count; if none qualify, fall back
+# to the most recent CHAT_HISTORY_SOFT_LIMIT records, extending the window
+# by one entry at either end so a user/assistant pair is never split.
+CHAT_HISTORY_RECENT_HOURS = 24
+CHAT_HISTORY_SOFT_LIMIT = 20
 
 log = logging.getLogger(__name__)
 
@@ -130,6 +135,19 @@ def _session_path(name: str) -> Path:
     return SESSIONS_DIR / (name + ".session")
 
 
+# Operator-driven clears are encoded as boolean flags inside the agent's
+# entry in agents.json under the `control` key, e.g.:
+#     {"name": "planner", "type": "internal", ...,
+#      "control": {"clear_chat": true, "clear_session": true}}
+# The daemon consumes a flag by performing the requested op and then
+# removing that key (and the empty `control` dict) under the
+# agents.json file lock. This avoids a parallel sentinel-file channel
+# and reuses the registry the daemon already polls every sweep tick.
+CONTROL_FIELD = "control"
+CONTROL_CLEAR_CHAT = "clear_chat"
+CONTROL_CLEAR_SESSION = "clear_session"
+
+
 def _ensure_agent_files(name: str) -> None:
     d = _agent_dir(name)
     d.mkdir(parents=True, exist_ok=True)
@@ -157,6 +175,69 @@ def _internal_agents(agents: list) -> dict:
             continue
         out[name] = a
     return out
+
+
+def _parse_chat_ts(msg: dict) -> datetime | None:
+    raw = msg.get("ts")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _select_history_for_prompt(chat_history: list) -> list:
+    """Pick which chat records to inline into the system prompt.
+
+    Rule: include every record from the last CHAT_HISTORY_RECENT_HOURS,
+    regardless of count. If none qualify, fall back to the trailing
+    CHAT_HISTORY_SOFT_LIMIT records. Then extend the window by one entry
+    at either end so a user/assistant turn pair (same `source_ids`) is
+    never split — keeps assistant replies attached to their prompts even
+    if doing so exceeds the soft limit.
+    """
+    n = len(chat_history)
+    if n == 0:
+        return []
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=CHAT_HISTORY_RECENT_HOURS)
+    recent_idx = []
+    for i, m in enumerate(chat_history):
+        if not isinstance(m, dict):
+            continue
+        ts = _parse_chat_ts(m)
+        if ts is not None and ts >= cutoff:
+            recent_idx.append(i)
+    if recent_idx:
+        start, end = recent_idx[0], recent_idx[-1]
+    else:
+        start = max(0, n - CHAT_HISTORY_SOFT_LIMIT)
+        end = n - 1
+
+    first = chat_history[start] if isinstance(chat_history[start], dict) else {}
+    if (
+        first.get("role") == "assistant"
+        and start > 0
+        and isinstance(chat_history[start - 1], dict)
+        and chat_history[start - 1].get("role") == "user"
+        and chat_history[start - 1].get("source_ids") == first.get("source_ids")
+    ):
+        start -= 1
+
+    last = chat_history[end] if isinstance(chat_history[end], dict) else {}
+    if (
+        last.get("role") == "user"
+        and end + 1 < n
+        and isinstance(chat_history[end + 1], dict)
+        and chat_history[end + 1].get("role") == "assistant"
+        and chat_history[end + 1].get("source_ids") == last.get("source_ids")
+    ):
+        end += 1
+
+    return [m for m in chat_history[start : end + 1] if isinstance(m, dict)]
 
 
 def _build_system_prompt(
@@ -211,27 +292,18 @@ def _build_system_prompt(
         except (json.JSONDecodeError, OSError):
             pass
     if chat_history:
-        parts.append("<previous_chat_history>")
-        parts.append(
-            "Below is the conversation history from the previous session. "
-            "Use it for context."
-        )
-        max_chars = 8000
-        recent = chat_history[-20:]
-        total = 0
-        trimmed: list[dict] = []
-        for msg in reversed(recent):
-            entry_len = len(msg.get("content", "")) + len(msg.get("role", "")) + 10
-            if total + entry_len > max_chars:
-                break
-            trimmed.append(msg)
-            total += entry_len
-        trimmed.reverse()
-        for msg in trimmed:
-            role = msg.get("role", "unknown")
-            content = msg.get("content", "")
-            parts.append("**" + str(role) + "**: " + str(content))
-        parts.append("</previous_chat_history>")
+        selected = _select_history_for_prompt(chat_history)
+        if selected:
+            parts.append("<previous_chat_history>")
+            parts.append(
+                "Below is the conversation history from the previous session. "
+                "Use it for context."
+            )
+            for msg in selected:
+                role = msg.get("role", "unknown")
+                content = msg.get("content", "")
+                parts.append("**" + str(role) + "**: " + str(content))
+            parts.append("</previous_chat_history>")
     if CLAUDE_SYSTEM_PROMPT_MD.exists():
         parts.append("<claude_system_prompt>")
         parts.append(CLAUDE_SYSTEM_PROMPT_MD.read_text())
@@ -492,6 +564,11 @@ def _build_send_reply_handler(session_name: str, cfg: dict):
             "source": _REPLY_SOURCE,
             "reply_to": "messages/internal/" + session_name + "/inbox.json",
         }
+        # When the reply is addressed to a specific inbound message, stamp
+        # `reply_to_id` so the recipient (e.g. the main agent's polling step)
+        # can correlate this reply back to the originating delegated message.
+        if message_id:
+            envelope["reply_to_id"] = message_id
         if priority is not None:
             envelope["priority"] = priority
 
@@ -676,7 +753,7 @@ class InternalAgentSession:
                 pass
             self._loop.close()
 
-    async def _connect(self) -> None:
+    def _build_options(self) -> ClaudeAgentOptions:
         # Internal-agent SDK options are intentionally identical to
         # app/chat.py — keep these two call sites in lock-step. The only
         # per-agent customizations are:
@@ -687,7 +764,7 @@ class InternalAgentSession:
         if not isinstance(custom, str):
             custom = ""
         routing_server = _build_send_reply_server(self.name, self.cfg)
-        options = ClaudeAgentOptions(
+        return ClaudeAgentOptions(
             system_prompt=_build_system_prompt(self._chat_history, custom),
             permission_mode="bypassPermissions",
             include_partial_messages=False,
@@ -715,9 +792,15 @@ class InternalAgentSession:
             disallowed_tools=["AskUserQuestion"],
             resume=self._session_id,
         )
+
+    async def _connect_sdk(self) -> None:
+        options = self._build_options()
         self._sdk = ClaudeSDKClient(options)
         await self._sdk.connect()
         log.info("[%s] connected (resume=%s)", self.name, self._session_id or "<new>")
+
+    async def _connect(self) -> None:
+        await self._connect_sdk()
         self._ready.set()
 
     # ── worker loop ────────────────────────────────────────────
@@ -730,6 +813,27 @@ class InternalAgentSession:
             if self._stop_event.is_set():
                 break
             self._pending_drain.clear()
+            try:
+                await self._consume_control_flags()
+            except Exception as exc:
+                log.error(
+                    "[%s] control-flag consume failed: %s",
+                    self.name,
+                    exc,
+                    exc_info=True,
+                )
+                surface_error(
+                    "internal_agent_chat",
+                    exc,
+                    context="control:" + self.name,
+                )
+            if self._sdk is None:
+                # A previous clear_session reconnect failed and left us
+                # without an SDK. Skip the drain — the next sweep will
+                # re-trigger _consume_control_flags and retry the
+                # reconnect (the clear_session flag is still set in
+                # agents.json).
+                continue
             try:
                 await self._drain_and_process_all()
             except Exception as exc:
@@ -788,6 +892,7 @@ class InternalAgentSession:
             return {}
 
         valid: list[dict] = []
+        seen_ids: set[str] = set()
         for raw in popped:
             if not isinstance(raw, dict):
                 surface_error(
@@ -804,7 +909,29 @@ class InternalAgentSession:
                 )
                 continue
             stamped = dict(raw)
-            stamped["id"] = str(uuid.uuid4())
+            # Preserve the sender-supplied id when present (e.g. a delegating
+            # main agent's `delegated_message_id`); only mint a fresh uuid4
+            # when no id was provided. This keeps end-to-end reply
+            # correlation possible — a downstream `send_reply(message_id=…)`
+            # stamps `reply_to_id` with this exact id on the reply envelope.
+            # Defensive: if the same id appears twice in the same pop batch
+            # (sender bug or replay), fall back to uuid4 for the duplicate to
+            # preserve per-batch id uniqueness.
+            existing_id = raw.get("id")
+            candidate = (
+                existing_id.strip()
+                if isinstance(existing_id, str) and existing_id.strip()
+                else None
+            )
+            if candidate and candidate in seen_ids:
+                surface_error(
+                    "internal_agent_chat",
+                    "duplicate inbox id in pop batch — minting fresh uuid",
+                    context=f"{self.name}: duplicate id={candidate}",
+                )
+                candidate = None
+            stamped["id"] = candidate or str(uuid.uuid4())
+            seen_ids.add(stamped["id"])
             stamped["processed_at"] = _now_iso()
             valid.append(stamped)
 
@@ -987,13 +1114,13 @@ class InternalAgentSession:
                 items = []
             items.append(user_rec)
             items.append(asst_rec)
-            return items[-CHAT_HISTORY_MAX:]
+            return items
 
         locked_json_rw(_rw, json_file=_chat_history_path(self.name), default=[])
-        # keep in-memory tail roughly in sync (used by reconnect/system prompt)
+        # keep in-memory copy in sync (used by reconnect/system prompt);
+        # never truncated — the system-prompt builder picks its own window.
         self._chat_history.append(user_rec)
         self._chat_history.append(asst_rec)
-        self._chat_history = self._chat_history[-CHAT_HISTORY_MAX:]
 
     def _load_session_id(self) -> str | None:
         p = _session_path(self.name)
@@ -1011,6 +1138,113 @@ class InternalAgentSession:
             _session_path(self.name).write_text(sid)
         except OSError as exc:
             log.warning("[%s] could not persist session id: %s", self.name, exc)
+
+    # ── operator-driven clears ────────────────────────────────
+    #
+    # Operators set a flag inside the agent's `control` dict in
+    # agents.json (see CONTROL_FIELD docstring above). `Fleet.reconcile`
+    # surfaces the latest agents.json into `self.cfg` every sweep, so we
+    # just read from cfg here. After applying each op we strip that
+    # specific key from agents.json (and from `self.cfg`) under the
+    # registry's file lock. A failed op leaves the flag in place so the
+    # next sweep retries — that is critical for clear_session, where a
+    # failed reconnect would otherwise leave us with no SDK and no
+    # recovery signal.
+    def _clear_control_keys(self, keys: list[str]) -> None:
+        if not keys:
+            return
+
+        def _rw(items):
+            if not isinstance(items, list):
+                return items
+            for a in items:
+                if not isinstance(a, dict) or a.get("name") != self.name:
+                    continue
+                ctl = a.get(CONTROL_FIELD)
+                if not isinstance(ctl, dict):
+                    continue
+                for k in keys:
+                    ctl.pop(k, None)
+                if not ctl:
+                    a.pop(CONTROL_FIELD, None)
+            return items
+
+        locked_json_rw(_rw, json_file=AGENTS_FILE, default=[])
+        ctl = self.cfg.get(CONTROL_FIELD)
+        if isinstance(ctl, dict):
+            for k in keys:
+                ctl.pop(k, None)
+            if not ctl:
+                self.cfg.pop(CONTROL_FIELD, None)
+
+    async def _consume_control_flags(self) -> None:
+        ctl = self.cfg.get(CONTROL_FIELD)
+        if not isinstance(ctl, dict) or not ctl:
+            return
+        processed: list[str] = []
+
+        if ctl.get(CONTROL_CLEAR_CHAT):
+            try:
+
+                def _rw(_items):
+                    return []
+
+                locked_json_rw(_rw, json_file=_chat_history_path(self.name), default=[])
+                self._chat_history = []
+                log.info("[%s] cleared chat history (operator request)", self.name)
+                processed.append(CONTROL_CLEAR_CHAT)
+            except Exception as exc:
+                log.error("[%s] clear_chat failed: %s", self.name, exc, exc_info=True)
+                surface_error(
+                    "internal_agent_chat",
+                    exc,
+                    context="clear_chat:" + self.name,
+                )
+
+        if ctl.get(CONTROL_CLEAR_SESSION):
+            try:
+                try:
+                    _session_path(self.name).unlink()
+                except FileNotFoundError:
+                    pass
+                self._session_id = None
+                if self._sdk is not None:
+                    try:
+                        await self._sdk.disconnect()
+                    except Exception as exc:
+                        log.warning(
+                            "[%s] disconnect during clear_session failed: %s",
+                            self.name,
+                            exc,
+                        )
+                    self._sdk = None
+                await self._connect_sdk()
+                log.info(
+                    "[%s] cleared SDK session and reconnected (operator request)",
+                    self.name,
+                )
+                processed.append(CONTROL_CLEAR_SESSION)
+            except Exception as exc:
+                log.error(
+                    "[%s] clear_session failed: %s", self.name, exc, exc_info=True
+                )
+                surface_error(
+                    "internal_agent_chat",
+                    exc,
+                    context="clear_session:" + self.name,
+                )
+                # Flag stays set in agents.json so the next sweep retries.
+
+        if processed:
+            try:
+                self._clear_control_keys(processed)
+            except Exception as exc:
+                log.error(
+                    "[%s] failed to strip processed control keys %s: %s",
+                    self.name,
+                    processed,
+                    exc,
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -1057,8 +1291,14 @@ class Fleet:
 
     def sweep_inboxes(self) -> None:
         for name, sess in self._sessions.items():
-            inbox = _inbox_path(name)
             try:
+                ctl = sess.cfg.get(CONTROL_FIELD)
+                if isinstance(ctl, dict) and (
+                    ctl.get(CONTROL_CLEAR_CHAT) or ctl.get(CONTROL_CLEAR_SESSION)
+                ):
+                    sess.notify_inbox()
+                    continue
+                inbox = _inbox_path(name)
                 if not inbox.exists():
                     continue
                 items = read_json_file(inbox, default=[])

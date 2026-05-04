@@ -159,7 +159,11 @@ POST /write-outbox
     {"type": "response"|"needs_human"|"error"|"info",
      "subject":   non-empty,
      "content":   non-empty,
-     "timestamp": ISO8601 UTC (optional)}
+     "timestamp": ISO8601 UTC (optional),
+     "reply_to_id": str (optional) — id of the original inbox message this
+                    reply addresses; the sweeper copies it onto the
+                    forwarded main-inbox entry as `reply_to_id` so the
+                    main agent can correlate the reply to a delegated goal}
   -> 200 {"status":"ok",
           "appended" (int)}
 
@@ -484,7 +488,11 @@ def _append_outbox(name: str, payload) -> int:
       {"type": <response|needs_human|error|info>,
        "subject": <str>,
        "content": <str>,
-       "timestamp": <ISO8601 UTC, optional — server fills in if absent>}
+       "timestamp": <ISO8601 UTC, optional — server fills in if absent>,
+       "reply_to_id": <str, optional — id of the original inbox message this
+                       reply addresses; preserved through the sweeper onto the
+                       forwarded main-inbox entry so the main agent can
+                       correlate the reply to a delegated goal>}
     """
     if isinstance(payload, dict):
         payload = [payload]
@@ -512,6 +520,14 @@ def _append_outbox(name: str, payload) -> int:
         if not isinstance(ts, str):
             raise ValueError(f"entry [{idx}] 'timestamp' must be an ISO8601 string")
 
+        reply_to_id = item.get("reply_to_id")
+        if reply_to_id is not None:
+            if not isinstance(reply_to_id, str) or not reply_to_id.strip():
+                raise ValueError(
+                    f"entry [{idx}] 'reply_to_id' must be a non-empty string when provided"
+                )
+            reply_to_id = reply_to_id.strip()
+
         entry = {
             "id": item.get("id") or str(uuid.uuid4()),
             "type": t,
@@ -519,6 +535,8 @@ def _append_outbox(name: str, payload) -> int:
             "content": content,
             "timestamp": ts,
         }
+        if reply_to_id:
+            entry["reply_to_id"] = reply_to_id
         stamped.append(entry)
 
     target = _agent_outbox(name)
@@ -683,22 +701,23 @@ def _sweep_once() -> None:
                 content_parts.append("")
                 content_parts.append(body)
             ext_type = entry.get("type") or "info"
-            inbox_items.append(
-                {
-                    # Prefix the external agent's type with "agent_" so the main
-                    # agent's inbox triage can distinguish forwarded entries
-                    # from the base inbox types (goal/message/event) at a glance.
-                    "type": f"agent_{ext_type}",
-                    "content": "\n".join(content_parts),
-                    "received_at": forwarded_at,
-                    "source": "external_agent",
-                    "from": f"messages/external/{name}/outbox.json",
-                    "reply_to": f"messages/external/{name}/inbox.json",
-                    "priority": _FORWARD_PRIORITY.get(
-                        ext_type, _FORWARD_PRIORITY_DEFAULT
-                    ),
-                }
-            )
+            forwarded = {
+                # Prefix the external agent's type with "agent_" so the main
+                # agent's inbox triage can distinguish forwarded entries
+                # from the base inbox types (goal/message/event) at a glance.
+                "type": f"agent_{ext_type}",
+                "content": "\n".join(content_parts),
+                "received_at": forwarded_at,
+                "source": "external_agent",
+                "from": f"messages/external/{name}/outbox.json",
+                "reply_to": f"messages/external/{name}/inbox.json",
+                "priority": _FORWARD_PRIORITY.get(ext_type, _FORWARD_PRIORITY_DEFAULT),
+            }
+            # Preserve the original delegated-inbox message id so the main
+            # agent can correlate this reply to a goal's `delegated_message_id`.
+            if isinstance(entry.get("reply_to_id"), str) and entry["reply_to_id"]:
+                forwarded["reply_to_id"] = entry["reply_to_id"]
+            inbox_items.append(forwarded)
         if not write_to_inbox(inbox_items, dedup=False):
             log.warning(
                 f"write_to_inbox failed for agent={name}; leaving outbox intact for retry"

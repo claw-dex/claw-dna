@@ -26,8 +26,46 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 **Notes:**
 
 - Legacy form `in-progress` (with hyphen) is normalized to `in_progress` (with underscore)
-- Only one goal should be `in_progress` at a time
+- Only one goal should be `in_progress` at a time (excluding goals that are
+  delegated to a peer agent — those are also `in_progress` from the main
+  agent's perspective but represent a *wait*, not local execution; multiple
+  may be outstanding simultaneously)
 - See `prompts/goal.md` for goal lifecycle details
+
+### Goal Delegate Type
+
+**Location:** `/agent/memory/goal.json`
+
+**Field:** `delegated_to.type`
+
+**Description:** Identifies the kind of peer agent that a goal has been
+delegated to. Present only on goals the main agent has handed off; absent on
+locally-executed goals.
+
+| Value      | Meaning                                          | Registered via |
+|------------|--------------------------------------------------|----------------|
+| `internal` | Internal chat-daemon agent (file-based MCP)      | `scripts/register_internal_agent.py` |
+| `external` | External HTTP-API agent (long-running service)   | `scripts/register_external_agent.py` |
+
+**Companion fields on the goal entry** (all optional, set together):
+
+- `delegated_to.name` — the delegate's `name` from `/agent/memory/agents.json`
+- `delegated_at` — ISO 8601 UTC timestamp when the message was placed on the
+  delegate's inbox
+- `delegated_message_id` — UUID of the JSON object appended to the delegate's
+  `inbox.json`; used to correlate forwarded replies (`agent_response`,
+  `agent_error`, `agent_needs_human`, `agent_info`) back to this goal during
+  the polling step.
+
+**Notes:**
+
+- The value MUST match the `type` field of the corresponding entry in
+  `/agent/memory/agents.json`.
+- Presence of `delegated_to` flips the goal into "polled, not executed" mode —
+  see `prompts/goal.md` → Continue In-Progress Goals → Step 0.
+- If the delegate goes offline past its `timeout_seconds`, the main agent
+  auto-marks the goal `failed` and writes an `error`/`needs_human` to the
+  main outbox.
 
 ---
 
@@ -45,11 +83,13 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 |-------|---------|-----------|
 | `completed` | Cycle finished successfully | Normal cycle completion |
 | `failed` | Cycle encountered an error or failed to achieve objective | Cycle failed; details in `summary` field |
-| `in_progress` | Cycle currently running | Used in journal entries during execution |
+| `in_progress` | Cycle currently running | Stub written by `cycle_start.py`; promoted to `completed`/`failed` by `cycle_close.py` |
+| `interrupted` | Cycle started but never closed | Set by `cycle_start.py::check_orphaned_cycles` (line 238) when an in-progress cycle is older than the max age; an `interrupted_at` ISO timestamp is also recorded |
 
 **Notes:**
 
-- Set by `scripts/cycle_close.py` at end of each cycle
+- Promoted to `completed`/`failed` by `scripts/cycle_close.py` at end of each cycle
+- `interrupted` is the crash-recovery state — written when a previous cycle never reached `cycle_close.py`
 - Failures should be documented in journal with root cause
 
 ---
@@ -183,6 +223,13 @@ This document defines all enum-type fields used throughout the MewClaw system. T
 Inbox items with `source: "external_agent"` are forwarded by `external_agent_api.py` from a registered external agent's outbox. They carry these extra fields:
 
 - `type`: prefixed with `agent_` — one of `agent_response`, `agent_needs_human`, `agent_error`, `agent_info`. The prefix lets you distinguish forwarded entries from native inbox types (`goal`, `message`, `event`) at a glance; strip the prefix to see the external agent's intent.
+- `reply_to_id` (optional): the `id` of the original delegate-inbox message
+  this reply addresses. Set when the external agent supplied `reply_to_id`
+  on `POST /write-outbox`. The main agent's goal-polling step matches this
+  field against `goal.delegated_message_id` to correlate replies back to the
+  originating delegated goal. Internal-agent forwards stamp the same
+  `reply_to_id` field when the peer replies via
+  `mcp__internal_agent_routing__send_reply(message_id=…)`.
 
 ---
 
@@ -398,6 +445,7 @@ Inbox items with `source: "external_agent"` are forwarded by `external_agent_api
 | Field | Context | Values | File(s) |
 |-------|---------|--------|---------|
 | `status` | Goal | `pending`, `in_progress`, `completed`, `failed` | `goal.json` |
+| `delegated_to.type` | Goal | `internal`, `external` | `goal.json` (optional) |
 | `cycle_status` | Cycle | `completed`, `failed`, `in_progress`, `interrupted` | `cycles.json`, `journal.json` |
 | `agent_status` | Agent | `idle`, `running`, `healing`, `bootstrapping`, `awaiting_first_heartbeat`, `waiting_for_human` | `state.json` |
 | `status` | Bash Log | `running`, `exited`, `completed`, `failed` | `logs/bash-*.json` |
@@ -410,7 +458,6 @@ Inbox items with `source: "external_agent"` are forwarded by `external_agent_api
 | `category` | Capability | `core`, `memory`, `security`, `communication`, `observability`, `automation`, `portal` | `capabilities.json` |
 | `enabled` | Capability | `true`, `false` | `capabilities.json` |
 | `priority` | Suggestion | `high`, `medium`, `low` | Portal suggestions |
-| `source` | Search | `journal`, `goal`, `cycle`, `history` | Portal search |
 | `grading_result` | Skill-Creator | `baseline`, `won`, `lost`, `tie` | `skills/skill-creator/` |
 
 ---

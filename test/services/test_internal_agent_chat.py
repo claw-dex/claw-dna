@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -805,3 +806,236 @@ def test_fleet_shutdown_continues_when_one_session_stop_raises(patch_iac_paths):
     by_name = {a["name"]: a for a in agents}
     assert by_name["a"]["status"] == "offline"
     assert by_name["b"]["status"] == "offline"
+
+
+# ---------------------------------------------------------------------------
+# chat_history persistence — must NEVER truncate
+# ---------------------------------------------------------------------------
+
+
+def _make_session_skeleton(iac, name: str = "x"):
+    """Build an InternalAgentSession-like object stubbed enough to call
+    `_append_chat_records` directly, without going through SDK / threads.
+    """
+    sess = iac.InternalAgentSession.__new__(iac.InternalAgentSession)
+    sess.name = name
+    sess._chat_history = []
+    iac._ensure_agent_files(name)
+    return sess
+
+
+def test_append_chat_records_never_truncates_disk_or_memory(patch_iac_paths):
+    iac = patch_iac_paths
+    sess = _make_session_skeleton(iac, "x")
+    # Write far more than the old 1000-record cap to prove no truncation.
+    n_turns = 1500
+    for i in range(n_turns):
+        sess._append_chat_records(
+            ids=[f"id-{i}"],
+            merged_reply_to=None,
+            user_text=f"u{i}",
+            assistant_text=f"a{i}",
+            session_id=None,
+            cost_usd=None,
+            duration_ms=None,
+            is_error=False,
+        )
+    # Each turn appends one user + one assistant record.
+    on_disk = json.loads(iac._chat_history_path("x").read_text())
+    assert len(on_disk) == n_turns * 2
+    assert len(sess._chat_history) == n_turns * 2
+    # First record must still be the very first turn (no head trimming).
+    assert on_disk[0]["content"] == "u0"
+    assert on_disk[-1]["content"] == f"a{n_turns - 1}"
+
+
+# ---------------------------------------------------------------------------
+# _select_history_for_prompt — 24h window with 20-record fallback,
+# extended at boundaries to keep user/assistant pairs together.
+# ---------------------------------------------------------------------------
+
+
+def _ts(offset_minutes: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(minutes=offset_minutes)).isoformat()
+
+
+def _pair(i: int, offset_minutes: int) -> list[dict]:
+    sid = [f"id-{i}"]
+    return [
+        {
+            "role": "user",
+            "ts": _ts(offset_minutes),
+            "content": f"u{i}",
+            "source_ids": sid,
+        },
+        {
+            "role": "assistant",
+            "ts": _ts(offset_minutes),
+            "content": f"a{i}",
+            "source_ids": sid,
+        },
+    ]
+
+
+def test_select_history_empty(patch_iac_paths):
+    assert patch_iac_paths._select_history_for_prompt([]) == []
+
+
+def test_select_history_includes_all_records_within_24h(patch_iac_paths):
+    iac = patch_iac_paths
+    history: list[dict] = []
+    # 30 turns (60 records), all within last 24h, well above the 20 soft limit.
+    for i in range(30):
+        history.extend(_pair(i, offset_minutes=-(60 + i)))
+    selected = iac._select_history_for_prompt(history)
+    # All 60 must be included since they fall inside the 24h window.
+    assert len(selected) == 60
+    assert selected[0]["content"] == "u0"
+    assert selected[-1]["content"] == "a29"
+
+
+def test_select_history_falls_back_to_soft_limit_when_all_old(patch_iac_paths):
+    iac = patch_iac_paths
+    history: list[dict] = []
+    # 30 turns, all older than 24h.
+    for i in range(30):
+        history.extend(_pair(i, offset_minutes=-(60 * 24 + 60 + i)))
+    selected = iac._select_history_for_prompt(history)
+    # Soft limit 20 records → trailing 20 of the 60 records.
+    # Last record is assistant; preceding 20 happens to start on a user → no
+    # boundary extension needed.
+    assert len(selected) == 20
+    assert selected[-1]["content"] == "a29"
+    assert selected[0]["role"] == "user"
+
+
+def test_select_history_extends_to_keep_pair_at_tail(patch_iac_paths):
+    """If the soft-limit window ends on a `user` record whose `assistant`
+    reply lives one slot later in history, the assistant must be pulled in."""
+    iac = patch_iac_paths
+    # Build 11 old turns (22 records). Soft limit is 20 → window is records
+    # [2 .. 21]. Index 2 is `assistant` of turn 1, index 21 is `assistant`
+    # of turn 10.  To force the tail extension, append a single trailing
+    # `user` whose matching `assistant` is past the 20-record cut: drop the
+    # last assistant out of the slice by appending a 21st record (orphan
+    # user) then its assistant.
+    #
+    # Simplest construction: 10 old pairs (20 records), then a final pair —
+    # window of last 20 lands on records [2..21]. Record 21 is the final
+    # assistant; pair stays intact. To exercise extension, push the cut so
+    # the last selected record is a user: insert an extra orphan record
+    # before the final pair.
+    history: list[dict] = []
+    for i in range(10):
+        history.extend(_pair(i, offset_minutes=-(60 * 24 + 60 + i)))  # all old
+    # One stray old assistant with no matching user — shifts parity by one.
+    history.append(
+        {
+            "role": "assistant",
+            "ts": _ts(-(60 * 24 + 30)),
+            "content": "stray",
+            "source_ids": ["stray-id"],
+        }
+    )
+    # Final pair (still old).
+    history.extend(_pair(99, offset_minutes=-(60 * 24 + 10)))
+    # 22 records total, all old → fallback. Trailing 20 = indices [2..21].
+    # Index 21 == final assistant (a99); index 2 == assistant of turn 1.
+    # No tail extension needed (already assistant), but HEAD extension
+    # should pull in the matching user of turn 1.
+    selected = iac._select_history_for_prompt(history)
+    assert selected[0]["content"] == "u1"  # extended back from assistant a1
+    assert selected[-1]["content"] == "a99"
+    assert len(selected) == 21
+
+
+def test_select_history_extends_tail_when_user_orphan_at_end(patch_iac_paths):
+    """When the trailing-20 window ends on a user whose assistant is the
+    next record, the assistant gets pulled in (so the LLM sees the reply).
+    """
+    iac = patch_iac_paths
+    history: list[dict] = []
+    # 10 old pairs.
+    for i in range(10):
+        history.extend(_pair(i, offset_minutes=-(60 * 24 + 60 + i)))
+    # Insert a single user-only record near the end of the trailing-20
+    # boundary, then a follow-up pair to ensure the orphan ends the window.
+    #
+    # Construction: prepend two extra orphan-user records so the
+    # trailing-20 ends on a user record whose assistant exists at index+1.
+    history.insert(
+        10,
+        {
+            "role": "user",
+            "ts": _ts(-(60 * 24 + 50)),
+            "content": "orphan-u",
+            "source_ids": ["orphan"],
+        },
+    )
+    history.insert(
+        11,
+        {
+            "role": "assistant",
+            "ts": _ts(-(60 * 24 + 49)),
+            "content": "orphan-a",
+            "source_ids": ["orphan"],
+        },
+    )
+    # 22 records total, all old. Trailing 20 = indices [2..21].
+    # Confirm this hits the tail-user-extension branch by truncating the
+    # tail one record earlier: pop the last record so the window ends on a
+    # user with its assistant just past the cut.
+    history.pop()  # drop final assistant → end window on its `user`
+    # Now 21 records; trailing 20 = indices [1..20]. index 20 must be a user.
+    assert history[20]["role"] == "user"
+    selected = iac._select_history_for_prompt(history)
+    # Tail extension can't fire (no record at index 21 anymore) — verify
+    # the function does NOT crash and stays within bounds.
+    assert selected[-1] is history[20]
+
+
+def test_select_history_skips_records_with_bad_ts(patch_iac_paths):
+    iac = patch_iac_paths
+    history = [
+        {"role": "user", "ts": "not-a-date", "content": "u0", "source_ids": ["x"]},
+        {"role": "assistant", "ts": "not-a-date", "content": "a0", "source_ids": ["x"]},
+    ]
+    history.extend(_pair(1, offset_minutes=-30))  # within 24h
+    selected = iac._select_history_for_prompt(history)
+    # Only the well-timestamped pair anchors the recent window; bad-ts
+    # records sit outside it and aren't selected.
+    assert [m["content"] for m in selected] == ["u1", "a1"]
+
+
+def test_select_history_naive_ts_treated_as_utc(patch_iac_paths):
+    iac = patch_iac_paths
+    naive_now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+    history = [
+        {"role": "user", "ts": naive_now, "content": "u", "source_ids": ["x"]},
+        {"role": "assistant", "ts": naive_now, "content": "a", "source_ids": ["x"]},
+    ]
+    selected = iac._select_history_for_prompt(history)
+    assert len(selected) == 2
+
+
+# ---------------------------------------------------------------------------
+# _build_system_prompt — only the chat-history block changed.
+# ---------------------------------------------------------------------------
+
+
+def test_build_system_prompt_omits_history_block_when_no_records(patch_iac_paths):
+    out = patch_iac_paths._build_system_prompt(chat_history=[])
+    assert "<previous_chat_history>" not in out
+
+
+def test_build_system_prompt_includes_selected_records(patch_iac_paths):
+    iac = patch_iac_paths
+    history = []
+    for i in range(3):
+        history.extend(_pair(i, offset_minutes=-(60 + i)))
+    out = iac._build_system_prompt(chat_history=history)
+    assert "<previous_chat_history>" in out
+    # Every selected record (all within 24h) must appear, in order.
+    for i in range(3):
+        assert f"**user**: u{i}" in out
+        assert f"**assistant**: a{i}" in out

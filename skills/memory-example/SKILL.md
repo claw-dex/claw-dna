@@ -20,26 +20,21 @@ file, start from the example below.
 ```json
 {
   "cycle_number": 0,
-  "status": "idle",
+  "agent_status": "idle",
   "current_goal": null,
   "last_cycle_summary": null,
-  "last_cycle_type": null,
-  "last_cycle_category": null,
-  "created_at": null,
   "last_heartbeat": null,
   "last_cycle_run": null,
-  "last_cycle_end": null,
   "services": {}
 }
 ```
 
-- `status`: `idle` (between cycles) | `running` (during a cycle)
-- `last_cycle_type`: `evolve` | `goal` | `self-heal` | `dream` | `null`
-- `last_cycle_category`: evolve category (when applicable) | `null`
+- `agent_status`: `idle` (between cycles) | `running` (during a cycle)
 - `last_heartbeat`: set by heartbeat.sh on every invocation (even during sleep mode)
 - `last_cycle_run`: set by heartbeat.sh only when a cycle actually executes (after sleep check passes)
-- `last_cycle_end`: set by cycle_close.py when a cycle completes
 - `services`: map of `{name: {port, pid, started}}`
+
+Defaults are mirrored in `app/shared.py::STATE_DEFAULTS`.
 
 ### cycles.json
 
@@ -51,21 +46,21 @@ Entry appended by cycle-close:
 
 ```json
 {
-  "cycle": 1,
-  "type": "evolve",
-  "category": "capability",
-  "status": "completed",
+  "cycle_number": 1,
+  "cycle_type": "evolve",
+  "cycle_category": "capability",
+  "cycle_status": "completed",
+  "cycle_goal": "Built feature X",
   "start": "2026-03-05T10:00:00+00:00",
   "end": "2026-03-05T10:15:30+00:00",
-  "duration_seconds": 930,
-  "summary": "Built feature X",
-  "actions": ["Created file X", "Updated module Y"]
+  "duration_seconds": 930
 }
 ```
 
-- `type`: `evolve` | `goal` | `self-heal` | `dream`
-- `category` (evolve and dream only): evolve → `reliability` | `observability` | `capability` | `efficiency` | `prompt_evolution`; dream → `memory_consolidation` | `deep_sleep`
-- `status`: `completed` | `failed` | `interrupted` | `in-progress`
+- `cycle_type`: `evolve` | `goal` | `self-heal` | `dream`
+- `cycle_category` (evolve and dream only): evolve → `reliability` | `observability` | `capability` | `efficiency` | `prompt_evolution`; dream → `memory_consolidation` | `deep_sleep`
+- `cycle_status`: `completed` | `failed` | `interrupted` | `in_progress`
+- `summary` and `actions` are **not** stored on cycle records — they live on `journal.json` entries.
 
 ### journal.json
 
@@ -77,185 +72,20 @@ Entry appended by cycle-close:
 
 ```json
 {
-  "cycle": 1,
+  "cycle_number": 1,
   "timestamp": "2026-03-05T10:15:30+00:00",
-  "type": "evolve",
-  "status": "completed",
-  "goal": "Brief description of what was worked on",
+  "cycle_type": "evolve",
+  "cycle_status": "completed",
+  "cycle_goal": "Brief description of what was worked on",
   "summary": "Longer summary of what was done and why it matters",
   "actions": ["Action 1", "Action 2"],
-  "category": "capability"
+  "cycle_category": "capability"
 }
 ```
 
-Comprehensive examples:
+- `cycle_goal` and `cycle_category` are appended only when present (see `cycle_close.py:1090-1093`).
+- Older entries on disk may still carry the pre-rename keys (`cycle`, `type`, `status`, `category`, `goal`); `memory_repair.py` migrates them on the next repair run.
 
-```json
-[
-  {
-    "cycle": 1,
-    "timestamp": "2026-03-19T04:07:52.382690+00:00",
-    "status": "completed",
-    "type": "evolve",
-    "goal": "Bootstrap: redesigned portal as Personal Assistant hub with Tasks management (priorities, due dates, categories, filtering) and Contacts CRM (relationship types, interaction logging, search). Reorganized tabs into Personal Assistant, Agent Console, and Files & Security groups.",
-    "actions": [
-      "Created app/tasks.py with full task management UI",
-      "Created app/contacts.py with CRM and interaction logging",
-      "Reorganized TAB_REGISTRY into Personal Assistant-focused layout",
-      "Rebranded portal as Personal Assistant Agent",
-      "Created tasks.json and contacts.json data stores"
-    ],
-    "summary": "Bootstrap: redesigned portal as Personal Assistant hub with Tasks management (priorities, due dates, categories, filtering) and Contacts CRM (relationship types, interaction logging, search). Reorganized tabs into Personal Assistant, Agent Console, and Files & Security groups.",
-    "category": "capability"
-  },
-  {
-    "cycle": 2,
-    "timestamp": "2026-03-19T04:14:00+00:00",
-    "status": "completed",
-    "type": "evolve",
-    "goal": "Improve observability: replace SVG bar charts with interactive Altair charts in Agent Overview dashboard",
-    "actions": [
-      "Replaced SVG goal duration sparkline with Altair bar chart + regression trend line",
-      "Replaced SVG cycle velocity chart with Altair colored bar chart (by cycle type)",
-      "Added rolling average line overlay to velocity chart (adaptive window 3 or 5)",
-      "Added interactive tooltips with cycle number, type, category, and duration",
-      "Lowered velocity chart threshold from 3 to 2 cycles, increased window from 20 to 30"
-    ],
-    "summary": "Replaced raw SVG bar charts in Agent Overview with interactive Altair charts \u2014 goal durations with trend line, cycle velocity colored by type with rolling average. Zero new dependencies.",
-    "category": "observability"
-  },
-  {
-    "cycle": 2,
-    "timestamp": "2026-03-19T04:14:07.318734+00:00",
-    "status": "completed",
-    "type": "evolve",
-    "goal": "Replaced raw SVG bar charts in Agent Overview with interactive Altair charts \u2014 goal durations with trend line, cycle velocity colored by type with rolling average. Zero new dependencies.",
-    "actions": [],
-    "summary": "Replaced raw SVG bar charts in Agent Overview with interactive Altair charts \u2014 goal durations with trend line, cycle velocity colored by type with rolling average. Zero new dependencies.",
-    "category": "observability"
-  },
-  {
-    "cycle": 3,
-    "timestamp": "2026-03-19T04:20:47.399188+00:00",
-    "status": "completed",
-    "type": "evolve",
-    "goal": "Updated stale prompts: goal.md routing table (+6 PA domain entries), server.md TAB_REGISTRY (4\u219210 tabs), research.md (+5 script refs), AGENTS.md (+4 missing scripts). Prompts now match actual portal state after rapid expansion in cycles 0-2.",
-    "actions": [
-      "Added email/calendar/contacts/tasks/credentials/scheduler routing to goal.md",
-      "Updated server.md TAB_REGISTRY from 4 to 10 tabs across 3 groups with correct modules",
-      "Added 5 missing script references to research.md local resources table",
-      "Updated AGENTS.md directory tree with 4 missing scripts and services_tab.py"
-    ],
-    "summary": "Updated stale prompts: goal.md routing table (+6 PA domain entries), server.md TAB_REGISTRY (4\u219210 tabs), research.md (+5 script refs), AGENTS.md (+4 missing scripts). Prompts now match actual portal state after rapid expansion in cycles 0-2.",
-    "category": "prompt_evolution"
-  },
-  {
-    "cycle": 4,
-    "timestamp": "2026-03-19T04:22:40.401795+00:00",
-    "status": "completed",
-    "type": "goal",
-    "goal": "Process user message: add post-goal learning instruction to AGENTS.md",
-    "actions": [
-      "Added 'Post-Goal Learning (Mandatory)' section to AGENTS.md",
-      "Section requires documenting: approach taken, key decisions, reusable patterns, pitfalls",
-      "Responded to user via outbox confirming the change"
-    ],
-    "summary": "Added mandatory post-goal learning section to AGENTS.md per user request. Agent will now document approach, decisions, patterns, and pitfalls after every completed goal to build institutional knowledge.",
-    "category": "message"
-  },
-  {
-    "cycle": 5,
-    "timestamp": "2026-03-19T04:22:56.875917+00:00",
-    "status": "completed",
-    "type": "goal",
-    "goal": "Added mandatory post-goal learning section to AGENTS.md per user request. Agent will now document approach, decisions, patterns, and pitfalls after every completed goal.",
-    "actions": [],
-    "summary": "Added mandatory post-goal learning section to AGENTS.md per user request. Agent will now document approach, decisions, patterns, and pitfalls after every completed goal."
-  },
-  {
-    "cycle": 6,
-    "timestamp": "2026-03-19T04:31:00+00:00",
-    "status": "completed",
-    "type": "evolve",
-    "goal": "Efficiency: optimize load_system_info and fix deprecation warnings across portal",
-    "actions": [
-      "Replaced os.walk workspace size calc with du -sb subprocess (10-100x faster)",
-      "Converted last TTL @_cache(ttl=60) to time-bucketed cache (10s windows) in load_system_info",
-      "Removed unused _cache import from system.py (dead code cleanup)",
-      "Fixed 3x deprecated use_container_width=True -> width='stretch' in overview.py and emails.py",
-      "Fixed pandas FutureWarning: added utc=True to pd.to_datetime in emails.py"
-    ],
-    "summary": "Optimized load_system_info() \u2014 replaced os.walk with du -sb for workspace size (10-100x faster), completed mtime conversion by eliminating the last TTL cache decorator, fixed 3 Streamlit deprecation warnings and 1 pandas FutureWarning.",
-    "category": "efficiency"
-  },
-  {
-    "cycle": 6,
-    "timestamp": "2026-03-19T04:32:27.895961+00:00",
-    "status": "completed",
-    "type": "evolve",
-    "goal": "Optimized load_system_info() \u2014 replaced os.walk with du -sb for workspace size (10-100x faster), completed mtime conversion by eliminating last TTL cache decorator, fixed 3 Streamlit deprecation warnings and 1 pandas FutureWarning.",
-    "actions": [],
-    "summary": "Optimized load_system_info() \u2014 replaced os.walk with du -sb for workspace size (10-100x faster), completed mtime conversion by eliminating last TTL cache decorator, fixed 3 Streamlit deprecation warnings and 1 pandas FutureWarning.",
-    "category": "efficiency"
-  },
-  {
-    "cycle": 8,
-    "timestamp": "2026-03-19T04:36:56.357864+00:00",
-    "status": "completed",
-    "type": "evolve",
-    "goal": "Reliability hardening: fixed unsafe bracket indexing in tasks.py, overview.py, and goal.py; added type validation to JSON loaders; safe .index() fallbacks; write error handling for tasks and contacts save operations.",
-    "actions": [],
-    "summary": "Reliability hardening: fixed unsafe bracket indexing in tasks.py, overview.py, and goal.py; added type validation to JSON loaders; safe .index() fallbacks; write error handling for tasks and contacts save operations.",
-    "category": "reliability"
-  },
-  {
-    "cycle": 9,
-    "timestamp": "2026-03-19T04:43:44.823632+00:00",
-    "status": "completed",
-    "type": "evolve",
-    "category": "observability",
-    "summary": "Added Cycle Timeline (Gantt chart) and Evolution Trend (cumulative stacked area chart) to Agent Overview. Timeline shows when each cycle ran with category-colored bars; trend chart shows cumulative category balance over time.",
-    "actions": [
-      "Added _render_cycle_timeline() \u2014 Gantt-style horizontal bar chart showing cycle start/end times, colored by category with tooltips",
-      "Added _render_evolution_trend() \u2014 cumulative stacked area chart tracking evolution category balance across cycles",
-      "Both charts use consistent _CATEGORY_COLORS, handle edge cases (< 2 cycles), and show last 30 cycles max",
-      "Trend chart includes percentage summary line below the chart"
-    ],
-    "outcome": "Two new interactive Altair visualizations in Agent Overview providing temporal insight into agent activity and evolution balance",
-    "learnings": {
-      "approach": "Added two focused Altair charts to existing overview.py using helper functions called from render()",
-      "key_decisions": "Used Gantt bars (mark_bar with x/x2 temporal encoding) for timeline instead of scatter; used stacked area for trend to show both individual and total",
-      "reusable_patterns": "Altair x/x2 temporal encoding for Gantt charts; cumulative counting with step-after interpolation for trend visualization",
-      "pitfalls": "None \u2014 straightforward addition building on existing Altair patterns from cycle 2"
-    }
-  },
-  {
-    "cycle": 9,
-    "timestamp": "2026-03-19T04:43:48.988218+00:00",
-    "status": "completed",
-    "type": "evolve",
-    "goal": "Added Cycle Timeline and Evolution Trend charts to Agent Overview",
-    "actions": [],
-    "summary": "Added Cycle Timeline and Evolution Trend charts to Agent Overview",
-    "category": "observability"
-  },
-  {
-    "cycle": 10,
-    "timestamp": "2026-03-19T04:57:06.196967+00:00",
-    "status": "completed",
-    "type": "evolve",
-    "goal": "Added daily-briefing.py script that aggregates tasks, goals, cycles, scheduled items, inbox, and system health into actionable briefings. Supports text, JSON, HTML, and outbox output modes. Added skill docs and goal routing entry.",
-    "actions": [
-      "Created scripts/daily-briefing.py with 4 output modes (text/json/html/outbox)",
-      "Created .claude/skills/daily-briefing/SKILL.md",
-      "Added daily briefing routing to prompts/goal.md",
-      "Registered Daily Briefing Generator capability"
-    ],
-    "summary": "Added daily-briefing.py script that aggregates tasks, goals, cycles, scheduled items, inbox, and system health into actionable briefings. Supports text, JSON, HTML, and outbox output modes. Added skill docs and goal routing entry.",
-    "category": "capability"
-  }
-]
-```
 
 ### goal.json
 

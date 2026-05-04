@@ -39,6 +39,20 @@ def load_goal_stats():
     failed = sum(1 for g in goals if g.get("status") == "failed")
     completion_rate = completed / total if total else 0.0
 
+    # Delegation stats: count goals that have a `delegated_to` field.
+    delegated = [g for g in goals if isinstance(g.get("delegated_to"), dict)]
+    delegated_total = len(delegated)
+    delegated_awaiting = sum(
+        1 for g in delegated if g.get("status") in ("pending", "in_progress")
+    )
+    delegated_completed = sum(1 for g in delegated if g.get("status") == "completed")
+    delegated_failed = sum(1 for g in delegated if g.get("status") == "failed")
+    delegated_by_agent: dict[str, int] = {}
+    for g in delegated:
+        name = g["delegated_to"].get("name")
+        if name:
+            delegated_by_agent[name] = delegated_by_agent.get(name, 0) + 1
+
     # Recent goals (newest first by created_at)
     sorted_goals = sorted(
         goals,
@@ -70,4 +84,9 @@ def load_goal_stats():
         "avg_goal_duration_seconds": avg_dur,
         "recent_goals": recent_goals,
         "goal_cycle_durations": goal_cycle_durations,
+        "delegated_total": delegated_total,
+        "delegated_awaiting": delegated_awaiting,
+        "delegated_completed": delegated_completed,
+        "delegated_failed": delegated_failed,
+        "delegated_by_agent": delegated_by_agent,
     }
