@@ -1,133 +1,108 @@
 ---
 name: register-internal-agent
-description: Register, onboard, list, and deactivate **internal agents** — long-lived in-process `claude_agent_sdk` sessions hosted by the `internal_agent_chat` daemon. Each internal agent has its own conversation history, its own `inbox.json`, and a per-session `send_reply` MCP tool for routing replies. Use when the user asks to "register an internal agent", "spin up a planner / summarizer / triage agent", "list registered internal agents", or to deactivate one. NOT for external agents (use `register-external-agent`), NOT for in-process subagents spawned via the Agent / Task tool, and NOT for entries in `memory/capabilities.json`.
+description: Register, update, list, or deactivate internal agents via `scripts/register_internal_agent.py`. Use to add a new internal agent, update an existing internal agent's model / system-prompt / responsibilities / outbox routing rules (re-registration upserts), list registered internal agents, or deactivate one. Triggers include "register internal agent", "add internal agent", "update agent <name>", "change model for <agent>", "deactivate <agent>", "list internal agents", "agents.json", "outbox routing rules", "system prompt for <agent>".
 ---
 
 # register-internal-agent
 
 **Path:** `scripts/register_internal_agent.py`
 
-CLI for managing the internal-agent registry at `/agent/memory/agents.json` and the per-agent message directories at `/agent/messages/internal/<name>/`. Backs the [`internal_agent_chat`](../../services/internal_agent_chat.py) daemon (registered in `memory/services.json` with `auto_start: true`, no port — heartbeat-only liveness).
+Adds (or updates) an entry in `memory/agents.json` and creates the per-agent files under `messages/internal/<name>/` and `memory/chat/<name>/`. The `internal_agent_chat` daemon hot-reloads `agents.json` every sweep tick (~10s), so new or modified agents are picked up without a restart.
 
-## When to use this
-
-Reach for this skill when the user wants to:
-
-- **Spin up a long-lived specialist session** (e.g. "register a planner internal agent that decomposes multi-step tasks", "set up a summarizer that returns 5-bullet summaries"). Each internal agent is a `claude_agent_sdk.ClaudeSDKClient` running **in-process** inside the `internal_agent_chat` daemon, with its own persistent transcript and a stable `session_id` that survives daemon restarts.
-- **List who is currently registered** — useful before delegating so the main agent only sends work to internal agents whose `status` is `online` and whose `responsibilities` match the task.
-- **Deactivate an internal agent** (operator-side kill switch — the daemon tears down that agent's SDK session at the next sweep tick; inbox + history files on disk are preserved).
-- **Re-register / revive** an agent that was previously deactivated (just run `--name` again — re-registration intentionally clears `deactivated`).
-
-Do **not** use this skill for:
-
-- **External agents** (separate processes polling `/external-agent/*` over HTTP) — use the `register-external-agent` skill instead.
-- **In-process subagents** spawned via the Agent / Task tool — those have nothing to do with `agents.json` or the `internal_agent_chat` daemon; they live entirely inside the calling session.
-- Sending one-off messages to a registered internal agent — write a `{"type":"message", ...}` envelope to `/agent/messages/internal/<name>/inbox.json` directly. The daemon picks it up within ~10 s.
-- Customizing SDK options (allowed_tools, permission_mode, cwd, add_dirs, …) — those are intentionally **fixed** and identical to `app/chat.py`. The only per-agent customizations are: `--system-prompt-*` text (appended to the shared system prompt), `--outbox-routing-rules-*`, and `--model` (override the SDK's default model on a per-agent basis).
+All SDK options (allowed_tools, permission_mode, cwd, add_dirs, ...) are fixed and identical to `app/chat.py`. Per-agent customization knobs: `responsibilities`, `system_prompt` (appended to the shared pre-built prompt), `outbox_routing_rules`, `model`.
 
 ## Subcommands
 
-| Action | Flag | Effect |
-|--------|------|--------|
-| Register / update | `--name <agent-name> --responsibilities "<text>" [--system-prompt-file F \| --system-prompt-inline TEXT] [--outbox-routing-rules-file F \| --outbox-routing-rules-inline JSON] [--model haiku\|sonnet\|opus\|<model-id>]` | Adds (or upserts) the agent in `agents.json` with `type: "internal"` and `inbox: <abs path>`. Creates empty `messages/internal/<agent-name>/{inbox,inbox_history}.json` for inbox traffic and `memory/chat/<agent-name>/{chat_history,chat_history_archive}.json` + `<agent-name>.session` for the SDK chat. Clears any prior `deactivated` status. The daemon hot-reloads `agents.json` on its next sweep tick (10 s) so no service restart is needed. |
-| List | `--list` | One line per internal agent: name, status, number of routing rules, responsibilities. |
-| Deactivate | `--deactivate <agent-name>` | Sets `status="deactivated"` so the daemon stops the SDK session at the next sweep tick. Exits non-zero if `<agent-name>` is not registered as an internal agent (external-agent matches are ignored). |
+| Subcommand | Description |
+|------------|-------------|
+| `--name N` (with other args) | Register a new internal agent or upsert an existing one. Re-registering with the same `--name` clears `deactivated`. |
+| `--list` | List all internal agents (name, status, rule count, responsibilities). |
+| `--deactivate N` | Set `status=deactivated`. Re-register with the same `--name` to re-activate. |
 
-There is no `--setup` because internal agents are wired up entirely by the daemon — the operator does **not** paste any prompt anywhere.
+## Flags
 
-## Typical flows
+| Flag | Description |
+|------|-------------|
+| `--name N` | Agent name. Must match `^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$`. |
+| `--responsibilities T` | Free-text duties. **Defaults to empty and is written on every call** — always re-pass on upsert (see "Updating" below). |
+| `--system-prompt-file PATH` | Read system prompt from file. Appended to the shared system prompt; omit on upsert to preserve existing. |
+| `--system-prompt-inline T` | Inline system prompt. Same semantics as `--system-prompt-file`. |
+| `--outbox-routing-rules-file PATH` | JSON list of `{"description": "...", "agent": "<name>"}`. Each rule contributes one bullet to the LLM-visible description of the per-session `send_reply` tool. Omit on upsert to preserve existing. |
+| `--outbox-routing-rules-inline JSON` | Inline JSON list. Same semantics as `--outbox-routing-rules-file`. |
+| `--model M` | Short alias (`haiku`, `sonnet`, `opus`) or a full model id. Omit on upsert to preserve / use SDK default. |
+| `--list` | List internal agents (subcommand mode). |
+| `--deactivate N` | Mark an internal agent as deactivated (subcommand mode). |
 
-### 1. Onboard a new internal agent
+The reserved name `main` is always available as an outbox routing target even with no rules.
+
+**Exit codes:** `0` = success, non-zero = invalid args or write failed.
+
+## Examples
 
 ```bash
+# Register a new internal agent
 uv run python scripts/register_internal_agent.py \
     --name planner \
-    --responsibilities "Decompose multi-step requests into ordered, verifiable subtasks" \
-    --system-prompt-inline "You are the planner. Output a numbered plan, one tool/skill per line. Do not perform the work yourself — only plan it." \
-    --outbox-routing-rules-inline '[
-      {"description": "Send the final numbered plan back to the main agent.", "agent": "main"},
-      {"description": "Hand off web-research subtasks to the research bot.", "agent": "research-bot"}
-    ]'
-```
+    --responsibilities "Plan multi-step tasks for the main agent" \
+    --system-prompt-file prompts/planner.md \
+    --outbox-routing-rules-file prompts/planner_rules.json \
+    --model sonnet
 
-That's it. Within ~10 s the `internal_agent_chat` daemon will:
+# Update model only (preserves system-prompt and routing rules)
+uv run python scripts/register_internal_agent.py \
+    --name myspec-reviewer \
+    --responsibilities "<copy current value>" \
+    --model opus
+uv run python scripts/interact_with_agent.py clear-session --name myspec-reviewer
 
-1. Notice the new entry on its next sweep tick.
-2. Build a `ClaudeSDKClient` with the same SDK options as `app/chat.py`, plus your `--system-prompt-*` text appended to the shared prompt and a `send_reply` MCP tool whose description embeds the routing rules above.
-3. Start polling `/agent/messages/internal/planner/inbox.json` — drop a `{"type":"message", ...}` envelope there to talk to it.
+# Update system prompt only
+uv run python scripts/register_internal_agent.py \
+    --name planner \
+    --responsibilities "<copy current value>" \
+    --system-prompt-file prompts/planner_v2.md
+uv run python scripts/interact_with_agent.py clear-session --name planner
 
-### 2. Check who can take work
-
-```bash
+# List / deactivate
 uv run python scripts/register_internal_agent.py --list
-```
-
-Only delegate to agents whose `status` is `online` and whose `responsibilities` match the task. The daemon flips every internal agent to `offline` on graceful shutdown (and back to `online` when the matching session reconnects on next start).
-
-### 3. Send the agent a task
-
-There is no helper for this — write the envelope yourself follow sample below:
-
-```json
-{
-  "type": "goal",
-  "content": "User command or the entire description the task that the agent should take up",
-  "timestamp": "2026-03-05T10:00:00+00:00",
-  "received_at": "2026-03-05T10:00:01+00:00",
-  "priority": 3,
-  "source": "user"
-}
-```
-
-(see `memory-example` skill for more samples).
-
-### 4. Stop / pause an internal agent
-
-```bash
 uv run python scripts/register_internal_agent.py --deactivate planner
 ```
 
-The daemon tears down the SDK session at the next sweep tick. The agent's inbox files (`messages/internal/<name>/{inbox,inbox_history}.json`) and chat files (`memory/chat/<name>/{chat_history,chat_history_archive}.json` + `<name>.session`) are all preserved — re-registering with `--name planner` revives the agent and the new SDK session resumes its prior conversation verbatim.
+## Updating an existing agent
 
-## Inputs and validation
+There is no `--update` flag — updates are done by re-running the script with the same `--name`. The script upserts: it merges new fields over the existing entry (`{**existing, **new}`).
 
-- `--name`: must match `^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$`. Becomes a directory segment under `messages/internal/`. The reserved name `main` must **never** be used — it always refers to the main agent's `/agent/messages/inbox.json`.
-- `--system-prompt-file` / `--system-prompt-inline`: optional text **appended** to the shared pre-built system prompt (system.md + constitution.md + public_url + prior chat history + claude-system-prompt.md). The two flags are mutually exclusive.
-- `--outbox-routing-rules-file` / `--outbox-routing-rules-inline`: optional JSON list. Each entry must be an object with both `description` (non-empty string explaining when this route applies) and `agent` (non-empty string — a name registered in `agents.json`, or the reserved `"main"`). Each rule contributes one bullet to the description of the agent's `send_reply` MCP tool, telling the LLM when to use that named recipient. Rules are **not** auto-evaluated by the daemon — the LLM picks where to deliver each reply.
-- `--responsibilities` is free text — write it from the perspective of the **main agent deciding whether to delegate** ("Decompose multi-step plans"; "Summarise long emails into 5 bullets"). Keep it specific enough that a triage step can match a task to an agent.
-- `--model`: optional override for the SDK model. Accepts the short aliases `haiku`, `sonnet`, `opus` (the SDK resolves these to the latest Claude 4.x ids itself) or a full model id (e.g. `claude-sonnet-4-6`). Omit to use the SDK default. Pick `haiku` for cheap/fast formatting or summarisation work, `opus` for heavy reasoning, `sonnet` as the balanced default. Re-registering with a different value replaces the prior selection; the change takes effect on the next SDK connect (restart the daemon, or trigger `clear_session` via the agent's `control` flag).
+**Field preservation rule:** any field you do *not* pass is **kept**, because the script only includes a field in the merge dict when its argument was provided.
 
-## Where the data lives
+**Exception — `--responsibilities`:** has `default=""` and is written on every call. If you are not changing it, copy the current value from `agents.json` into your command, otherwise it gets blanked.
 
-- Registry: `/agent/memory/agents.json` — internal entries are mixed in with external ones; filter by `type == "internal"`.
-- Per-agent inbox files: `/agent/messages/internal/<name>/{inbox,inbox_history}.json`. The daemon atomically pops `inbox.json`, stamps each envelope with a daemon-generated `id` + `processed_at`, archives every popped envelope to `inbox_history.json`, then runs one SDK turn per group (messages sharing a `reply_to` are merged into a single user turn).
-- Per-agent chat files: `/agent/memory/chat/<name>/{chat_history,chat_history_archive}.json` + `<name>.session` (bare-string SDK resume id). The portal chat (the "main" agent) follows the same layout under `chat/main/`. `chat_history.json` is **never truncated by the daemon**; the only path that empties it is the operator-triggered `clear_chat` flag (see "Operator-driven clears" below), which first appends every cleared record to `chat_history_archive.json`. The `<name>.session` sidecar is updated after every turn so daemon restarts resume the conversation verbatim.
-- Control-action audit log (global, all internal agents): `/agent/memory/logs/internal-agent-control-audit.log` — one JSON object per line, append-only. Each line has a leading `agent` field so a single grep reconstructs any agent's clear-history.
-- Daemon logs: `/agent/memory/logs/internal_agent_chat.log`.
-- Daemon heartbeat: `/agent/memory/heartbeats/internal_agent_chat.heartbeat` (touched once per 10 s sweep tick).
-- Daemon registration in `memory/services.json` is `auto_start: true` and portless.
+**Recommended upsert workflow:**
 
-## Operator-driven clears
+1. Read the current entry so you can copy fields you are preserving:
 
-Two control flags can be set on an agent's `control` dict in `agents.json` to ask the daemon to reset state at the next sweep tick:
+   ```bash
+   uv run python -c "import json; print(json.dumps(next(a for a in json.load(open('memory/agents.json')) if a.get('name')=='<agent>'), indent=2))"
+   ```
 
-```jsonc
-{
-  "name": "planner", "type": "internal", "status": "online", ...,
-  "control": { "clear_chat": true, "clear_session": true }
-}
-```
+2. Re-register with the change. Always re-pass `--responsibilities` (see exception above).
 
-- **`clear_chat`** — empties `chat_history.json` so the next SDK turn starts with no conversation context (the SDK resume id is left intact, so the model still picks up mid-session if the daemon kept it). **Before truncation**, every existing record is appended to `chat_history_archive.json` (append-only, unbounded). If the archive write fails, the truncation is **aborted** and the control flag stays set so the next sweep retries — chat data is never destroyed without a successful archive.
-- **`clear_session`** — drops the SDK resume id (deletes `<name>.session`), disconnects the live `ClaudeSDKClient`, and reconnects with a fresh session. Use this after changing `--system-prompt-*` or `--model` to make the change take effect immediately. If the reconnect fails, the flag stays set and the next sweep retries.
+3. **For changes that need a fresh SDK session** (model swap, system-prompt change), queue `clear_session` via the `interact-with-agent` skill so the daemon drops the current SDK thread and reconnects with the new config on its next sweep:
 
-Every action — success or failure — appends one JSON line to the global audit log at `/agent/memory/logs/internal-agent-control-audit.log` capturing `agent`, `action`, `ts`, `ok`, plus `archived_count` + `archive_path` for `clear_chat` and `prior_session_id` + `new_session_id` for `clear_session`. To reconstruct one agent's clear-history: `grep '"agent":"<name>"' /agent/memory/logs/internal-agent-control-audit.log | jq .`.
+   ```bash
+   uv run python scripts/interact_with_agent.py clear-session --name <agent>
+   ```
 
-After a successful action the daemon strips that one key from the `control` dict (and removes the dict entirely if empty). Unrelated keys in `control` are preserved.
+   Without this, `agents.json` carries the new value but the live session keeps the old model/prompt until the daemon restarts. Updates to `responsibilities` or `outbox_routing_rules` alone do not need `clear-session` — those are read each sweep.
 
-## Heuristics for the main agent
+## How it works
 
-- Before delegating a goal: `--list` first. If no `online` internal agent's `responsibilities` cover the goal, do not invent a delegation — handle locally, register a new agent, or fall back to an external agent via `register-external-agent`.
-- Internal agents reply via their `send_reply` tool — incoming entries on the main inbox will have `source: "internal_agent"` and `reply_to: "messages/internal/<name>/inbox.json"`. To answer back, append a `{"type":"message", ...}` envelope to that path; do **not** call this script for replies.
-- After deactivating an internal agent, its files persist; do not delete them unless the operator explicitly asks. Re-registering with `--name` is a non-destructive revive.
-- If the daemon's heartbeat is stale (`/agent/memory/heartbeats/internal_agent_chat.heartbeat` mtime > 60 s) **before** delegating, surface the issue to the operator instead of registering a new agent — a registered agent is useless if the daemon hosting it is down.
+`agents.json` updates go through `services.shared.locked_json_rw`, which takes an exclusive flock on `agents.json.lock` and serializes concurrent writers (other CLI invocations, the daemon's strip-after-apply path on `control` flags). The daemon polls `agents.json` every ~10s and applies new config between turns.
+
+## Don't
+
+- Don't hand-edit `agents.json`. Always go through this script so the locked read-modify-write path is used.
+- Don't forget to re-pass `--responsibilities` on upsert. It defaults to empty and overwrites on every call.
+- Don't expect a model / system-prompt change to take effect on the live session without `clear-session` — see "Updating" step 3.
+
+## Related
+
+- `interact-with-agent` — send messages and queue `clear-chat` / `clear-session` control flags via `scripts/interact_with_agent.py`.

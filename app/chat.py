@@ -840,48 +840,78 @@ def render():
     # Clear chat button — fully discard the current SDK session (interrupt any
     # in-flight turn, close the singleton, wipe persisted session_id) so the
     # next rerun spawns a brand-new `claude` session with no resumed context.
-    if st.session_state.chat_messages:
-        if st.button("Clear chat", key="clear_chat"):
-            if st.session_state.chat_streaming and session is not None:
-                try:
-                    session.interrupt()
-                except Exception:
-                    pass
-            # Tear down the cached singleton so a fresh ClaudeChat is built.
+    # Always render the Clear/Refresh row so the user can still pull in
+    # daemon-written messages after clearing the chat (in-memory list is empty
+    # but disk may have new turns from a background job).
+    col_clear, col_refresh, _ = st.columns([1, 1, 8])
+    with col_clear:
+        clear_clicked = st.button(
+            "Clear chat",
+            key="clear_chat",
+            disabled=not st.session_state.chat_messages,
+        )
+    with col_refresh:
+        refresh_clicked = st.button(
+            "Refresh chat",
+            key="refresh_chat",
+            disabled=st.session_state.chat_streaming,
+            help=(
+                "Pull in any messages written by background jobs since the "
+                "page loaded."
+            ),
+        )
+    if clear_clicked:
+        if st.session_state.chat_streaming and session is not None:
             try:
-                _get_chat_singleton.clear()
+                session.interrupt()
             except Exception:
                 pass
-            if session is not None:
+        # Tear down the cached singleton so a fresh ClaudeChat is built.
+        try:
+            _get_chat_singleton.clear()
+        except Exception:
+            pass
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+            if session._thread is not None and session._thread.is_alive():
                 try:
-                    session.close()
+                    _shutdown_chat_resources(
+                        session._loop, session._sdk, session._thread
+                    )
                 except Exception:
                     pass
-                if session._thread is not None and session._thread.is_alive():
-                    try:
-                        _shutdown_chat_resources(
-                            session._loop, session._sdk, session._thread
-                        )
-                    except Exception:
-                        pass
-            # Wipe persisted resume id so the new singleton starts fresh.
-            try:
-                from shared import session_path as _session_path
+        # Wipe persisted resume id so the new singleton starts fresh.
+        try:
+            from shared import session_path as _session_path
 
-                p = _session_path(_PORTAL_CHAT_NAME)
-                if p.exists():
-                    p.write_text("")
-            except Exception:
-                pass
-            st.session_state.chat_messages = []
-            _save_chat_history([])
-            st.session_state.chat_streaming = False
-            st.session_state.chat_stream_text = ""
-            st.session_state.chat_stream_events = []
-            st.session_state.pop("chat_session", None)
-            st.session_state.pop("chat_session_id", None)
-            st.session_state.pop("chat_connect_failed", None)
+            p = _session_path(_PORTAL_CHAT_NAME)
+            if p.exists():
+                p.write_text("")
+        except Exception:
+            pass
+        st.session_state.chat_messages = []
+        _save_chat_history([])
+        st.session_state.chat_streaming = False
+        st.session_state.chat_stream_text = ""
+        st.session_state.chat_stream_events = []
+        st.session_state.pop("chat_session", None)
+        st.session_state.pop("chat_session_id", None)
+        st.session_state.pop("chat_connect_failed", None)
+        st.rerun()
+    if refresh_clicked:
+        disk = _load_chat_history()
+        if disk != st.session_state.chat_messages:
+            st.session_state.chat_messages = disk
+            meta_sid = _load_chat_meta().get("session_id")
+            if meta_sid and meta_sid != st.session_state.get("chat_session_id"):
+                st.session_state.chat_session_id = meta_sid
+            st.toast(f"Loaded {len(disk)} messages from disk.")
             st.rerun()
+        else:
+            st.toast("No new messages.")
 
     # Handle pending prompts from other components (e.g. "Ask AI" buttons)
     if (

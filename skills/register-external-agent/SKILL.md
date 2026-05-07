@@ -1,6 +1,6 @@
 ---
 name: register-external-agent
-description: Register, onboard, list, deactivate, and generate connection prompts for **external agents** — separate, out-of-process LLM sessions (e.g. another Claude Code or Codex instance running elsewhere) that talk to the main agent over the external_agent_api HTTP service at /external-agent/*. Use when the user asks to "register an external agent", "delegate work to an external agent", "connect another Claude Code / Codex external agent", "list registered external agents", or to deactivate / re-onboard one. NOT for in-process subagents spawned via the Agent / Task tool, NOT for skills, and NOT for entries in memory/capabilities.json — those are all internal to this agent and unrelated to the external-agent registry.
+description: Register, onboard, list, deactivate, and re-issue connection prompts for **external agents** — separate, out-of-process LLM sessions (e.g. another Claude Code or Codex instance running elsewhere) that talk to the main agent over the external_agent_api HTTP service at /external-agent/*. Use when the user asks to "register an external agent", "delegate work to an external agent / research-bot / external coding agent", "connect another Claude Code / Codex agent", "list registered external agents" (e.g. before delegating a goal, to pick one whose responsibilities match), "deactivate an external agent" (kill switch — stops the sweeper from forwarding their outbox), or "re-issue / regenerate connection instructions" after a crash, restart, or for a second instance. NOT for in-process subagents spawned via the Agent / Task tool, NOT for sending one-off messages to a registered external agent (write to `messages/external/<name>/inbox.json` or use the `reply_to` on a forwarded item), NOT for authenticating the API (Caddy already applies basic auth at `/external-agent/*`), NOT for entries in `memory/capabilities.json` or `memory/services.json` — those are all internal to this agent and unrelated to the external-agent registry.
 ---
 
 # register-external-agent
@@ -8,22 +8,6 @@ description: Register, onboard, list, deactivate, and generate connection prompt
 **Path:** `scripts/register_external_agent.py`
 
 CLI for managing the external-agent registry at `/agent/memory/agents.json` and the per-agent message directories at `/agent/messages/external/<name>/`. Backs the [`external_agent_api`](../../services/external_agent_api.py) service.
-
-## When to use this
-
-Reach for this skill when the user wants to:
-
-- **Delegate work to a separate external agent** (e.g. "have a research-bot external agent handle web lookups", "register an external coding agent that I can hand PR reviews to"). Each external agent is a Claude Code / Codex / other LLM session running on another host or another terminal that polls our `/external-agent/*` API; it is **not** an in-process subagent.
-- **List who is currently registered** — useful before assigning a goal so you only delegate to external agents whose `status != "deactivated"` and whose `responsibilities` match the task.
-- **Deactivate an external agent** (operator-side kill switch — stops the sweeper from forwarding their outbox into the main inbox).
-- **Re-issue connection instructions** to an existing external agent (e.g. they crashed, started fresh, or a teammate needs to connect a second instance).
-
-Do **not** use this skill for:
-
-- **In-process subagents** spawned via the Agent / Task tool — those have nothing to do with `agents.json` or the `/external-agent/*` API; they live entirely inside this session.
-- Internal capabilities or services on this host — those go in `memory/capabilities.json` and `memory/services.json` directly.
-- Sending one-off messages to a registered external agent — write to `messages/external/<name>/inbox.json` or use the `reply_to` field on a forwarded inbox item.
-- Authenticating the API — Caddy already applies basic auth at `/external-agent/*`.
 
 ## Subcommands
 
