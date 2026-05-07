@@ -231,6 +231,64 @@ Inbox items with `source: "external_agent"` are forwarded by `external_agent_api
   `reply_to_id` field when the peer replies via
   `mcp__internal_agent_routing__send_reply(message_id=…)`.
 
+#### Internal-Agent Inbox Source
+
+Inbox items with `source: "internal_agent"` are stamped by `services/internal_agent_chat.py` when an internal SDK-hosted peer agent sends a reply via the `mcp__internal_agent_routing__send_reply` tool. They carry the same shape as external-agent forwards:
+
+- `type`: `agent_response` | `agent_needs_human` | `agent_error` | `agent_info` (chosen by the peer agent itself; not auto-prefixed — the peer picks the `agent_*` value directly via the MCP tool — see `services/internal_agent_chat.py:336-339`).
+- `source`: literal `"internal_agent"` (stamped by the daemon — `internal_agent_chat.py:402`).
+- `reply_to`: path to the peer's own inbox so the main agent can reply back.
+- `reply_to_id` (optional): the `id` of the original delegate-inbox envelope being responded to. Same correlation semantics as external — matched against `goal.delegated_message_id`.
+- `priority` (optional): integer 1-5 supplied by the peer; defaults to nothing if omitted.
+- `agent_needs_human` forwards are mirrored into the main outbox so Telegram / WhatsApp surfaces them, identical to the external-agent path.
+
+---
+
+### Inbox Message Priority
+
+**Location:** `/agent/messages/inbox.json` (and per-agent inboxes under `messages/internal/<name>/`, `messages/external/<name>/`)
+
+**Field:** `priority`
+
+**Description:** Writer-side urgency hint stamped on inbox envelopes by senders (operator CLI, internal-agent reply tool, scheduler). Lower is more urgent.
+
+| Value | Meaning |
+|-------|---------|
+| `1` | Highest — drop-everything-else urgent |
+| `2` | High |
+| `3` | Default — used when omitted |
+| `4` | Low |
+| `5` | Lowest — informational |
+
+---
+
+## Agent Registry Enums
+
+### Agent Control Flag
+
+**Location:** `/agent/memory/agents.json` — entry-level `control` dict (internal agents only)
+
+**Field:** `control.<flag>` → `true`
+
+**Description:** Operator-set control flags consumed by `services/internal_agent_chat.py` on its next sweep. Each flag is a one-shot boolean; the daemon strips the key after applying it (atomic via `_clear_control_keys` — `internal_agent_chat.py:1153`).
+
+| Value | Meaning | When Used |
+|-------|---------|-----------|
+| `clear_chat` | Archive `memory/chat/<name>/chat_history.json` into `chat_history_archive.json` then truncate, syncing the in-memory chat tail | Operator wants to forget the conversation but keep the SDK session warm |
+| `clear_session` | Wipe `memory/chat/<name>/<name>.session` and reconnect the SDK so the next prompt starts fresh | Operator wants a hard SDK reset (e.g. after prompt edits) |
+
+**Set via:**
+
+- `uv run python scripts/interact_with_agent.py clear-chat --name <agent>` (or `--all`)
+- `uv run python scripts/interact_with_agent.py clear-session --name <agent>` (or `--all`)
+
+**Notes:**
+
+- Only meaningful for `type: internal` agents — external agents are no-ops.
+- Daemon checks for pending flags at sweep start; `sweep_inboxes` returns early when a flag is pending so inbox processing happens after the clear (`internal_agent_chat.py:1297`).
+- If clearing fails, the flag stays set so the next sweep retries (critical for `clear_session` reconnect failures).
+- Field names are defined as `CONTROL_FIELD = "control"`, `CONTROL_CLEAR_CHAT = "clear_chat"`, `CONTROL_CLEAR_SESSION = "clear_session"` in `services/internal_agent_chat.py:146-148`.
+
 ---
 
 ## Dream Enums
@@ -454,6 +512,9 @@ Inbox items with `source: "external_agent"` are forwarded by `external_agent_api
 | `type` | Inbox | `goal`, `message`, `bash` | `inbox.json`, `command_history.json` |
 | `type` | Outbox | `response`, `needs_human`, `error`, `info` | `outbox.json`, `messages/external/<name>/outbox.json` |
 | `type` | Forwarded Inbox (from external agent) | `agent_response`, `agent_needs_human`, `agent_error`, `agent_info` | `inbox.json` (with `source: "external_agent"`) |
+| `type` | Forwarded Inbox (from internal agent) | `agent_response`, `agent_needs_human`, `agent_error`, `agent_info` | `inbox.json` (with `source: "internal_agent"`) |
+| `priority` | Inbox envelope | `1`, `2`, `3` (default), `4`, `5` | `inbox.json`, `messages/internal/<name>/inbox.json`, `messages/external/<name>/inbox.json` |
+| `control.<flag>` | Agent Registry | `clear_chat`, `clear_session` (one-shot booleans on internal agents) | `agents.json` |
 | `cycle_category` | Evolution | `reliability`, `observability`, `capability`, `efficiency`, `prompt_evolution`, `memory_consolidation`, `deep_sleep` | `cycles.json`, `journal.json` |
 | `category` | Capability | `core`, `memory`, `security`, `communication`, `observability`, `automation`, `portal` | `capabilities.json` |
 | `enabled` | Capability | `true`, `false` | `capabilities.json` |

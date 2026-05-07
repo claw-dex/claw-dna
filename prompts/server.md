@@ -141,7 +141,7 @@ Defined in `app/shared.py`:
 | `GOALS_PATH`           | `/agent/memory/goal.json`            | Persistent goal tracker          |
 | `HISTORY_PATH`         | `/agent/memory/command_history.json` | Command history (last 50)        |
 | `ERROR_LOG_PATH`       | `/agent/memory/server_errors.json`   | Server error log (last 20)       |
-| `CHAT_HISTORY_PATH`    | `/agent/memory/chat_history.json`    | Chat message history (max 200)   |
+| `CHAT_HISTORY_PATH`    | `/agent/memory/chat/main/chat_history.json` | Portal chat history (max 200) — internal agents use the same `/agent/memory/chat/<name>/` layout |
 | `PORTAL_CONFIG_PATH`   | `/agent/memory/portal_config.json`   | Portal settings (timezone, etc.) |
 | `AGENT_CREDENTIALS_PATH` | `/home/agent/.claude/.credentials.json` | Claude SDK credentials       |
 

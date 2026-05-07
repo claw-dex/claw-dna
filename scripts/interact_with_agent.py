@@ -5,12 +5,13 @@ Interact With Agent
 Operator CLI for runtime maintenance of registered agents.
 
 Subcommands:
-  clear-chat      Wipe `chat_history.json` and the in-memory chat tail
-                  for an internal agent (queued via control sentinel;
-                  daemon picks it up on its next sweep).
-  clear-session   Wipe `<name>.session` and reconnect the SDK so the
-                  next turn starts a fresh thread (no resume=). Also
-                  queued via control sentinel.
+  clear-chat      Archive then wipe `memory/chat/<name>/chat_history.json`
+                  (records appended to chat_history_archive.json first)
+                  and the in-memory chat tail. Queued via control flag in
+                  agents.json; daemon picks it up on its next sweep.
+  clear-session   Wipe `memory/chat/<name>/<name>.session` and reconnect
+                  the SDK so the next turn starts a fresh thread (no
+                  resume=). Also queued via control flag.
   send-message    Append a message envelope to the target agent's
                   inbox.json. Works for any registered agent
                   (internal/external) and the reserved name `main`.
@@ -332,7 +333,7 @@ def main() -> int:
 
     p_chat = sub.add_parser(
         "clear-chat",
-        help="Clear chat_history.json for an internal agent (queued via sentinel)",
+        help="Archive + clear memory/chat/<name>/chat_history.json (queued via control flag)",
     )
     _add_target_args(p_chat)
     p_chat.set_defaults(func=cmd_clear_chat)

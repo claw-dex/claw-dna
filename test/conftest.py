@@ -232,12 +232,26 @@ def patch_iac_paths(monkeypatch, agent_root, patch_shared_paths):
     monkeypatch.setattr(iac, "MESSAGES_DIR", agent_root / "messages")
     monkeypatch.setattr(iac, "AGENTS_FILE", agent_root / "memory" / "agents.json")
     monkeypatch.setattr(iac, "INTERNAL_DIR", agent_root / "messages" / "internal")
+    # Chat-side files (history, archive, .session) now live under
+    # /agent/memory/chat/<name>/. The path helpers on `iac` are thin
+    # wrappers around the canonical functions in `services.shared` —
+    # patch CHAT_DIR there so every wrapper resolves into agent_root.
+    import shared as _services_shared
+
+    monkeypatch.setattr(_services_shared, "CHAT_DIR", agent_root / "memory" / "chat")
     monkeypatch.setattr(
-        iac, "SESSIONS_DIR", agent_root / "memory" / "sessions" / "internal"
+        _services_shared,
+        "CHAT_MIGRATION_SENTINEL",
+        agent_root / "memory" / "chat" / ".migration_done",
     )
     monkeypatch.setattr(iac, "LOG_DIR", agent_root / "memory" / "logs")
     monkeypatch.setattr(
         iac, "LOG_FILE", agent_root / "memory" / "logs" / "internal_agent_chat.log"
+    )
+    monkeypatch.setattr(
+        iac,
+        "CONTROL_AUDIT_LOG",
+        agent_root / "memory" / "logs" / "internal-agent-control-audit.log",
     )
     monkeypatch.setattr(iac, "HEARTBEAT_DIR", agent_root / "memory" / "heartbeats")
     monkeypatch.setattr(

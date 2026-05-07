@@ -43,7 +43,14 @@ from pathlib import Path
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _SERVICES_DIR = _SCRIPT_DIR.parent / "services"
 sys.path.insert(0, str(_SERVICES_DIR))
-from shared import locked_json_rw, read_json_file  # noqa: E402
+from shared import (  # noqa: E402
+    chat_archive_path,
+    chat_history_path,
+    ensure_chat_dir,
+    locked_json_rw,
+    read_json_file,
+    session_path,
+)
 
 BASE = _SCRIPT_DIR.parent
 AGENTS_FILE = BASE / "memory" / "agents.json"
@@ -55,15 +62,18 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 
 def _ensure_files(name: str) -> tuple[Path, Path, Path]:
+    # Inbox files stay under messages/internal/<name>/.
     agent_dir = INTERNAL_DIR / name
     agent_dir.mkdir(parents=True, exist_ok=True)
     inbox = agent_dir / "inbox.json"
     inbox_history = agent_dir / "inbox_history.json"
-    chat_history = agent_dir / "chat_history.json"
-    for f in (inbox, inbox_history, chat_history):
+    for f in (inbox, inbox_history):
         if not f.exists():
             f.write_text("[]")
-    return inbox, inbox_history, chat_history
+    # Chat history (and archive + .session) live under
+    # /agent/memory/chat/<name>/ in the unified layout.
+    ensure_chat_dir(name)
+    return inbox, inbox_history, chat_history_path(name)
 
 
 def _load_json_arg(file_arg: str | None, inline_arg: str | None):
@@ -109,6 +119,8 @@ def cmd_register(args) -> int:
 
     system_prompt = _load_text_arg(args.system_prompt_file, args.system_prompt_inline)
 
+    model = (args.model or "").strip() or None
+
     entry = {
         "type": "internal",
         "name": name,
@@ -120,6 +132,8 @@ def cmd_register(args) -> int:
         entry["system_prompt"] = system_prompt
     if outbox_routing_rules is not None:
         entry["outbox_routing_rules"] = outbox_routing_rules
+    if model is not None:
+        entry["model"] = model
 
     def _rw(items):
         if not isinstance(items, list):
@@ -220,6 +234,17 @@ def main() -> int:
     p.add_argument(
         "--outbox-routing-rules-inline",
         help="Inline JSON list of outbox_routing_rules",
+    )
+    p.add_argument(
+        "--model",
+        help=(
+            "Optional model override for this agent's SDK session. Accepts "
+            "short aliases ('haiku', 'sonnet', 'opus') or a full model id; "
+            "the SDK handles resolution. Omit to use the SDK default. "
+            "Re-registering with a different value replaces the prior "
+            "selection; takes effect on the next session connect "
+            "(restart the daemon or trigger clear_session)."
+        ),
     )
     p.add_argument("--list", action="store_true", help="List internal agents")
     p.add_argument(

@@ -242,7 +242,7 @@ Snapshot (ring buffer, max 200):
 }
 ```
 
-### chat_history.json
+### chat/main/chat_history.json (and chat/<agent>/chat_history.json for internal agents)
 
 ```json
 []
@@ -356,7 +356,11 @@ Entry:
   "outbox_routing_rules": [
     {"description": "Send the final numbered plan back to the main agent.", "agent": "main"},
     {"description": "Hand off web research subtasks.", "agent": "research-bot"}
-  ]
+  ],
+  "control": {
+    "clear_chat": true,
+    "clear_session": true
+  }
 }
 ```
 
@@ -365,6 +369,7 @@ Entry:
 - `status`: `online` | `offline` | `deactivated`. Setting `deactivated` causes the daemon to tear down the session at the next sweep tick; the inbox/history files on disk are preserved.
 - `system_prompt` (optional): per-agent text **appended** to the shared system prompt (`system.md` + `constitution.md` + `public_url` + prior chat history + `claude-system-prompt.md`). It does **not** replace the shared prompt. Everything else about the SDK options is fixed and identical to `app/chat.py`.
 - `outbox_routing_rules` (optional): list of `{"description": "...", "agent": "<name>"}` entries. Each rule contributes one bullet to the description of the agent's per-session `send_reply` MCP tool, telling the LLM when to use that named recipient. The reserved name `main` is always available even with no rules; any other `agent` value must be present in this list **and** registered in `agents.json` with an `inbox` field.
+- `control` (optional, transient): operator-set one-shot flags consumed by the daemon at the next sweep. Supported keys: `clear_chat` (archive `memory/chat/<name>/chat_history.json` into `chat_history_archive.json` then truncate, and sync the in-memory tail), `clear_session` (wipe `memory/chat/<name>/<name>.session` and reconnect the SDK). Each flag is stripped after it is applied, and the empty `control` dict is removed too. Set via `scripts/interact_with_agent.py clear-chat|clear_session --name <agent>`. See `prompts/enum.md` → "Agent Control Flag" for full semantics.
 
 ---
 

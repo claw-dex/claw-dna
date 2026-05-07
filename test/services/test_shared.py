@@ -362,3 +362,181 @@ def test_timed_flock_times_out(tmp_path, patch_shared_paths):
     finally:
         holder_release.set()
         th.join(timeout=2.0)
+
+
+# ---------------------------------------------------------------------------
+# Per-surface chat path helpers + migrator
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def patch_chat_dir(monkeypatch, tmp_path: Path, patch_shared_paths):
+    """Redirect CHAT_DIR + sentinel into tmp_path so each test is isolated."""
+    chat_root = tmp_path / "memory" / "chat"
+    monkeypatch.setattr(patch_shared_paths, "CHAT_DIR", chat_root)
+    monkeypatch.setattr(
+        patch_shared_paths,
+        "CHAT_MIGRATION_SENTINEL",
+        chat_root / ".migration_done",
+    )
+    return patch_shared_paths
+
+
+def test_chat_paths_resolve_under_chat_dir(patch_chat_dir, tmp_path):
+    sh = patch_chat_dir
+    expected_root = tmp_path / "memory" / "chat" / "planner"
+    assert sh.chat_dir("planner") == expected_root
+    assert sh.chat_history_path("planner") == expected_root / "chat_history.json"
+    assert (
+        sh.chat_archive_path("planner") == expected_root / "chat_history_archive.json"
+    )
+    assert sh.session_path("planner") == expected_root / "planner.session"
+
+
+def test_ensure_chat_dir_creates_three_files(patch_chat_dir):
+    sh = patch_chat_dir
+    sh.ensure_chat_dir("planner")
+    assert json.loads(sh.chat_history_path("planner").read_text()) == []
+    assert json.loads(sh.chat_archive_path("planner").read_text()) == []
+    assert sh.session_path("planner").read_text() == ""
+
+
+def test_ensure_chat_dir_is_idempotent(patch_chat_dir):
+    sh = patch_chat_dir
+    sh.ensure_chat_dir("planner")
+    sh.chat_history_path("planner").write_text(json.dumps([{"x": 1}]))
+    sh.session_path("planner").write_text("sess-abc")
+    sh.ensure_chat_dir("planner")
+    assert json.loads(sh.chat_history_path("planner").read_text()) == [{"x": 1}]
+    assert sh.session_path("planner").read_text() == "sess-abc"
+
+
+def test_save_and_load_session_id_round_trip(patch_chat_dir):
+    sh = patch_chat_dir
+    assert sh.load_session_id("planner") is None
+    sh.save_session_id("planner", "sess-42")
+    assert sh.load_session_id("planner") == "sess-42"
+    sh.save_session_id("planner", "   ")  # whitespace-only ignored
+    assert sh.load_session_id("planner") == "sess-42"
+
+
+def _make_legacy_layout(root: Path, agents=("planner",)):
+    memory = root / "memory"
+    memory.mkdir(parents=True, exist_ok=True)
+    (memory / "chat_history.json").write_text(
+        json.dumps([{"role": "user", "content": "from-portal"}])
+    )
+    (memory / "chat_meta.json").write_text(json.dumps({"session_id": "portal-42"}))
+    sessions = memory / "sessions" / "internal"
+    sessions.mkdir(parents=True, exist_ok=True)
+    msgs = root / "messages" / "internal"
+    msgs.mkdir(parents=True, exist_ok=True)
+    for name in agents:
+        ad = msgs / name
+        ad.mkdir(parents=True, exist_ok=True)
+        (ad / "chat_history.json").write_text(
+            json.dumps([{"role": "user", "content": f"from-{name}"}])
+        )
+        (ad / "chat_history_archive.json").write_text(
+            json.dumps([{"role": "user", "content": f"old-{name}"}])
+        )
+        (sessions / (name + ".session")).write_text(f"sess-{name}-99")
+
+
+def test_migrate_chat_layout_moves_all_legacy_files(patch_chat_dir, tmp_path):
+    sh = patch_chat_dir
+    _make_legacy_layout(tmp_path, agents=("planner", "summarizer"))
+
+    report = sh.migrate_chat_layout(
+        legacy_memory_dir=tmp_path / "memory",
+        legacy_messages_internal=tmp_path / "messages" / "internal",
+        legacy_sessions_dir=tmp_path / "memory" / "sessions" / "internal",
+    )
+
+    assert report["skipped"] is False
+    assert report["portal_history"] is True
+    assert report["portal_session"] is True
+    assert report["internal_history"] == 2
+    assert report["internal_archive"] == 2
+    assert report["internal_session"] == 2
+
+    assert json.loads(sh.chat_history_path("main").read_text()) == [
+        {"role": "user", "content": "from-portal"}
+    ]
+    assert sh.session_path("main").read_text() == "portal-42"
+    assert not (tmp_path / "memory" / "chat_history.json").exists()
+    assert not (tmp_path / "memory" / "chat_meta.json").exists()
+
+    for name in ("planner", "summarizer"):
+        assert json.loads(sh.chat_history_path(name).read_text()) == [
+            {"role": "user", "content": f"from-{name}"}
+        ]
+        assert json.loads(sh.chat_archive_path(name).read_text()) == [
+            {"role": "user", "content": f"old-{name}"}
+        ]
+        assert sh.session_path(name).read_text() == f"sess-{name}-99"
+        assert not (
+            tmp_path / "messages" / "internal" / name / "chat_history.json"
+        ).exists()
+        assert not (
+            tmp_path / "memory" / "sessions" / "internal" / f"{name}.session"
+        ).exists()
+
+
+def test_migrate_chat_layout_is_idempotent(patch_chat_dir, tmp_path):
+    sh = patch_chat_dir
+    _make_legacy_layout(tmp_path, agents=("planner",))
+    sh.migrate_chat_layout(
+        legacy_memory_dir=tmp_path / "memory",
+        legacy_messages_internal=tmp_path / "messages" / "internal",
+        legacy_sessions_dir=tmp_path / "memory" / "sessions" / "internal",
+    )
+    second = sh.migrate_chat_layout(
+        legacy_memory_dir=tmp_path / "memory",
+        legacy_messages_internal=tmp_path / "messages" / "internal",
+        legacy_sessions_dir=tmp_path / "memory" / "sessions" / "internal",
+    )
+    assert second["skipped"] is True
+    assert sh.CHAT_MIGRATION_SENTINEL.exists()
+
+
+def test_migrate_chat_layout_skips_when_destination_exists(patch_chat_dir, tmp_path):
+    """If a destination file already holds data, migrator must not
+    overwrite it — operator can merge manually.
+    """
+    sh = patch_chat_dir
+    _make_legacy_layout(tmp_path, agents=("planner",))
+    sh.ensure_chat_dir("planner")
+    sh.chat_history_path("planner").write_text(
+        json.dumps([{"role": "assistant", "content": "already-here"}])
+    )
+
+    sh.migrate_chat_layout(
+        legacy_memory_dir=tmp_path / "memory",
+        legacy_messages_internal=tmp_path / "messages" / "internal",
+        legacy_sessions_dir=tmp_path / "memory" / "sessions" / "internal",
+    )
+
+    assert json.loads(sh.chat_history_path("planner").read_text()) == [
+        {"role": "assistant", "content": "already-here"}
+    ]
+    # Legacy file kept on disk for operator inspection.
+    assert (
+        tmp_path / "messages" / "internal" / "planner" / "chat_history.json"
+    ).exists()
+
+
+def test_migrate_chat_layout_handles_meta_with_no_session_id(patch_chat_dir, tmp_path):
+    sh = patch_chat_dir
+    (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "memory" / "chat_meta.json").write_text(json.dumps({}))
+
+    sh.migrate_chat_layout(
+        legacy_memory_dir=tmp_path / "memory",
+        legacy_messages_internal=tmp_path / "messages" / "internal",
+        legacy_sessions_dir=tmp_path / "memory" / "sessions" / "internal",
+    )
+
+    assert not (tmp_path / "memory" / "chat_meta.json").exists()
+    assert sh.session_path("main").exists()
+    assert sh.session_path("main").read_text() == ""

@@ -100,9 +100,22 @@ def _patch_agent_paths(sandbox: Path) -> None:
     shared.HISTORY_PATH = f"{base}/memory/command_history.json"
     shared.GOALS_PATH = f"{base}/memory/goal.json"
     shared.ERROR_LOG_PATH = f"{base}/memory/server_errors.json"
-    shared.CHAT_HISTORY_PATH = f"{base}/memory/chat_history.json"
-    shared.CHAT_META_PATH = f"{base}/memory/chat_meta.json"
     shared.PORTAL_CONFIG_PATH = f"{base}/memory/portal_config.json"
+    # Redirect the unified chat-layout root so app.chat reads/writes
+    # under the sandbox tree. `services.shared` is bare-name imported
+    # via app/chat.py's sys.path bootstrap, so the module shows up as
+    # plain `shared` here too.
+    try:
+        from pathlib import Path as _Path
+
+        import shared as _services_shared  # noqa: F401  (services/shared.py)
+
+        _services_shared.CHAT_DIR = _Path(f"{base}/memory/chat")
+        _services_shared.CHAT_MIGRATION_SENTINEL = (
+            _services_shared.CHAT_DIR / ".migration_done"
+        )
+    except Exception:
+        pass
     shared.SCHEDULED_TASKS_PATH = os.path.join(
         shared.MEMORY_DIR, "scheduled_tasks.json"
     )

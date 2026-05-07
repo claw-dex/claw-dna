@@ -735,8 +735,11 @@ def test_fleet_shutdown_marks_offline_and_preserves_session_id(patch_iac_paths):
     )
     # Pre-seed each session_id file on disk — `_save_session_id` is called
     # progressively by the worker after every turn; the shutdown path must
-    # not delete or overwrite these files.
-    iac.SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    # not delete or overwrite these files. The session sidecars now live
+    # under /agent/memory/chat/<name>/ — `ensure_chat_dir` creates the
+    # surrounding directory + an empty placeholder.
+    iac.ensure_chat_dir("planner")
+    iac.ensure_chat_dir("summarizer")
     iac._session_path("planner").write_text("sess-planner-42")
     iac._session_path("summarizer").write_text("sess-summarizer-7")
 
@@ -1039,3 +1042,646 @@ def test_build_system_prompt_includes_selected_records(patch_iac_paths):
     for i in range(3):
         assert f"**user**: u{i}" in out
         assert f"**assistant**: a{i}" in out
+
+
+# ---------------------------------------------------------------------------
+# _build_options — per-agent `model` override flows through to the SDK.
+# ---------------------------------------------------------------------------
+
+
+def _make_options_session(iac, cfg: dict, name: str = "x"):
+    sess = iac.InternalAgentSession.__new__(iac.InternalAgentSession)
+    sess.name = name
+    sess.cfg = cfg
+    sess._chat_history = []
+    sess._session_id = None
+    iac._ensure_agent_files(name)
+    return sess
+
+
+def test_build_options_passes_model_alias_through(patch_iac_paths):
+    iac = patch_iac_paths
+    sess = _make_options_session(iac, cfg={"model": "haiku"})
+    options = sess._build_options()
+    assert options.model == "haiku"
+
+
+def test_build_options_strips_whitespace_around_model(patch_iac_paths):
+    iac = patch_iac_paths
+    sess = _make_options_session(iac, cfg={"model": "  sonnet  "})
+    options = sess._build_options()
+    assert options.model == "sonnet"
+
+
+def test_build_options_passes_full_model_id_through(patch_iac_paths):
+    iac = patch_iac_paths
+    sess = _make_options_session(iac, cfg={"model": "claude-opus-4-7"})
+    options = sess._build_options()
+    assert options.model == "claude-opus-4-7"
+
+
+@pytest.mark.parametrize("bad", [None, "", "   ", 42, ["sonnet"], {"x": 1}])
+def test_build_options_omits_model_when_absent_or_invalid(patch_iac_paths, bad):
+    iac = patch_iac_paths
+    cfg: dict = {} if bad is None else {"model": bad}
+    sess = _make_options_session(iac, cfg=cfg)
+    options = sess._build_options()
+    assert options.model is None
+
+
+def test_model_round_trip_register_to_build_options(patch_iac_paths, monkeypatch):
+    """End-to-end contract: a value persisted by the registration script
+    must be picked up verbatim by the daemon's `_build_options`.
+    """
+    import argparse
+
+    import register_internal_agent as ria
+
+    iac = patch_iac_paths
+    monkeypatch.setattr(ria, "AGENTS_FILE", iac.AGENTS_FILE)
+    monkeypatch.setattr(ria, "INTERNAL_DIR", iac.INTERNAL_DIR)
+
+    args = argparse.Namespace(
+        name="planner",
+        responsibilities="r",
+        system_prompt_file=None,
+        system_prompt_inline=None,
+        outbox_routing_rules_file=None,
+        outbox_routing_rules_inline=None,
+        model="  haiku  ",  # whitespace must survive normalization on both sides
+    )
+    assert ria.cmd_register(args) == 0
+
+    agents = json.loads(iac.AGENTS_FILE.read_text())
+    cfg = next(a for a in agents if a.get("name") == "planner")
+    assert cfg["model"] == "haiku"  # script stripped + persisted
+
+    sess = _make_options_session(iac, cfg=cfg, name="planner")
+    options = sess._build_options()
+    assert options.model == "haiku"  # daemon read it back verbatim
+
+
+# ---------------------------------------------------------------------------
+# _consume_control_flags — operator-driven clear_chat / clear_session
+# ---------------------------------------------------------------------------
+
+
+def _make_control_session(iac, name: str, cfg: dict):
+    """Build a session skeleton wired up enough to exercise the
+    control-flag pipeline without a real SDK or thread.
+    """
+    sess = iac.InternalAgentSession.__new__(iac.InternalAgentSession)
+    sess.name = name
+    sess.cfg = cfg
+    sess._sdk = None
+    sess._session_id = None
+    sess._chat_history = []
+    iac._ensure_agent_files(name)
+    return sess
+
+
+@pytest.mark.parametrize(
+    "control_value",
+    [
+        None,  # key absent
+        {},  # empty dict
+        "not-a-dict",  # wrong type — must hit the isinstance(ctl, dict) guard
+        [],  # wrong type (list)
+    ],
+    ids=["missing", "empty_dict", "string", "list"],
+)
+def test_consume_control_flags_noop_when_no_control(patch_iac_paths, control_value):
+    iac = patch_iac_paths
+    cfg = {"type": "internal", "name": "p", "status": "online"}
+    if control_value is not None:
+        cfg[iac.CONTROL_FIELD] = control_value
+    _seed_agents(iac, [cfg])
+    sess = _make_control_session(iac, "p", cfg=cfg)
+    sess._chat_history = [{"role": "user", "content": "keep me"}]
+    iac._chat_history_path("p").write_text(json.dumps(sess._chat_history))
+
+    _run(sess._consume_control_flags())
+
+    # Nothing was changed on disk or in memory.
+    assert json.loads(iac._chat_history_path("p").read_text()) == [
+        {"role": "user", "content": "keep me"}
+    ]
+    assert sess._chat_history == [{"role": "user", "content": "keep me"}]
+
+
+def test_consume_control_flags_clear_chat_wipes_disk_memory_and_strips_flag(
+    patch_iac_paths,
+):
+    iac = patch_iac_paths
+    cfg = {
+        "type": "internal",
+        "name": "p",
+        "status": "online",
+        iac.CONTROL_FIELD: {iac.CONTROL_CLEAR_CHAT: True},
+    }
+    _seed_agents(iac, [cfg])
+    sess = _make_control_session(iac, "p", cfg=cfg)
+    sess._chat_history = [
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+    ]
+    iac._chat_history_path("p").write_text(json.dumps(sess._chat_history))
+
+    _run(sess._consume_control_flags())
+
+    # On-disk and in-memory chat are both wiped.
+    assert json.loads(iac._chat_history_path("p").read_text()) == []
+    assert sess._chat_history == []
+    # Flag (and the empty control dict) was stripped from agents.json.
+    agents_after = json.loads(iac.AGENTS_FILE.read_text())
+    assert iac.CONTROL_FIELD not in agents_after[0]
+    # Mirrored on cfg too.
+    assert iac.CONTROL_FIELD not in sess.cfg
+
+
+def test_consume_control_flags_clear_session_resets_sdk_and_strips_flag(
+    patch_iac_paths, monkeypatch
+):
+    iac = patch_iac_paths
+    cfg = {
+        "type": "internal",
+        "name": "p",
+        "status": "online",
+        iac.CONTROL_FIELD: {iac.CONTROL_CLEAR_SESSION: True},
+    }
+    _seed_agents(iac, [cfg])
+    sess = _make_control_session(iac, "p", cfg=cfg)
+    sess._session_id = "old-session-id"
+
+    # Seed the on-disk session file the daemon should delete.
+    session_file = iac._session_path("p")
+    session_file.parent.mkdir(parents=True, exist_ok=True)
+    session_file.write_text("old-session-id")
+
+    # Single ordered event log — pins down unlink → disconnect → connect.
+    # Asserting on three separate boolean lists would let a future refactor
+    # that reconnects before unlinking still pass.
+    events: list[str] = []
+
+    # Wrap unlink so we can record the order. (We can't easily intercept
+    # Path.unlink globally; rely on file presence + the events list below.)
+    real_unlink = type(session_file).unlink
+
+    def _tracking_unlink(self, *a, **kw):
+        if self == session_file:
+            events.append("unlink")
+        return real_unlink(self, *a, **kw)
+
+    monkeypatch.setattr(type(session_file), "unlink", _tracking_unlink, raising=True)
+
+    class _FakeSDK:
+        async def disconnect(self):
+            events.append("disconnect")
+
+    sess._sdk = _FakeSDK()
+
+    async def _fake_connect(self):
+        events.append("connect")
+        self._sdk = _FakeSDK()
+
+    monkeypatch.setattr(
+        iac.InternalAgentSession, "_connect_sdk", _fake_connect, raising=True
+    )
+
+    _run(sess._consume_control_flags())
+
+    # Order matters: file gone before disconnect, disconnect before reconnect.
+    assert events == ["unlink", "disconnect", "connect"]
+    assert sess._session_id is None
+    assert not session_file.exists()
+    # Flag stripped after a successful reconnect.
+    agents_after = json.loads(iac.AGENTS_FILE.read_text())
+    assert iac.CONTROL_FIELD not in agents_after[0]
+
+
+def test_consume_control_flags_clear_session_keeps_flag_on_reconnect_failure(
+    patch_iac_paths, monkeypatch
+):
+    iac = patch_iac_paths
+    cfg = {
+        "type": "internal",
+        "name": "p",
+        "status": "online",
+        iac.CONTROL_FIELD: {iac.CONTROL_CLEAR_SESSION: True},
+    }
+    _seed_agents(iac, [cfg])
+    sess = _make_control_session(iac, "p", cfg=cfg)
+    sess._session_id = "old-session-id"
+
+    # Seed an existing SDK + session file so the disconnect branch runs
+    # before the failing reconnect.
+    session_file = iac._session_path("p")
+    session_file.parent.mkdir(parents=True, exist_ok=True)
+    session_file.write_text("old-session-id")
+
+    disconnect_calls: list[bool] = []
+
+    class _FakeSDK:
+        async def disconnect(self):
+            disconnect_calls.append(True)
+
+    sess._sdk = _FakeSDK()
+
+    async def _failing_connect(self):
+        raise RuntimeError("no SDK for you")
+
+    monkeypatch.setattr(
+        iac.InternalAgentSession, "_connect_sdk", _failing_connect, raising=True
+    )
+
+    _run(sess._consume_control_flags())
+
+    # Partial side effects of clear_session that happened *before* the
+    # failing reconnect — pin them down so a future refactor can't
+    # silently re-order them:
+    #   - session file deleted
+    #   - in-memory session id cleared
+    #   - existing SDK was disconnected and dropped
+    assert disconnect_calls == [True]
+    assert not session_file.exists()
+    assert sess._session_id is None
+    assert sess._sdk is None
+    # Reconnect failed — agents.json must still carry the flag so the
+    # next sweep retries.
+    agents_after = json.loads(iac.AGENTS_FILE.read_text())
+    assert (
+        agents_after[0].get(iac.CONTROL_FIELD, {}).get(iac.CONTROL_CLEAR_SESSION)
+        is True
+    )
+
+
+def test_clear_control_keys_removes_empty_control_dict(patch_iac_paths):
+    iac = patch_iac_paths
+    cfg = {
+        "type": "internal",
+        "name": "p",
+        "status": "online",
+        iac.CONTROL_FIELD: {
+            iac.CONTROL_CLEAR_CHAT: True,
+            iac.CONTROL_CLEAR_SESSION: True,
+        },
+    }
+    _seed_agents(iac, [cfg])
+    sess = _make_control_session(iac, "p", cfg=cfg)
+
+    sess._clear_control_keys([iac.CONTROL_CLEAR_CHAT, iac.CONTROL_CLEAR_SESSION])
+
+    agents_after = json.loads(iac.AGENTS_FILE.read_text())
+    # Both flags removed AND the empty control dict pruned entirely.
+    assert iac.CONTROL_FIELD not in agents_after[0]
+    assert iac.CONTROL_FIELD not in sess.cfg
+
+
+def test_clear_control_keys_preserves_unrelated_control_keys(patch_iac_paths):
+    iac = patch_iac_paths
+    cfg = {
+        "type": "internal",
+        "name": "p",
+        "status": "online",
+        iac.CONTROL_FIELD: {
+            iac.CONTROL_CLEAR_CHAT: True,
+            "future_flag": "keep-me",
+        },
+    }
+    _seed_agents(iac, [cfg])
+    sess = _make_control_session(iac, "p", cfg=cfg)
+
+    sess._clear_control_keys([iac.CONTROL_CLEAR_CHAT])
+
+    agents_after = json.loads(iac.AGENTS_FILE.read_text())
+    # Targeted key gone; unrelated key preserved; control dict intact.
+    assert iac.CONTROL_CLEAR_CHAT not in agents_after[0][iac.CONTROL_FIELD]
+    assert agents_after[0][iac.CONTROL_FIELD].get("future_flag") == "keep-me"
+
+
+# ---------------------------------------------------------------------------
+# clear_chat archive + control_audit log
+# ---------------------------------------------------------------------------
+
+
+def _read_audit_log(iac, agent_name: str | None = None) -> list[dict]:
+    """Parse the JSONL global audit log into a list of dicts, optionally
+    filtered to a single agent name.
+    """
+    path = iac.CONTROL_AUDIT_LOG
+    if not path.exists():
+        return []
+    entries: list[dict] = []
+    for raw in path.read_text().splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        rec = json.loads(raw)
+        if agent_name is None or rec.get("agent") == agent_name:
+            entries.append(rec)
+    return entries
+
+
+def test_clear_chat_archives_records_before_truncation(patch_iac_paths):
+    iac = patch_iac_paths
+    cfg = {
+        "type": "internal",
+        "name": "p",
+        "status": "online",
+        iac.CONTROL_FIELD: {iac.CONTROL_CLEAR_CHAT: True},
+    }
+    _seed_agents(iac, [cfg])
+    sess = _make_control_session(iac, "p", cfg=cfg)
+    seed = [
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+    ]
+    sess._chat_history = list(seed)
+    iac._chat_history_path("p").write_text(json.dumps(seed))
+
+    _run(sess._consume_control_flags())
+
+    # Live history wiped
+    assert json.loads(iac._chat_history_path("p").read_text()) == []
+    assert sess._chat_history == []
+    # Archive contains every prior record, in order
+    archived = json.loads(iac._chat_archive_path("p").read_text())
+    assert archived == seed
+
+
+def test_clear_chat_archive_appends_across_multiple_clears(patch_iac_paths):
+    iac = patch_iac_paths
+    sess = _make_control_session(
+        iac,
+        "p",
+        cfg={"type": "internal", "name": "p", "status": "online"},
+    )
+
+    # First clear: 2 records.
+    iac._chat_history_path("p").write_text(
+        json.dumps([{"role": "user", "content": "first-batch"}])
+    )
+    sess._do_clear_chat([])
+
+    # Second clear: 1 record.
+    iac._chat_history_path("p").write_text(
+        json.dumps([{"role": "assistant", "content": "second-batch"}])
+    )
+    sess._do_clear_chat([])
+
+    archived = json.loads(iac._chat_archive_path("p").read_text())
+    # Both batches in the archive, in order — archive is append-only.
+    assert [m["content"] for m in archived] == ["first-batch", "second-batch"]
+
+
+def test_clear_chat_with_empty_history_still_writes_audit(patch_iac_paths):
+    iac = patch_iac_paths
+    sess = _make_control_session(
+        iac,
+        "p",
+        cfg={"type": "internal", "name": "p", "status": "online"},
+    )
+    iac._chat_history_path("p").write_text("[]")
+
+    sess._do_clear_chat([])
+
+    # Archive remains empty (nothing to copy).
+    assert json.loads(iac._chat_archive_path("p").read_text()) == []
+    # Audit still records the action with archived_count=0.
+    audit = _read_audit_log(iac, "p")
+    assert len(audit) == 1
+    assert audit[0]["action"] == iac.CONTROL_CLEAR_CHAT
+    assert audit[0]["ok"] is True
+    assert audit[0]["archived_count"] == 0
+    assert "ts" in audit[0]
+
+
+def test_clear_chat_aborts_when_archive_fails(patch_iac_paths, monkeypatch):
+    """If the archive step fails, the live chat_history.json must NOT be
+    truncated and the control flag must stay set so the next sweep retries.
+    """
+    iac = patch_iac_paths
+    cfg = {
+        "type": "internal",
+        "name": "p",
+        "status": "online",
+        iac.CONTROL_FIELD: {iac.CONTROL_CLEAR_CHAT: True},
+    }
+    _seed_agents(iac, [cfg])
+    sess = _make_control_session(iac, "p", cfg=cfg)
+    seed = [{"role": "user", "content": "must-not-be-lost"}]
+    sess._chat_history = list(seed)
+    iac._chat_history_path("p").write_text(json.dumps(seed))
+
+    def _failing_archive(name):
+        return False, 0, "simulated disk full"
+
+    monkeypatch.setattr(iac, "_archive_chat_history", _failing_archive)
+
+    _run(sess._consume_control_flags())
+
+    # Live history preserved.
+    assert json.loads(iac._chat_history_path("p").read_text()) == seed
+    assert sess._chat_history == seed
+    # Flag still set so next sweep retries.
+    agents_after = json.loads(iac.AGENTS_FILE.read_text())
+    assert (
+        agents_after[0].get(iac.CONTROL_FIELD, {}).get(iac.CONTROL_CLEAR_CHAT) is True
+    )
+    # Audit captured the failure.
+    audit = _read_audit_log(iac, "p")
+    assert len(audit) == 1
+    assert audit[0]["action"] == iac.CONTROL_CLEAR_CHAT
+    assert audit[0]["ok"] is False
+    assert audit[0]["error"] == "simulated disk full"
+
+
+def test_clear_chat_refuses_when_chat_history_is_not_a_list(patch_iac_paths):
+    """If `chat_history.json` is corrupt or hand-edited into a non-list
+    shape, the archive helper must REFUSE to truncate so the operator
+    can recover the original bytes manually.
+    """
+    iac = patch_iac_paths
+    cfg = {
+        "type": "internal",
+        "name": "p",
+        "status": "online",
+        iac.CONTROL_FIELD: {iac.CONTROL_CLEAR_CHAT: True},
+    }
+    _seed_agents(iac, [cfg])
+    sess = _make_control_session(iac, "p", cfg=cfg)
+    # Corrupt content — a JSON object instead of a list.
+    iac._chat_history_path("p").write_text(json.dumps({"oops": "wrong shape"}))
+
+    _run(sess._consume_control_flags())
+
+    # Original bytes preserved verbatim.
+    assert json.loads(iac._chat_history_path("p").read_text()) == {
+        "oops": "wrong shape"
+    }
+    # Flag still set so the next sweep retries (or, in practice, an
+    # operator notices and fixes the file).
+    agents_after = json.loads(iac.AGENTS_FILE.read_text())
+    assert (
+        agents_after[0].get(iac.CONTROL_FIELD, {}).get(iac.CONTROL_CLEAR_CHAT) is True
+    )
+    # Audit captured the failure with a descriptive error.
+    audit = _read_audit_log(iac, "p")
+    assert len(audit) == 1
+    assert audit[0]["ok"] is False
+    assert "not a JSON list" in audit[0]["error"]
+
+
+def test_clear_chat_audit_on_success_includes_archive_metadata(patch_iac_paths):
+    iac = patch_iac_paths
+    sess = _make_control_session(
+        iac,
+        "p",
+        cfg={"type": "internal", "name": "p", "status": "online"},
+    )
+    iac._chat_history_path("p").write_text(
+        json.dumps([{"role": "user", "content": "x"}])
+    )
+
+    sess._do_clear_chat([])
+
+    audit = _read_audit_log(iac, "p")
+    assert len(audit) == 1
+    e = audit[0]
+    assert e["action"] == iac.CONTROL_CLEAR_CHAT
+    assert e["ok"] is True
+    assert e["archived_count"] == 1
+    assert e["archive_path"] == str(iac._chat_archive_path("p"))
+
+
+# ---------------------------------------------------------------------------
+# clear_session control_audit log
+# ---------------------------------------------------------------------------
+
+
+def test_clear_session_audit_on_success(patch_iac_paths, monkeypatch):
+    iac = patch_iac_paths
+    cfg = {
+        "type": "internal",
+        "name": "p",
+        "status": "online",
+        iac.CONTROL_FIELD: {iac.CONTROL_CLEAR_SESSION: True},
+    }
+    _seed_agents(iac, [cfg])
+    sess = _make_control_session(iac, "p", cfg=cfg)
+    sess._session_id = "old-session-id"
+
+    async def _fake_connect(self):
+        self._session_id = "new-session-id"
+
+    monkeypatch.setattr(
+        iac.InternalAgentSession, "_connect_sdk", _fake_connect, raising=True
+    )
+
+    _run(sess._consume_control_flags())
+
+    audit = _read_audit_log(iac, "p")
+    assert len(audit) == 1
+    e = audit[0]
+    assert e["action"] == iac.CONTROL_CLEAR_SESSION
+    assert e["ok"] is True
+    assert e["prior_session_id"] == "old-session-id"
+    assert e["new_session_id"] == "new-session-id"
+
+
+def test_clear_session_audit_on_reconnect_failure(patch_iac_paths, monkeypatch):
+    iac = patch_iac_paths
+    cfg = {
+        "type": "internal",
+        "name": "p",
+        "status": "online",
+        iac.CONTROL_FIELD: {iac.CONTROL_CLEAR_SESSION: True},
+    }
+    _seed_agents(iac, [cfg])
+    sess = _make_control_session(iac, "p", cfg=cfg)
+    sess._session_id = "old-session-id"
+
+    async def _failing_connect(self):
+        raise RuntimeError("no SDK for you")
+
+    monkeypatch.setattr(
+        iac.InternalAgentSession, "_connect_sdk", _failing_connect, raising=True
+    )
+
+    _run(sess._consume_control_flags())
+
+    audit = _read_audit_log(iac, "p")
+    assert len(audit) == 1
+    e = audit[0]
+    assert e["action"] == iac.CONTROL_CLEAR_SESSION
+    assert e["ok"] is False
+    assert e["error"] == "no SDK for you"
+    assert e["prior_session_id"] == "old-session-id"
+    # New id is None because the failed reconnect never set one.
+    assert e["new_session_id"] is None
+
+
+def test_audit_log_appends_across_multiple_actions(patch_iac_paths, monkeypatch):
+    """Two sequential clear_chat ops produce two audit entries in order."""
+    iac = patch_iac_paths
+    sess = _make_control_session(
+        iac,
+        "p",
+        cfg={"type": "internal", "name": "p", "status": "online"},
+    )
+
+    iac._chat_history_path("p").write_text(
+        json.dumps([{"role": "user", "content": "round-1"}])
+    )
+    sess._do_clear_chat([])
+    iac._chat_history_path("p").write_text(
+        json.dumps([{"role": "user", "content": "round-2"}])
+    )
+    sess._do_clear_chat([])
+
+    audit = _read_audit_log(iac, "p")
+    assert len(audit) == 2
+    assert all(e["action"] == iac.CONTROL_CLEAR_CHAT for e in audit)
+    assert [e["archived_count"] for e in audit] == [1, 1]
+
+
+def test_audit_log_is_global_and_carries_agent_field(patch_iac_paths):
+    """Two different agents writing audit entries land in the SAME global
+    JSONL file and each line carries an `agent` field for filtering.
+    """
+    iac = patch_iac_paths
+    sess_a = _make_control_session(
+        iac,
+        "alpha",
+        cfg={"type": "internal", "name": "alpha", "status": "online"},
+    )
+    sess_b = _make_control_session(
+        iac,
+        "beta",
+        cfg={"type": "internal", "name": "beta", "status": "online"},
+    )
+
+    iac._chat_history_path("alpha").write_text(
+        json.dumps([{"role": "user", "content": "from-alpha"}])
+    )
+    iac._chat_history_path("beta").write_text(
+        json.dumps([{"role": "user", "content": "from-beta"}])
+    )
+    sess_a._do_clear_chat([])
+    sess_b._do_clear_chat([])
+
+    # Single global file, JSONL-encoded.
+    raw_lines = [
+        ln for ln in iac.CONTROL_AUDIT_LOG.read_text().splitlines() if ln.strip()
+    ]
+    assert len(raw_lines) == 2
+    parsed = [json.loads(ln) for ln in raw_lines]
+    # Each line has an `agent` field; ordering reflects write order.
+    assert [e["agent"] for e in parsed] == ["alpha", "beta"]
+    # Helper-level filter pulls just one agent's entries.
+    assert [e["agent"] for e in _read_audit_log(iac, "alpha")] == ["alpha"]
+    assert [e["agent"] for e in _read_audit_log(iac, "beta")] == ["beta"]
+    # Helper without filter returns both.
+    assert len(_read_audit_log(iac)) == 2

@@ -15,7 +15,30 @@ from pathlib import Path
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-from app.shared import CHAT_HISTORY_PATH, CHAT_META_PATH, _write_json_atomic
+from app.shared import _write_json_atomic
+
+# Pull the chat-path helpers + migrator from services/shared.py. We use
+# the same sys.path bootstrap pattern as scripts/register_internal_agent.py
+# so the bare-name `import shared` style is preserved and we end up with
+# the *same* module instance the daemon uses (avoids the dual-cache
+# problem of `import services.shared` + `import shared`).
+import sys as _sys
+from pathlib import Path as _Path
+
+_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "services"))
+from shared import (  # noqa: E402
+    chat_history_path as _chat_history_path,
+    ensure_chat_dir as _ensure_chat_dir,
+    load_session_id as _shared_load_session_id,
+    migrate_chat_layout as _migrate_chat_layout,
+    save_session_id as _shared_save_session_id,
+)
+
+# The portal is the "main" chat surface; everything lives under
+# /agent/memory/chat/main/ (history, archive, main.session). See
+# `shared.CHAT_DIR` for the canonical layout.
+_PORTAL_CHAT_NAME = "main"
+CHAT_HISTORY_PATH = str(_chat_history_path(_PORTAL_CHAT_NAME))
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -111,6 +134,21 @@ def _build_system_prompt(chat_history: list[dict] | None = None) -> str:
 _MAX_CHAT_HISTORY = 200  # cap persisted messages
 
 
+# Move legacy chat files (memory/chat_history.json, memory/chat_meta.json,
+# messages/internal/<name>/chat_history*.json, memory/sessions/internal/<name>.session)
+# into the unified /agent/memory/chat/<name>/ layout. Idempotent — a
+# sentinel inside CHAT_DIR makes subsequent calls cheap. We do this at
+# module import time so the very first _load_chat_history() call hits
+# the new path even if the daemon hasn't run yet.
+try:
+    _migrate_chat_layout()
+    _ensure_chat_dir(_PORTAL_CHAT_NAME)
+except Exception:
+    # Non-fatal: chat will still work against the new path; the daemon's
+    # own startup will retry the migration if anything was left behind.
+    pass
+
+
 def _load_chat_history() -> list:
     """Load chat history from disk."""
     try:
@@ -127,13 +165,14 @@ def _save_chat_history(messages: list) -> None:
 
 
 def _load_chat_meta() -> dict:
-    """Load persisted SDK metadata (resume session id, etc.)."""
-    try:
-        with open(CHAT_META_PATH) as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+    """Return ``{"session_id": <id-or-None>}`` for the portal chat.
+
+    The session id is stored as a bare-string sidecar under
+    /agent/memory/chat/main/main.session; this function preserves the
+    legacy ``dict`` return shape used elsewhere in this module.
+    """
+    sid = _shared_load_session_id(_PORTAL_CHAT_NAME)
+    return {"session_id": sid} if sid else {}
 
 
 def _save_chat_session_id(session_id: str | None) -> None:
@@ -141,11 +180,9 @@ def _save_chat_session_id(session_id: str | None) -> None:
     streamlit process restarts."""
     if not session_id:
         return
-    meta = _load_chat_meta()
-    if meta.get("session_id") == session_id:
+    if _shared_load_session_id(_PORTAL_CHAT_NAME) == session_id:
         return
-    meta["session_id"] = session_id
-    _write_json_atomic(CHAT_META_PATH, meta, indent=2)
+    _shared_save_session_id(_PORTAL_CHAT_NAME, session_id)
 
 
 # ── Module-level cleanup helpers (used by atexit + weakref.finalize) ───────
@@ -829,7 +866,11 @@ def render():
                         pass
             # Wipe persisted resume id so the new singleton starts fresh.
             try:
-                _write_json_atomic(CHAT_META_PATH, {}, indent=2)
+                from shared import session_path as _session_path
+
+                p = _session_path(_PORTAL_CHAT_NAME)
+                if p.exists():
+                    p.write_text("")
             except Exception:
                 pass
             st.session_state.chat_messages = []

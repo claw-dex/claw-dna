@@ -8,10 +8,11 @@ sessions, one per registered *internal* agent in
 
 No HTTP surface. Inputs come from the filesystem:
 
-  /agent/messages/internal/<name>/inbox.json          # senders drop envelopes
-  /agent/messages/internal/<name>/inbox_history.json  # daemon archives drained
-  /agent/messages/internal/<name>/chat_history.json   # turn-by-turn transcript
-  /agent/memory/sessions/internal/<name>.session      # SDK resume id
+  /agent/messages/internal/<name>/inbox.json              # senders drop envelopes
+  /agent/messages/internal/<name>/inbox_history.json      # daemon archives drained
+  /agent/memory/chat/<name>/chat_history.json             # turn-by-turn transcript
+  /agent/memory/chat/<name>/chat_history_archive.json     # records preserved across clear_chat
+  /agent/memory/chat/<name>/<name>.session                # SDK resume id (bare string)
 
 Per-message flow:
 
@@ -42,6 +43,7 @@ Setup (no port — heartbeat-only liveness):
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import logging
 import queue
 import signal
@@ -58,8 +60,15 @@ from shared import (
     INBOX_FILE,
     MESSAGES_DIR,
     append_to_history,
+    chat_archive_path,
+    chat_history_path,
+    ensure_chat_dir,
+    load_session_id,
     locked_json_rw,
+    migrate_chat_layout,
     read_json_file,
+    save_session_id,
+    session_path,
     surface_error,
     write_to_inbox,
     write_to_outbox,
@@ -79,9 +88,13 @@ from claude_agent_sdk import (
 BASE = Path("/agent")
 AGENTS_FILE = BASE / "memory" / "agents.json"
 INTERNAL_DIR = MESSAGES_DIR / "internal"
-SESSIONS_DIR = BASE / "memory" / "sessions" / "internal"
 LOG_DIR = BASE / "memory" / "logs"
 LOG_FILE = LOG_DIR / "internal_agent_chat.log"
+# Global JSONL audit log for operator-driven control-flag actions across
+# every internal agent. One JSON object per line; each line carries an
+# `agent` field so a single tail/grep can reconstruct the clear-history
+# of any agent.
+CONTROL_AUDIT_LOG = LOG_DIR / "internal-agent-control-audit.log"
 HEARTBEAT_DIR = BASE / "memory" / "heartbeats"
 HEARTBEAT_FILE = HEARTBEAT_DIR / "internal_agent_chat.heartbeat"
 
@@ -127,12 +140,26 @@ def _inbox_history_path(name: str) -> Path:
     return _agent_dir(name) / "inbox_history.json"
 
 
+# Chat-side helpers (history / archive / session sidecar) are thin
+# wrappers around the canonical `services.shared` paths so tests can keep
+# using `iac._chat_history_path(name)` style access. The actual files
+# live under `/agent/memory/chat/<name>/` — see CHAT_DIR in shared.py.
 def _chat_history_path(name: str) -> Path:
-    return _agent_dir(name) / "chat_history.json"
+    return chat_history_path(name)
+
+
+def _chat_archive_path(name: str) -> Path:
+    """Append-only archive of chat records preserved across `clear_chat`.
+
+    Every `clear_chat` op moves the live `chat_history.json` contents into
+    this file *before* truncation, so cleared turns are recoverable. Like
+    `chat_history.json`, this file is never truncated by the daemon.
+    """
+    return chat_archive_path(name)
 
 
 def _session_path(name: str) -> Path:
-    return SESSIONS_DIR / (name + ".session")
+    return session_path(name)
 
 
 # Operator-driven clears are encoded as boolean flags inside the agent's
@@ -149,11 +176,125 @@ CONTROL_CLEAR_SESSION = "clear_session"
 
 
 def _ensure_agent_files(name: str) -> None:
+    # Inbox files stay under /agent/messages/internal/<name>/.
     d = _agent_dir(name)
     d.mkdir(parents=True, exist_ok=True)
-    for f in (_inbox_path(name), _inbox_history_path(name), _chat_history_path(name)):
+    for f in (_inbox_path(name), _inbox_history_path(name)):
         if not f.exists():
             f.write_text("[]")
+    # Chat files (history, archive, .session) live under
+    # /agent/memory/chat/<name>/ — see CHAT_DIR in shared.py. A failure
+    # here would leave the agent half-registered (inbox present, chat
+    # missing); surface it loudly and re-raise so the caller can decide
+    # whether to retry or roll back.
+    try:
+        ensure_chat_dir(name)
+    except OSError as exc:
+        log.error(
+            "[%s] could not create chat dir %s: %s",
+            name,
+            chat_history_path(name).parent,
+            exc,
+        )
+        surface_error(
+            "internal_agent_chat",
+            "ensure_chat_dir failed for " + name + ": " + str(exc),
+            context="ensure_agent_files:" + name,
+        )
+        raise
+
+
+def _archive_chat_history(name: str) -> tuple[bool, int, str | None]:
+    """Atomically move the live chat_history.json contents into the
+    archive.
+
+    Steps, in order:
+      1. Under the source file lock: capture the records and truncate
+         `chat_history.json` to ``[]`` in a single read-modify-write so
+         no record can be appended between read and clear (TOCTOU-safe).
+         If the on-disk content is not a JSON list (corrupted /
+         hand-edited), the truncation is REFUSED and the original bytes
+         are preserved so the operator can intervene.
+      2. Under the destination file lock: append the captured records
+         to `chat_history_archive.json` (append-only, unbounded).
+      3. On archive-write failure, restore the captured records to the
+         source file under its lock so the live state is recovered.
+
+    Returns ``(ok, archived_count, error_message)``. Caller truncates
+    nothing else: the truncate is part of the swap.
+    """
+    src = _chat_history_path(name)
+    dst = _chat_archive_path(name)
+
+    captured: dict = {"records": None, "error": None}
+
+    def _swap(items):
+        if not isinstance(items, list):
+            captured["error"] = "chat_history.json is not a JSON list"
+            # Refuse the truncate — leave the file untouched.
+            return items
+        captured["records"] = list(items)
+        return []
+
+    if not locked_json_rw(_swap, json_file=src, default=[]):
+        return False, 0, "locked_json_rw on chat_history failed"
+    if captured["error"] is not None:
+        return False, 0, captured["error"]
+
+    records = captured["records"] or []
+    if not records:
+        return True, 0, None
+
+    def _append(items):
+        if not isinstance(items, list):
+            items = []
+        items.extend(records)
+        return items
+
+    if locked_json_rw(_append, json_file=dst, default=[]):
+        return True, len(records), None
+
+    # Archive write failed — put the captured records back in the live
+    # file so we don't leave the operator with truncated, unarchived data.
+    def _restore(items):
+        if not isinstance(items, list):
+            items = []
+        # Prepend the captured records ahead of anything that landed
+        # between the swap and the rollback (defensive — same-task usage
+        # makes this case unlikely).
+        return list(records) + items
+
+    locked_json_rw(_restore, json_file=src, default=[])
+    return False, 0, "locked_json_rw on archive failed (records restored to live file)"
+
+
+def _append_audit_entry(name: str, entry: dict) -> None:
+    """Append one JSONL line to the global control-audit log.
+
+    Each line is a JSON object with the agent name merged in as the
+    leading `agent` field, so a single tail/grep over
+    ``CONTROL_AUDIT_LOG`` reconstructs every clear action across every
+    agent. The append is serialized via a sidecar `.lock` flock and the
+    file is opened in O_APPEND mode so concurrent writers stay
+    line-aligned.
+
+    Best-effort: a failure is logged but never raised, so an audit-write
+    glitch cannot abort the operator action it is recording.
+    """
+    record = {"agent": name, **entry}
+    line = json.dumps(record, separators=(",", ":")) + "\n"
+    try:
+        CONTROL_AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = str(CONTROL_AUDIT_LOG) + ".lock"
+        with open(lock_path, "a+") as lock_f:
+            fcntl.flock(lock_f, fcntl.LOCK_EX)
+            try:
+                with open(CONTROL_AUDIT_LOG, "a", encoding="utf-8") as f:
+                    f.write(line)
+            finally:
+                fcntl.flock(lock_f, fcntl.LOCK_UN)
+    except Exception as exc:
+        log.warning("[%s] control-audit append raised: %s", name, exc)
 
 
 def _load_agents() -> list:
@@ -291,6 +432,14 @@ def _build_system_prompt(
                 parts.append("</public_url>")
         except (json.JSONDecodeError, OSError):
             pass
+    if CLAUDE_SYSTEM_PROMPT_MD.exists():
+        parts.append("<claude_system_prompt>")
+        parts.append(CLAUDE_SYSTEM_PROMPT_MD.read_text())
+        parts.append("</claude_system_prompt>")
+    if custom_appendix:
+        parts.append("<internal_agent_system_prompt>")
+        parts.append(custom_appendix)
+        parts.append("</internal_agent_system_prompt>")
     if chat_history:
         selected = _select_history_for_prompt(chat_history)
         if selected:
@@ -304,14 +453,6 @@ def _build_system_prompt(
                 content = msg.get("content", "")
                 parts.append("**" + str(role) + "**: " + str(content))
             parts.append("</previous_chat_history>")
-    if CLAUDE_SYSTEM_PROMPT_MD.exists():
-        parts.append("<claude_system_prompt>")
-        parts.append(CLAUDE_SYSTEM_PROMPT_MD.read_text())
-        parts.append("</claude_system_prompt>")
-    if custom_appendix:
-        parts.append("<internal_agent_system_prompt>")
-        parts.append(custom_appendix)
-        parts.append("</internal_agent_system_prompt>")
     return "\n".join(parts)
 
 
@@ -691,7 +832,6 @@ class InternalAgentSession:
 
     def start(self) -> None:
         _ensure_agent_files(self.name)
-        SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
         self._thread.start()
         if not self._ready.wait(timeout=SDK_CONNECT_TIMEOUT):
             raise TimeoutError(
@@ -759,13 +899,23 @@ class InternalAgentSession:
         # per-agent customizations are:
         #   1. an optional `system_prompt` appended to the shared prompt;
         #   2. the per-session `send_reply` MCP tool, whose description
-        #      is built from this agent's outbox_routing_rules.
+        #      is built from this agent's outbox_routing_rules;
+        #   3. an optional `model` override (haiku/sonnet/opus, or a full
+        #      model id) — passed through to the SDK, which handles alias
+        #      → id resolution. Absent or blank → SDK default.
         custom = self.cfg.get("system_prompt") or ""
         if not isinstance(custom, str):
             custom = ""
+        raw_model = self.cfg.get("model")
+        model = (
+            raw_model.strip()
+            if isinstance(raw_model, str) and raw_model.strip()
+            else None
+        )
         routing_server = _build_send_reply_server(self.name, self.cfg)
         return ClaudeAgentOptions(
             system_prompt=_build_system_prompt(self._chat_history, custom),
+            model=model,
             permission_mode="bypassPermissions",
             include_partial_messages=False,
             cwd="/agent",
@@ -1123,19 +1273,11 @@ class InternalAgentSession:
         self._chat_history.append(asst_rec)
 
     def _load_session_id(self) -> str | None:
-        p = _session_path(self.name)
-        if not p.exists():
-            return None
-        try:
-            sid = p.read_text().strip()
-        except OSError:
-            return None
-        return sid or None
+        return load_session_id(self.name)
 
     def _save_session_id(self, sid: str) -> None:
         try:
-            SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-            _session_path(self.name).write_text(sid)
+            save_session_id(self.name, sid)
         except OSError as exc:
             log.warning("[%s] could not persist session id: %s", self.name, exc)
 
@@ -1184,56 +1326,10 @@ class InternalAgentSession:
         processed: list[str] = []
 
         if ctl.get(CONTROL_CLEAR_CHAT):
-            try:
-
-                def _rw(_items):
-                    return []
-
-                locked_json_rw(_rw, json_file=_chat_history_path(self.name), default=[])
-                self._chat_history = []
-                log.info("[%s] cleared chat history (operator request)", self.name)
-                processed.append(CONTROL_CLEAR_CHAT)
-            except Exception as exc:
-                log.error("[%s] clear_chat failed: %s", self.name, exc, exc_info=True)
-                surface_error(
-                    "internal_agent_chat",
-                    exc,
-                    context="clear_chat:" + self.name,
-                )
+            self._do_clear_chat(processed)
 
         if ctl.get(CONTROL_CLEAR_SESSION):
-            try:
-                try:
-                    _session_path(self.name).unlink()
-                except FileNotFoundError:
-                    pass
-                self._session_id = None
-                if self._sdk is not None:
-                    try:
-                        await self._sdk.disconnect()
-                    except Exception as exc:
-                        log.warning(
-                            "[%s] disconnect during clear_session failed: %s",
-                            self.name,
-                            exc,
-                        )
-                    self._sdk = None
-                await self._connect_sdk()
-                log.info(
-                    "[%s] cleared SDK session and reconnected (operator request)",
-                    self.name,
-                )
-                processed.append(CONTROL_CLEAR_SESSION)
-            except Exception as exc:
-                log.error(
-                    "[%s] clear_session failed: %s", self.name, exc, exc_info=True
-                )
-                surface_error(
-                    "internal_agent_chat",
-                    exc,
-                    context="clear_session:" + self.name,
-                )
-                # Flag stays set in agents.json so the next sweep retries.
+            await self._do_clear_session(processed)
 
         if processed:
             try:
@@ -1245,6 +1341,128 @@ class InternalAgentSession:
                     processed,
                     exc,
                 )
+
+    def _do_clear_chat(self, processed: list[str]) -> None:
+        """Archive then truncate `chat_history.json` atomically. Always
+        emits an audit entry. If the archive step fails, the live file
+        is left intact (or restored) and the control flag stays set so
+        the next sweep retries — the user's data is never destroyed
+        without a successful archive.
+        """
+        ok_archive, archived_count, archive_err = _archive_chat_history(self.name)
+        archive_path_str = str(_chat_archive_path(self.name))
+        if not ok_archive:
+            log.error(
+                "[%s] clear_chat ABORTED — archive failed: %s",
+                self.name,
+                archive_err,
+            )
+            surface_error(
+                "internal_agent_chat",
+                "clear_chat archive failed: " + str(archive_err),
+                context="clear_chat:" + self.name,
+            )
+            _append_audit_entry(
+                self.name,
+                {
+                    "action": CONTROL_CLEAR_CHAT,
+                    "ts": _now_iso(),
+                    "ok": False,
+                    "error": archive_err,
+                    "archived_count": 0,
+                    "archive_path": archive_path_str,
+                },
+            )
+            # Flag stays set in agents.json so the next sweep retries.
+            return
+
+        # Archive succeeded — chat_history.json is already truncated as
+        # part of the atomic swap inside _archive_chat_history. Sync the
+        # in-memory copy so the next turn rebuilds the system prompt
+        # without the cleared history.
+        self._chat_history = []
+        log.info(
+            "[%s] cleared chat history (operator request); archived %d records",
+            self.name,
+            archived_count,
+        )
+        _append_audit_entry(
+            self.name,
+            {
+                "action": CONTROL_CLEAR_CHAT,
+                "ts": _now_iso(),
+                "ok": True,
+                "archived_count": archived_count,
+                "archive_path": archive_path_str,
+            },
+        )
+        processed.append(CONTROL_CLEAR_CHAT)
+
+    async def _do_clear_session(self, processed: list[str]) -> None:
+        """Drop the SDK resume id, disconnect, and reconnect. Always emits
+        an audit entry capturing the prior session id (so an operator can
+        still grep SDK logs for it) and the new id observed at audit-time.
+
+        Note on `new_session_id` in the audit entry: a fresh session id
+        is only known after the SDK emits its first ResultMessage, which
+        happens on the agent's first turn — not at connect time. So the
+        success-path audit entry typically records `new_session_id: None`
+        and the id appears in `chat_history.json` for the next turn. The
+        prior id remains the meaningful field for cross-referencing SDK
+        logs after a clear.
+        """
+        prior_session_id = self._session_id
+        try:
+            try:
+                _session_path(self.name).unlink()
+            except FileNotFoundError:
+                pass
+            self._session_id = None
+            if self._sdk is not None:
+                try:
+                    await self._sdk.disconnect()
+                except Exception as exc:
+                    log.warning(
+                        "[%s] disconnect during clear_session failed: %s",
+                        self.name,
+                        exc,
+                    )
+                self._sdk = None
+            await self._connect_sdk()
+            log.info(
+                "[%s] cleared SDK session and reconnected (operator request)",
+                self.name,
+            )
+            _append_audit_entry(
+                self.name,
+                {
+                    "action": CONTROL_CLEAR_SESSION,
+                    "ts": _now_iso(),
+                    "ok": True,
+                    "prior_session_id": prior_session_id,
+                    "new_session_id": self._session_id,
+                },
+            )
+            processed.append(CONTROL_CLEAR_SESSION)
+        except Exception as exc:
+            log.error("[%s] clear_session failed: %s", self.name, exc, exc_info=True)
+            surface_error(
+                "internal_agent_chat",
+                exc,
+                context="clear_session:" + self.name,
+            )
+            _append_audit_entry(
+                self.name,
+                {
+                    "action": CONTROL_CLEAR_SESSION,
+                    "ts": _now_iso(),
+                    "ok": False,
+                    "error": str(exc),
+                    "prior_session_id": prior_session_id,
+                    "new_session_id": self._session_id,
+                },
+            )
+            # Flag stays set in agents.json so the next sweep retries.
 
 
 # ---------------------------------------------------------------------------
@@ -1369,7 +1587,6 @@ def _configure_logging() -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     HEARTBEAT_DIR.mkdir(parents=True, exist_ok=True)
     INTERNAL_DIR.mkdir(parents=True, exist_ok=True)
-    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
@@ -1385,6 +1602,19 @@ def main() -> int:
     log.info("=" * 60)
     log.info("Internal Agent Chat daemon starting")
     log.info("=" * 60)
+
+    # Move any pre-existing chat files into /agent/memory/chat/<name>/.
+    # Idempotent (sentinel file inside CHAT_DIR), so cheap to call on every
+    # start. Without this, an upgrade from the legacy layout would leave
+    # the daemon reading empty new files while the real history sits at
+    # the old paths.
+    try:
+        report = migrate_chat_layout()
+        if not report.get("skipped"):
+            log.info("chat-layout migration: %s", report)
+    except Exception as exc:
+        log.error("chat-layout migration failed: %s", exc, exc_info=True)
+        surface_error("internal_agent_chat", exc, context="migrate_chat_layout")
 
     fleet = Fleet()
     stop_requested = {"v": False}

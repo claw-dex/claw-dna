@@ -8,10 +8,12 @@ and webhook_receiver's whatsapp sub-handler).
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import logging
 import os
+import shutil
 import tempfile
 import time as _time
 from datetime import datetime, timezone
@@ -47,6 +49,18 @@ def _timed_flock(lock_f, timeout: float = _FLOCK_TIMEOUT):
 # --- Canonical paths ---
 MESSAGES_DIR = Path("/agent/messages")
 INBOX_FILE = MESSAGES_DIR / "inbox.json"
+# Unified per-surface chat layout. Both the portal (name="main") and every
+# internal-agent (name=<agent name>) keep their chat history, the
+# clear_chat archive, and the SDK resume-id sidecar in one directory:
+#     /agent/memory/chat/<name>/{chat_history.json, chat_history_archive.json,
+#                                <name>.session}
+# Inbox files (inbox.json, inbox_history.json) are unrelated to chat and
+# stay under /agent/messages/internal/<name>/ — they are not touched by
+# the chat-path helpers below.
+CHAT_DIR = Path("/agent/memory/chat")
+# Sentinel file written once after `migrate_chat_layout` succeeds so the
+# migrator does not re-walk the legacy paths on every process restart.
+CHAT_MIGRATION_SENTINEL = CHAT_DIR / ".migration_done"
 
 
 def atomic_write_json(path: Path, data, **kwargs):
@@ -429,3 +443,235 @@ def append_to_history(items: list, history_file: Path, *, max_entries: int = 500
                 fcntl.flock(lock_f, fcntl.LOCK_UN)
     except Exception as e:
         log.warning(f"Failed to write {history_file.name}: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Per-surface chat path helpers — see CHAT_DIR docstring above.
+# ---------------------------------------------------------------------------
+
+
+def chat_dir(name: str) -> Path:
+    return CHAT_DIR / name
+
+
+def chat_history_path(name: str) -> Path:
+    return chat_dir(name) / "chat_history.json"
+
+
+def chat_archive_path(name: str) -> Path:
+    return chat_dir(name) / "chat_history_archive.json"
+
+
+def session_path(name: str) -> Path:
+    """Bare-string sidecar holding the SDK resume id for this surface."""
+    return chat_dir(name) / (name + ".session")
+
+
+def ensure_chat_dir(name: str) -> None:
+    """Create the per-surface chat directory and its three files.
+
+    Idempotent: existing files are left untouched. The session sidecar
+    starts empty (no resume id yet); history and archive start as ``[]``.
+    """
+    d = chat_dir(name)
+    d.mkdir(parents=True, exist_ok=True)
+    for f in (chat_history_path(name), chat_archive_path(name)):
+        if not f.exists():
+            f.write_text("[]")
+    sp = session_path(name)
+    if not sp.exists():
+        sp.write_text("")
+
+
+def load_session_id(name: str) -> str | None:
+    """Read the SDK resume id for *name*. Returns None when unknown."""
+    p = session_path(name)
+    if not p.exists():
+        return None
+    try:
+        sid = p.read_text().strip()
+    except OSError:
+        return None
+    return sid or None
+
+
+def save_session_id(name: str, sid: str) -> None:
+    """Persist the SDK resume id for *name* via an atomic write."""
+    if not isinstance(sid, str) or not sid.strip():
+        return
+    chat_dir(name).mkdir(parents=True, exist_ok=True)
+    target = session_path(name)
+    # Bare-string sidecar — write atomically by temp + replace so a crash
+    # mid-write cannot leave the file half-written.
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(target.parent), prefix=".session.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(sid.strip())
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, target)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+# ---------------------------------------------------------------------------
+# One-shot migrator: legacy layouts → /agent/memory/chat/<name>/.
+# Called from the portal and the internal-agent daemon at startup.
+# ---------------------------------------------------------------------------
+
+
+def migrate_chat_layout(
+    *,
+    legacy_memory_dir: Path = Path("/agent/memory"),
+    legacy_messages_internal: Path = Path("/agent/messages/internal"),
+    legacy_sessions_dir: Path = Path("/agent/memory/sessions/internal"),
+) -> dict:
+    """Move legacy chat files into the unified `/agent/memory/chat/` layout.
+
+    Migrations performed (each is independently idempotent — a step is
+    skipped if its destination already exists):
+
+    1. Portal history: ``<memory>/chat_history.json`` → ``chat/main/chat_history.json``
+    2. Portal session: ``<memory>/chat_meta.json`` → unwrap ``session_id`` →
+       ``chat/main/main.session`` (bare string), then delete the old file.
+    3. Internal-agent history & archive: for every directory under
+       ``messages/internal/<name>/`` move ``chat_history.json`` and
+       ``chat_history_archive.json`` (when present) into
+       ``chat/<name>/``.
+    4. Internal-agent session sidecars: every
+       ``memory/sessions/internal/<name>.session`` is moved to
+       ``chat/<name>/<name>.session``.
+
+    A sentinel at ``CHAT_MIGRATION_SENTINEL`` short-circuits subsequent
+    calls so this is cheap to invoke unconditionally on every startup.
+
+    Returns a small report dict (counts per category) — primarily useful
+    for tests; production code can ignore it.
+    """
+    report: dict = {
+        "portal_history": False,
+        "portal_session": False,
+        "internal_history": 0,
+        "internal_archive": 0,
+        "internal_session": 0,
+        "skipped": True,
+    }
+
+    if CHAT_MIGRATION_SENTINEL.exists():
+        return report
+    report["skipped"] = False
+
+    CHAT_DIR.mkdir(parents=True, exist_ok=True)
+
+    def _move(src: Path, dst: Path) -> bool:
+        if not src.exists():
+            return False
+        if dst.exists():
+            return False
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.replace(src, dst)
+            return True
+        except OSError as exc:
+            # `os.replace` only works within a single filesystem; on a
+            # cross-mount layout (bind mount / tmpfs / Docker volume) it
+            # raises EXDEV. Fall back to copy+unlink so the migrator
+            # works in those deployments too.
+            if getattr(exc, "errno", None) == errno.EXDEV:
+                try:
+                    shutil.move(str(src), str(dst))
+                    return True
+                except OSError as exc2:
+                    log.warning(
+                        "migrate_chat_layout: cross-fs move failed %s -> %s: %s",
+                        src,
+                        dst,
+                        exc2,
+                    )
+                    return False
+            log.warning(
+                "migrate_chat_layout: failed to move %s -> %s: %s", src, dst, exc
+            )
+            return False
+
+    # 1. Portal chat history.
+    src_hist = legacy_memory_dir / "chat_history.json"
+    dst_hist = chat_history_path("main")
+    if _move(src_hist, dst_hist):
+        report["portal_history"] = True
+
+    # 2. Portal session id (chat_meta.json -> main.session).
+    # The `portal_session` flag flips to True only after BOTH the new
+    # sidecar is in place AND the legacy file has been removed, so a
+    # crash mid-step leaves the on-disk world in a recoverable state
+    # (the next run re-enters and finishes the cleanup).
+    src_meta = legacy_memory_dir / "chat_meta.json"
+    dst_sess = session_path("main")
+    if src_meta.exists():
+        try:
+            if not dst_sess.exists():
+                data = json.loads(src_meta.read_text() or "{}")
+                sid = data.get("session_id") if isinstance(data, dict) else None
+                if isinstance(sid, str) and sid.strip():
+                    save_session_id("main", sid.strip())
+                else:
+                    # No session id to preserve — just create an empty
+                    # sidecar so the layout is consistent.
+                    ensure_chat_dir("main")
+            # If we reach here, the destination is in place either from
+            # this run or a previous partial run. Remove the legacy
+            # file; if unlink fails, leave portal_session=False so the
+            # next sweep retries (and re-confirm dst_sess existence
+            # cheaply).
+            try:
+                src_meta.unlink()
+                report["portal_session"] = True
+            except OSError as exc:
+                log.warning(
+                    "migrate_chat_layout: could not remove %s: %s", src_meta, exc
+                )
+        except Exception as exc:
+            log.warning(
+                "migrate_chat_layout: failed to convert chat_meta.json: %s", exc
+            )
+
+    # 3. Internal-agent history + archive.
+    if legacy_messages_internal.exists():
+        for agent_dir_path in legacy_messages_internal.iterdir():
+            if not agent_dir_path.is_dir():
+                continue
+            name = agent_dir_path.name
+            if _move(agent_dir_path / "chat_history.json", chat_history_path(name)):
+                report["internal_history"] += 1
+            if _move(
+                agent_dir_path / "chat_history_archive.json",
+                chat_archive_path(name),
+            ):
+                report["internal_archive"] += 1
+
+    # 4. Internal-agent session sidecars.
+    if legacy_sessions_dir.exists():
+        for sess_file in legacy_sessions_dir.iterdir():
+            if not sess_file.is_file() or sess_file.suffix != ".session":
+                continue
+            name = sess_file.stem
+            if _move(sess_file, session_path(name)):
+                report["internal_session"] += 1
+
+    # Mark migration complete so we don't re-walk on the next process boot.
+    try:
+        CHAT_MIGRATION_SENTINEL.write_text(_now_iso())
+    except OSError as exc:
+        log.warning("migrate_chat_layout: failed to write sentinel: %s", exc)
+
+    return report
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()

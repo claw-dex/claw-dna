@@ -2193,7 +2193,11 @@ def send_outbox_messages(
     token: str, chat_ids: list[str], state: dict, chat_history: dict
 ):
     """Forward unsent outbox messages to all authorized Telegram chats."""
-    from services.shared import read_outbox_locked
+    # Bare-name import to share `sys.modules["shared"]` with the rest of
+    # the daemon (and pytest fixtures that monkeypatch on `shared`). Using
+    # `services.shared` here would create a duplicate module instance with
+    # its own copy of CHAT_DIR / paths and silently drift from the rest.
+    from shared import read_outbox_locked
 
     outbox = read_outbox_locked()
     if not outbox:

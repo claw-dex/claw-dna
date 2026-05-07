@@ -14,11 +14,23 @@ import register_internal_agent as ria
 def redirect_paths(monkeypatch, tmp_path):
     agents_file = tmp_path / "memory" / "agents.json"
     internal_dir = tmp_path / "messages" / "internal"
+    chat_dir = tmp_path / "memory" / "chat"
     agents_file.parent.mkdir(parents=True, exist_ok=True)
     internal_dir.mkdir(parents=True, exist_ok=True)
+    chat_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(ria, "AGENTS_FILE", agents_file)
     monkeypatch.setattr(ria, "INTERNAL_DIR", internal_dir)
-    return {"agents": agents_file, "internal": internal_dir}
+    # Chat trio (chat_history.json, archive, .session) lives under the
+    # unified /agent/memory/chat/<name>/ tree — redirect that root too.
+    import shared as _services_shared
+
+    monkeypatch.setattr(_services_shared, "CHAT_DIR", chat_dir)
+    monkeypatch.setattr(
+        _services_shared,
+        "CHAT_MIGRATION_SENTINEL",
+        chat_dir / ".migration_done",
+    )
+    return {"agents": agents_file, "internal": internal_dir, "chat": chat_dir}
 
 
 def _args(**overrides):
@@ -29,6 +41,7 @@ def _args(**overrides):
         system_prompt_inline=None,
         outbox_routing_rules_file=None,
         outbox_routing_rules_inline=None,
+        model=None,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -107,10 +120,13 @@ def test_cmd_register_writes_minimal_entry(redirect_paths):
     assert "allowed_tools" not in a
     assert "permission_mode" not in a
     assert "cwd" not in a
-    # Files were created
+    # Inbox files are still under messages/internal/<name>/...
     assert (redirect_paths["internal"] / "planner" / "inbox.json").exists()
     assert (redirect_paths["internal"] / "planner" / "inbox_history.json").exists()
-    assert (redirect_paths["internal"] / "planner" / "chat_history.json").exists()
+    # ...but chat-side files now live under memory/chat/<name>/.
+    assert (redirect_paths["chat"] / "planner" / "chat_history.json").exists()
+    assert (redirect_paths["chat"] / "planner" / "chat_history_archive.json").exists()
+    assert (redirect_paths["chat"] / "planner" / "planner.session").exists()
 
 
 def test_cmd_register_with_system_prompt_and_rules(redirect_paths, tmp_path):
@@ -165,6 +181,39 @@ def test_cmd_register_merges_existing_entry(redirect_paths):
     assert len(agents) == 1
     assert agents[0]["responsibilities"] == "v2"
     assert agents[0]["system_prompt"] == "sp"
+
+
+def test_cmd_register_writes_model_when_provided(redirect_paths):
+    rc = ria.cmd_register(_args(model="haiku"))
+    assert rc == 0
+    agents = json.loads(redirect_paths["agents"].read_text())
+    assert agents[0]["model"] == "haiku"
+
+
+def test_cmd_register_omits_model_when_absent(redirect_paths):
+    ria.cmd_register(_args())  # model defaults to None
+    agents = json.loads(redirect_paths["agents"].read_text())
+    assert "model" not in agents[0]
+
+
+def test_cmd_register_blank_model_treated_as_absent(redirect_paths):
+    ria.cmd_register(_args(model="   "))
+    agents = json.loads(redirect_paths["agents"].read_text())
+    assert "model" not in agents[0]
+
+
+def test_cmd_register_strips_whitespace_around_model(redirect_paths):
+    ria.cmd_register(_args(model="  sonnet  "))
+    agents = json.loads(redirect_paths["agents"].read_text())
+    assert agents[0]["model"] == "sonnet"
+
+
+def test_cmd_register_merge_replaces_model(redirect_paths):
+    ria.cmd_register(_args(model="haiku"))
+    ria.cmd_register(_args(model="opus"))
+    agents = json.loads(redirect_paths["agents"].read_text())
+    assert len(agents) == 1
+    assert agents[0]["model"] == "opus"
 
 
 def test_cmd_register_revives_deactivated(redirect_paths):
