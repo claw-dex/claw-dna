@@ -16,13 +16,13 @@ paths:
       # Agent Console — operational tools
       ("🎛️ Command Center",   commands_tab,   "Command Center",  "Agent Console"),
       ("📓 Memory",            memory_tab,     "Memory",          "Agent Console"),
-      ("⚙️ System",            system_tab,     "System",          "Agent Console"),
-      ("🔧 Services & Cron",   services_tab,   "Services & Cron", "Agent Console"),
       ("🔭 Overview",          overview_tab,   "Overview",        "Agent Console"),
       ("🤖 Agents",            agents_tab,     "Agents",          "Agent Console"),
-      # Core — file / credential / email management
+      # Core — file / credential / email / system management
       ("📁 Workspace",         workspace_tab,  "Workspace",       "Core"),
       ("🔑 Credentials",       credential_tab, "Credentials",     "Core"),
       ("📧 Email",             emails_tab,     "Email",           "Core"),
+      ("⚙️ System",            system_tab,     "System",          "Core"),
+      ("🔧 Services & Cron",   services_tab,   "Services & Cron", "Core"),
   ]
   ```

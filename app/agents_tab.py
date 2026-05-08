@@ -24,7 +24,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh
 
 # Match `app/chat.py`'s sys.path bootstrap so we share the same
 # `sys.modules["shared"]` instance the daemon uses (avoids dual-cache).
@@ -41,6 +40,19 @@ from shared import (  # noqa: E402
     streaming_path,
     write_to_inbox,
 )
+
+from app.shared import GOALS_PATH, _STATUS_COLORS, _TYPE_COLORS, _badge  # noqa: E402
+
+# Status icons mirror app/commands_tab.py — kept local to avoid a circular
+# import (commands_tab imports from app.shared, not from agents_tab).
+_GOAL_STATUS_ICONS = {
+    "completed": "✅",
+    "failed": "❌",
+    "in_progress": "🔄",
+    "pending": "⏳",
+}
+# Order delegated goals by lifecycle: active first, terminal last.
+_GOAL_STATUS_ORDER = {"in_progress": 0, "pending": 1, "completed": 2, "failed": 3}
 
 # A streaming.json older than this is treated as stale (daemon likely died
 # mid-turn before it could clean up). We still render whatever partial text
@@ -159,6 +171,32 @@ def _synthesize_external_chat(agent: dict) -> list[dict]:
     return records
 
 
+def _load_agent_goals(name: str) -> list[dict]:
+    """Return goals from goal.json delegated to *name*.
+
+    A goal is considered delegated to this agent iff `delegated_to.name`
+    matches. Non-dict `delegated_to` values are ignored.
+    """
+    if not name:
+        return []
+    raw = read_json_file(Path(GOALS_PATH), default=[])
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for g in raw:
+        if not isinstance(g, dict):
+            continue
+        d = g.get("delegated_to")
+        if isinstance(d, dict) and d.get("name") == name:
+            out.append(g)
+    # Active buckets first, then newest first within each bucket. Two-stage
+    # sort exploits Python's stable sort: sort by created_at desc, then by
+    # status bucket — the status sort preserves the desc-by-time order.
+    out.sort(key=lambda g: g.get("created_at") or "", reverse=True)
+    out.sort(key=lambda g: _GOAL_STATUS_ORDER.get(g.get("status") or "pending", 99))
+    return out
+
+
 def _agent_inbox_path(agent: dict) -> Path | None:
     inbox = agent.get("inbox")
     return Path(inbox) if isinstance(inbox, str) and inbox else None
@@ -259,6 +297,64 @@ def _render_envelope(env: dict) -> None:
         st.json(env)
 
 
+def _render_goals(agent: dict, goals: list[dict] | None = None) -> None:
+    """Render goals from /agent/memory/goal.json delegated to this agent.
+
+    The main agent owns goal.json; entries with `delegated_to.name == agent`
+    are work the main agent is polling — i.e. waiting on this delegate.
+    """
+    name = agent.get("name") or ""
+    if goals is None:
+        goals = _load_agent_goals(name)
+    st.caption(
+        "Goals from `/agent/memory/goal.json` whose `delegated_to.name` "
+        f"matches `{name}`. The main agent polls these; this delegate's "
+        "outbox replies (matched by `reply_to_id`) close them."
+    )
+    if not goals:
+        st.caption("No goals delegated to this agent.")
+        return
+    for g in goals:
+        status = g.get("status") or "pending"
+        goal_id = g.get("id") or "?"
+        goal_text = g.get("goal") or g.get("content") or ""
+        preview = goal_text[:100] + ("..." if len(goal_text) > 100 else "")
+        icon = _GOAL_STATUS_ICONS.get(status, "•")
+        with st.expander(
+            f"{icon} 🤝 {goal_id} — {preview}",
+            expanded=(status == "in_progress"),
+        ):
+            s_color = _STATUS_COLORS.get(status, "#666")
+            d = g.get("delegated_to") or {}
+            d_type = d.get("type") or "?"
+            badges = _badge(status.replace("_", " "), s_color)
+            badges += " " + _badge(
+                f"🤝 → {name} ({d_type})",
+                _TYPE_COLORS.get("delegated", "#00BCD4"),
+            )
+            st.markdown(badges, unsafe_allow_html=True)
+            if goal_text:
+                st.markdown(goal_text)
+            d_at = (g.get("delegated_at") or "")[:19].replace("T", " ")
+            created = (g.get("created_at") or "")[:19].replace("T", " ")
+            d_mid = str(g.get("delegated_message_id") or "")
+            meta = []
+            if created:
+                meta.append(f"Created: {created}")
+            if d_at:
+                meta.append(f"Delegated at: {d_at}")
+            if meta:
+                st.caption(" · ".join(meta))
+            if d_mid:
+                st.caption(
+                    f"Reply correlation: outbox messages with "
+                    f"`reply_to_id == {d_mid}` close this goal."
+                )
+            notes = g.get("notes") or ""
+            if notes:
+                st.info(f"**Notes:** {notes}")
+
+
 def _render_config(agent: dict) -> None:
     name = agent.get("name") or "?"
     atype = agent.get("type") or "?"
@@ -297,13 +393,41 @@ def _render_actions(agent: dict) -> None:
     name = agent.get("name") or ""
     atype = agent.get("type")
 
+    # Mirror the "Queue Command For Next Cycle" form in
+    # ``app/commands_tab.py`` — both forms write an envelope to an
+    # ``inbox.json`` (main agent vs. internal/external agent) so they
+    # should look and behave identically.
     st.markdown("### Send a message")
     with st.form(f"send_{name}", clear_on_submit=True):
-        subject = st.text_input("Subject (optional)", key=f"subject_{name}")
-        content = st.text_area("Content", key=f"content_{name}", height=120)
+        cmd_type = st.selectbox("Type", ["goal", "message"], key=f"type_{name}")
+        subject = st.text_input(
+            "Subject (optional)",
+            placeholder="Short summary",
+            key=f"subject_{name}",
+        )
+        content = st.text_area(
+            "Content",
+            placeholder="Enter your command or goal here...",
+            key=f"content_{name}",
+        )
+        priority_options = ["P5", "P4", "P3", "P2", "P1"]
+        priority_label = st.select_slider(
+            "Priority",
+            options=priority_options,
+            value="P3",
+            help="P1 = highest priority (right), P5 = lowest (left)",
+            key=f"priority_{name}",
+        )
+        priority = {"P1": 1, "P2": 2, "P3": 3, "P4": 4, "P5": 5}[priority_label]
         submitted = st.form_submit_button("Send")
     if submitted:
-        _handle_send_message(agent, subject=subject, content=content)
+        _handle_send_message(
+            agent,
+            cmd_type=cmd_type,
+            subject=subject,
+            content=content,
+            priority=priority,
+        )
 
     st.divider()
     st.markdown("### Operator actions")
@@ -320,31 +444,37 @@ def _render_actions(agent: dict) -> None:
         )
 
 
-def _handle_send_message(agent: dict, *, subject: str, content: str) -> None:
-    name = agent.get("name") or ""
-    target = _agent_inbox_path(agent)
+def _handle_send_message(
+    agent: dict,
+    *,
+    content: str,
+    subject: str = "",
+    cmd_type: str = "message",
+    priority: int = 3,
+) -> None:
     content = (content or "").strip()
+    subject = (subject or "").strip()
     if not content:
-        st.warning("Message content must not be empty.")
+        st.warning("Content cannot be empty.")
         return
+    target = _agent_inbox_path(agent)
     if target is None:
         st.error("Agent has no `inbox` path in agents.json — cannot deliver.")
         return
     envelope: dict = {
         "id": str(uuid.uuid4()),
-        "type": "message",
+        "type": cmd_type,
+        "subject": subject,
         "content": content,
         "source": _PORTAL_SOURCE,
         "from": _PORTAL_SOURCE,
-        "priority": 3,
+        "priority": priority,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "reply_to": _REPLY_TO,
     }
-    if subject and subject.strip():
-        envelope["subject"] = subject.strip()
     target.parent.mkdir(parents=True, exist_ok=True)
     if write_to_inbox([envelope], inbox_file=target, dedup=False):
-        st.success(f"Sent message id={envelope['id']} to `{target}`.")
+        st.success(f"Queued {cmd_type} command to inbox (priority {priority}).")
     else:
         st.error("write_to_inbox failed — check the daemon log.")
 
@@ -361,6 +491,38 @@ def _handle_clear_flag(name: str, flag: str, label: str) -> None:
 
 
 # ─── top-level render ────────────────────────────────────────────────────
+
+
+@st.fragment(run_every="3s")
+def _agent_stream_fragment() -> None:
+    """Per-agent streaming poll + chat render, scoped to a fragment.
+
+    Only this region reruns every 3s while the selected internal agent is
+    streaming, so neither the outer `st.tabs` in `server.py` nor the inner
+    `st.tabs` (Chat / Inbox / Goals / Config / Actions) in this module is
+    re-identified — the active tab on both levels stays put.
+
+    The selected agent name lives in
+    ``st.session_state["agents_tab_streaming_name"]``; ``render()`` writes it
+    when streaming is active and clears it otherwise. When the stream ends
+    (file goes missing or buffer falls past `_STREAM_STALE_AFTER`), the
+    fragment issues an app-scoped rerun so it is not re-mounted on the next
+    full pass and the 3s timer stops.
+    """
+    name = st.session_state.get("agents_tab_streaming_name") or ""
+    if not name:
+        return
+    streaming_payload = _load_streaming(name)
+    history = _load_internal_chat(name)
+    if not _is_stream_active(streaming_payload):
+        # Stream finished (or buffer went stale). Render the final history
+        # *before* bouncing — otherwise the fragment paints an empty frame
+        # in the gap between this tick and the app-scoped rerun.
+        _render_chat(history, streaming=streaming_payload)
+        st.session_state.pop("agents_tab_streaming_name", None)
+        st.rerun(scope="app")
+        return
+    _render_chat(history, streaming=streaming_payload)
 
 
 def render() -> None:
@@ -387,22 +549,30 @@ def render() -> None:
     )
     agent = agents[idx]
 
-    # While the *currently selected* internal agent is streaming, pin the
-    # refresh cadence at 10s so the live bubble updates promptly. When idle,
-    # we fall back to the global 60s tick (no extra registration needed).
+    # Streaming cadence is driven by `_agent_stream_fragment` (run_every=3s,
+    # mounted only when the selected internal agent is actively streaming).
+    # When idle we rely on the global 60s tick in `server.py` for refresh.
+    # Scoping to a fragment prevents both the outer (server.py) and inner
+    # (this module's) `st.tabs` widgets from being re-identified mid-stream.
     name = agent.get("name") or ""
-    streaming_payload: dict | None = None
-    if agent.get("type") == "internal" and name:
-        streaming_payload = _load_streaming(name)
-        if _is_stream_active(streaming_payload):
-            st_autorefresh(interval=10_000, key=f"agents_tab_stream_{name}")
 
-    chat_tab, inbox_tab, config_tab, actions_tab = st.tabs(
-        ["💬 Chat", "📥 Inbox", "⚙️ Config", "🛠️ Actions"]
+    delegated_goals = _load_agent_goals(name)
+    goal_label = f"🎯 Goals ({len(delegated_goals)})" if delegated_goals else "🎯 Goals"
+    chat_tab, inbox_tab, goals_tab, config_tab, actions_tab = st.tabs(
+        ["💬 Chat", "📥 Inbox", goal_label, "⚙️ Config", "🛠️ Actions"]
     )
     with chat_tab:
         if agent.get("type") == "internal":
-            _render_chat(_load_internal_chat(name), streaming=streaming_payload)
+            streaming_payload = _load_streaming(name)
+            if _is_stream_active(streaming_payload):
+                st.session_state["agents_tab_streaming_name"] = name
+                _agent_stream_fragment()
+            else:
+                # Idle path — clear the marker idempotently so the fragment
+                # isn't mounted next pass. Covers stream-just-ended,
+                # agent-switched-to-idle, and stale-buffer cases.
+                st.session_state.pop("agents_tab_streaming_name", None)
+                _render_chat(_load_internal_chat(name), streaming=streaming_payload)
         else:
             st.caption(
                 "External agents have no local chat_history; this is a "
@@ -412,6 +582,8 @@ def render() -> None:
             _render_chat(_synthesize_external_chat(agent))
     with inbox_tab:
         _render_inbox(agent)
+    with goals_tab:
+        _render_goals(agent, goals=delegated_goals)
     with config_tab:
         _render_config(agent)
     with actions_tab:

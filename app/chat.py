@@ -13,7 +13,6 @@ import weakref
 from pathlib import Path
 
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh
 
 from app.shared import _write_json_atomic
 
@@ -724,6 +723,71 @@ def _get_or_recreate_chat() -> "ClaudeChat | None":
     return _get_chat_singleton()
 
 
+@st.fragment(run_every="3s")
+def _chat_stream_fragment():
+    """Streaming poll + live-bubble render, scoped to a fragment.
+
+    Only this region reruns every 3s while a turn is in flight, so the outer
+    `st.tabs` widget in `server.py` keeps its identity and the active tab is
+    not reset to the first one. `st.chat_input` is intentionally NOT in here
+    — it must live at the top level of the page.
+
+    Self-terminates when streaming flips to False: it does a final drain,
+    persists history, then issues an app-scoped `st.rerun()` so the next
+    render path skips this fragment entirely (the 3s timer stops).
+    """
+    session = st.session_state.get("chat_session")
+
+    if st.session_state.get("chat_streaming") and session:
+        new_events = session.poll()
+        for ev in new_events:
+            st.session_state.chat_stream_events.append(ev)
+            if ev["type"] == "text":
+                st.session_state.chat_stream_text += ev["text"]
+            elif ev["type"] == "error":
+                st.session_state.chat_stream_text += f"\n\n**Error:** {ev['error']}"
+
+        if not session.is_streaming():
+            # Final drain to catch any events between last poll() and done_event
+            trailing = session.poll()
+            for ev in trailing:
+                st.session_state.chat_stream_events.append(ev)
+                if ev["type"] == "text":
+                    st.session_state.chat_stream_text += ev["text"]
+                elif ev["type"] == "error":
+                    st.session_state.chat_stream_text += f"\n\n**Error:** {ev['error']}"
+            full_text = st.session_state.chat_stream_text
+            if full_text:
+                st.session_state.chat_messages.append(
+                    {"role": "assistant", "content": full_text}
+                )
+                _save_chat_history(st.session_state.chat_messages)
+            if session.session_id:
+                st.session_state.chat_session_id = session.session_id
+                _save_chat_session_id(session.session_id)
+            st.session_state.chat_streaming = False
+            st.session_state.chat_stream_text = ""
+            st.session_state.chat_stream_events = []
+            # App-scoped rerun so the next render() takes the non-fragment
+            # path and the 3s polling timer stops.
+            st.rerun(scope="app")
+
+    # Live bubble — only while streaming.
+    if st.session_state.get("chat_streaming"):
+        with st.chat_message("assistant"):
+            st.markdown(st.session_state.chat_stream_text or "Processing...")
+            for ev in st.session_state.chat_stream_events:
+                if ev["type"] == "tool_use":
+                    st.caption(f"Used tool: {ev['name']}")
+                elif ev["type"] == "thinking":
+                    with st.expander("Thinking..."):
+                        st.markdown(ev["text"])
+            if not st.session_state.chat_stream_text:
+                st.caption("Thinking...")
+            else:
+                st.caption("Streaming...")
+
+
 def render():
     """Render the Claude Code Chat UI component (always visible at top of page)."""
     st.subheader("Claude Code Chat")
@@ -765,15 +829,13 @@ def render():
     if "chat_streaming" not in st.session_state:
         st.session_state.chat_streaming = False
 
-    # Chat-only 1s polling refresh — ONLY while a turn is in flight. The
-    # ClaudeChat singleton runs the SDK on a background daemon thread, so
-    # nothing about the streaming actually depends on streamlit reruns;
-    # this timer just drives `session.poll()` to surface streamed chunks
-    # to the UI. When the stream ends we stop registering it, leaving the
-    # global 60s refresh as the only timer. That guarantees the global
-    # tick never has to interrupt or accelerate the chat flow.
-    if st.session_state.get("chat_streaming"):
-        st_autorefresh(interval=1_000, key="chat_poll_refresh")
+    # Chat polling cadence is driven by the enclosing `st.fragment` (run_every
+    # = "3s" while streaming, None when idle). The ClaudeChat singleton runs
+    # the SDK on a background daemon thread, so nothing about streaming
+    # depends on streamlit reruns; the timer just drives `session.poll()` to
+    # surface streamed chunks to the UI. Scoping the rerun to this fragment
+    # prevents the outer `st.tabs` widget from being re-identified and
+    # snapping back to the first tab during a stream.
     if "chat_stream_text" not in st.session_state:
         st.session_state.chat_stream_text = ""
     if "chat_stream_events" not in st.session_state:
@@ -781,61 +843,16 @@ def render():
 
     session = st.session_state.chat_session
 
-    # ── Active streaming: poll for new chunks on each rerun ──
-    if st.session_state.chat_streaming and session:
-        new_events = session.poll()
-        for ev in new_events:
-            st.session_state.chat_stream_events.append(ev)
-            if ev["type"] == "text":
-                st.session_state.chat_stream_text += ev["text"]
-            elif ev["type"] == "error":
-                st.session_state.chat_stream_text += f"\n\n**Error:** {ev['error']}"
-
-        if not session.is_streaming():
-            # Final drain to catch any events between last poll() and done_event
-            trailing = session.poll()
-            for ev in trailing:
-                st.session_state.chat_stream_events.append(ev)
-                if ev["type"] == "text":
-                    st.session_state.chat_stream_text += ev["text"]
-                elif ev["type"] == "error":
-                    st.session_state.chat_stream_text += f"\n\n**Error:** {ev['error']}"
-            # Stream complete — save to history and persist to disk
-            full_text = st.session_state.chat_stream_text
-            if full_text:
-                st.session_state.chat_messages.append(
-                    {"role": "assistant", "content": full_text}
-                )
-                _save_chat_history(st.session_state.chat_messages)
-            # Capture session_id for resumption (per-session_state + on disk
-            # so the cache_resource singleton can resume after a process
-            # restart).
-            if session.session_id:
-                st.session_state.chat_session_id = session.session_id
-                _save_chat_session_id(session.session_id)
-            st.session_state.chat_streaming = False
-            st.session_state.chat_stream_text = ""
-            st.session_state.chat_stream_events = []
-
-    # Display chat history
+    # Display chat history (top-level — never reruns on the 3s tick).
     for msg in st.session_state.chat_messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # Render active stream (in progress, not yet saved to history)
+    # While a turn is in flight, mount the streaming fragment. Its 3s
+    # `run_every` reruns *only* the fragment, so the outer `st.tabs` in
+    # server.py keeps its widget identity and the active tab is preserved.
     if st.session_state.chat_streaming:
-        with st.chat_message("assistant"):
-            st.markdown(st.session_state.chat_stream_text or "Processing...")
-            for ev in st.session_state.chat_stream_events:
-                if ev["type"] == "tool_use":
-                    st.caption(f"Used tool: {ev['name']}")
-                elif ev["type"] == "thinking":
-                    with st.expander("Thinking..."):
-                        st.markdown(ev["text"])
-            if not st.session_state.chat_stream_text:
-                st.caption("Thinking...")
-            else:
-                st.caption("Streaming...")
+        _chat_stream_fragment()
 
     # Clear chat button — fully discard the current SDK session (interrupt any
     # in-flight turn, close the singleton, wipe persisted session_id) so the

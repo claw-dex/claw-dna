@@ -88,13 +88,13 @@ Two modules render above the tab strip in `server.py` (after the header, before 
 |-------|--------|-------|
 | Command Center | commands_tab | Agent Console |
 | Memory | memory_tab | Agent Console |
-| System | system_tab | Agent Console |
-| Services & Cron | services_tab | Agent Console |
 | Overview | overview_tab | Agent Console |
 | Agents | agents_tab | Agent Console |
 | Workspace | workspace_tab | Core |
 | Credentials | credential_tab | Core |
 | Email | emails_tab | Core |
+| System | system_tab | Core |
+| Services & Cron | services_tab | Core |
 
 The **Agents** tab surfaces every entry in `memory/agents.json` (internal + external). Per-agent it shows: chat history (or for external agents, a synthesized inbox+outbox transcript), live + archived inbox traffic, raw config, and operator actions (send-message, clear-chat, clear-session). All actions go through `services.shared.set_agent_control_flag` / `write_to_inbox`, the same code paths as `scripts/interact_with_agent.py`.
 

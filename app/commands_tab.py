@@ -247,22 +247,49 @@ def render():
                 preview = goal_text[:100] + ("..." if len(goal_text) > 100 else "")
                 icon = _STATUS_ICONS.get(status, "•")
                 created = (g.get("created_at") or "")[:10]
+                delegated_to = (
+                    g.get("delegated_to")
+                    if isinstance(g.get("delegated_to"), dict)
+                    else None
+                )
+                # Prepend a 🤝 to the header so delegation is visible without
+                # expanding (matches the Agents-tab Goals view).
+                header_prefix = f"{icon} 🤝 " if delegated_to else f"{icon} "
 
                 with st.expander(
-                    f"{icon} {goal_id} — {preview}", expanded=(status == "in_progress")
+                    f"{header_prefix}{goal_id} — {preview}",
+                    expanded=(status == "in_progress"),
                 ):
-                    # Status + source badges
+                    # Status + source + delegation badges
                     s_color = _STATUS_COLORS.get(status, "#666")
                     source = g.get("source", "")
                     badges = _badge(status.replace("_", " ").replace("-", " "), s_color)
                     if source:
                         badges += " " + _badge(f"source: {source}", "#555")
+                    if delegated_to:
+                        d_name = delegated_to.get("name") or "?"
+                        d_type = delegated_to.get("type") or "?"
+                        badges += " " + _badge(
+                            f"🤝 → {d_name} ({d_type})",
+                            _TYPE_COLORS.get("delegated", "#00BCD4"),
+                        )
                     st.markdown(badges, unsafe_allow_html=True)
 
                     st.markdown(goal_text)
 
                     if created:
                         st.caption(f"Created: {created}")
+                    if delegated_to:
+                        d_at = (g.get("delegated_at") or "")[:19].replace("T", " ")
+                        d_mid = str(g.get("delegated_message_id") or "")
+                        d_mid_short = (d_mid[:8] + "…") if len(d_mid) > 8 else d_mid
+                        parts = []
+                        if d_at:
+                            parts.append(f"Delegated at: {d_at}")
+                        if d_mid_short:
+                            parts.append(f"message_id: `{d_mid_short}`")
+                        if parts:
+                            st.caption(" · ".join(parts))
                     notes = g.get("notes", "")
                     if notes:
                         st.info(f"**Notes:** {notes}")

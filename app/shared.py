@@ -45,6 +45,8 @@ _TYPE_COLORS = {
     "needs_human": "#F44336",
     "goal_complete": "#4CAF50",
     "goal_failed": "#F44336",
+    # Goal delegation marker
+    "delegated": "#00BCD4",
 }
 
 
