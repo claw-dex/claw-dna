@@ -840,26 +840,24 @@ def render():
     # Clear chat button — fully discard the current SDK session (interrupt any
     # in-flight turn, close the singleton, wipe persisted session_id) so the
     # next rerun spawns a brand-new `claude` session with no resumed context.
-    # Always render the Clear/Refresh row so the user can still pull in
-    # daemon-written messages after clearing the chat (in-memory list is empty
-    # but disk may have new turns from a background job).
-    col_clear, col_refresh, _ = st.columns([1, 1, 8])
-    with col_clear:
-        clear_clicked = st.button(
-            "Clear chat",
-            key="clear_chat",
-            disabled=not st.session_state.chat_messages,
-        )
-    with col_refresh:
-        refresh_clicked = st.button(
-            "Refresh chat",
-            key="refresh_chat",
-            disabled=st.session_state.chat_streaming,
-            help=(
-                "Pull in any messages written by background jobs since the "
-                "page loaded."
-            ),
-        )
+    # Both Clear and Refresh only appear once the user has actually started a
+    # chat (in-memory list is non-empty).
+    clear_clicked = False
+    refresh_clicked = False
+    if st.session_state.chat_messages:
+        col_clear, col_refresh, _ = st.columns([1, 1, 8])
+        with col_clear:
+            clear_clicked = st.button("Clear chat", key="clear_chat")
+        with col_refresh:
+            refresh_clicked = st.button(
+                "Refresh",
+                key="refresh_chat",
+                disabled=st.session_state.chat_streaming,
+                help=(
+                    "Pull in any messages written by background jobs since the "
+                    "page loaded."
+                ),
+            )
     if clear_clicked:
         if st.session_state.chat_streaming and session is not None:
             try:

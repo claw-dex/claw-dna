@@ -1,5 +1,5 @@
 """
-Action suggestions for the Agent Overview tab.
+Action suggestions for the Overview tab.
 
 Enum Reference: See prompts/enum.md → Suggestion Priority, Suggestion Category, Evolution Category.
 """
@@ -14,7 +14,7 @@ _SUGGEST_CACHE = _register_cache()
 
 
 def load_suggest():
-    """Build ranked action suggestions for the Agent Overview tab.
+    """Build ranked action suggestions for the Overview tab.
 
     Uses compound mtime-based caching keyed on all source files + workspace dir + date bucket.
     Previously @_cache(ttl=60) caused re-computation every 60 seconds even during idle cycles

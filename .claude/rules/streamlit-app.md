@@ -10,6 +10,7 @@ paths:
 - Always validate python syntax after editing with `uv run python -m py_compile <file.py>`
 - Never use deprecated `use_container_width` parameter. Use `width="stretch"` (for full width) or `width="content"` (for fit-to-content) instead.
 - The following tabs are core functionalities and MUST not be removed. Always keep them at the top of the tab registry in `server.py`:
+
   ```
   TAB_REGISTRY = [
       # Agent Console — operational tools
@@ -17,7 +18,8 @@ paths:
       ("📓 Memory",            memory_tab,     "Memory",          "Agent Console"),
       ("⚙️ System",            system_tab,     "System",          "Agent Console"),
       ("🔧 Services & Cron",   services_tab,   "Services & Cron", "Agent Console"),
-      ("🔭 Agent Overview",    overview_tab,   "Agent Overview",  "Agent Console"),
+      ("🔭 Overview",          overview_tab,   "Overview",        "Agent Console"),
+      ("🤖 Agents",            agents_tab,     "Agents",          "Agent Console"),
       # Core — file / credential / email management
       ("📁 Workspace",         workspace_tab,  "Workspace",       "Core"),
       ("🔑 Credentials",       credential_tab, "Credentials",     "Core"),

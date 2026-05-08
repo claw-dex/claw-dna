@@ -46,9 +46,12 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 _SERVICES_DIR = _SCRIPT_DIR.parent / "services"
 sys.path.insert(0, str(_SERVICES_DIR))
 from shared import (  # noqa: E402
+    AGENT_CONTROL_CLEAR_CHAT,
+    AGENT_CONTROL_CLEAR_SESSION,
+    AGENT_CONTROL_FIELD,
     INBOX_FILE,
-    locked_json_rw,
     read_json_file,
+    set_agent_control_flag,
     write_to_inbox,
 )
 
@@ -72,9 +75,12 @@ RESERVED_MAIN = "main"
 # `locked_json_rw`, which serializes updates with an exclusive flock
 # on `agents.json.lock`, so concurrent writers cannot clobber each
 # other or partially overwrite the file.
-CONTROL_FIELD = "control"
-CONTROL_CLEAR_CHAT = "clear_chat"
-CONTROL_CLEAR_SESSION = "clear_session"
+# Re-export the canonical control-field constants from services.shared so
+# existing code paths (and tests that patched these as `iac.CONTROL_*`)
+# keep working transparently.
+CONTROL_FIELD = AGENT_CONTROL_FIELD
+CONTROL_CLEAR_CHAT = AGENT_CONTROL_CLEAR_CHAT
+CONTROL_CLEAR_SESSION = AGENT_CONTROL_CLEAR_SESSION
 
 # Must match SWEEP_SECONDS in services/internal_agent_chat.py.
 SWEEP_SECONDS = 10
@@ -108,41 +114,21 @@ def _active_internal_names(agents: list) -> list[str]:
 
 
 def _set_control_flag(names: list[str], key: str, label: str) -> int:
-    """Set `control[<key>] = true` on every named agent in agents.json.
+    """Thin CLI wrapper around `services.shared.set_agent_control_flag`.
 
-    Done in a single locked read-modify-write so concurrent updates from
-    other writers (other CLI invocations, register_internal_agent.py,
-    the daemon's strip-after-apply path) cannot interleave or drop
-    fields.
+    The shared helper handles the locked read-modify-write so this CLI
+    and the portal mutate `agents.json` through the same code path.
     """
     if not names:
         return 0
-    targets = set(names)
-    matched: set[str] = set()
-
-    def _rw(items):
-        if not isinstance(items, list):
-            items = []
-        for a in items:
-            if not isinstance(a, dict):
-                continue
-            n = a.get("name")
-            if n not in targets:
-                continue
-            ctl = a.get(CONTROL_FIELD)
-            if not isinstance(ctl, dict):
-                ctl = {}
-            ctl[key] = True
-            a[CONTROL_FIELD] = ctl
-            matched.add(n)
-        return items
-
-    if not locked_json_rw(_rw, json_file=AGENTS_FILE, default=[]):
+    ok, matched = set_agent_control_flag(names, key, agents_file=AGENTS_FILE)
+    if not ok:
         print("error: failed to update agents.json", file=sys.stderr)
         return 1
 
+    matched_set = set(matched)
     for n in names:
-        if n in matched:
+        if n in matched_set:
             print(
                 "queued "
                 + label

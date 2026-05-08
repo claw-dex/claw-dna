@@ -393,7 +393,7 @@ Inbox items with `source: "internal_agent"` are stamped by `services/internal_ag
 
 **Field:** `priority`
 
-**Description:** Urgency level of action suggestions shown in Agent Overview tab.
+**Description:** Urgency level of action suggestions shown in Overview tab.
 
 | Value | Meaning | Color/Icon |
 |-------|---------|------------|
@@ -426,7 +426,7 @@ Inbox items with `source: "internal_agent"` are stamped by `services/internal_ag
 
 **Notes:**
 
-- Used for color-coding and filtering in Agent Overview tab
+- Used for color-coding and filtering in Overview tab
 - Aligns with evolve categories for consistency
 
 ---

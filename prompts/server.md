@@ -49,7 +49,8 @@ app/
   memory_tab.py    — Memory tab (journal, logs, goals, memory files, search)
   system_tab.py    — System tab (health, diagnostics, scripts)
   services_tab.py  — Services & Cron tab (service management, scheduled tasks)
-  overview_tab.py  — Agent Overview tab (activity, goal stats, evolution balance)
+  overview_tab.py  — Overview tab (activity, goal stats, evolution balance)
+  agents_tab.py    — Agents tab (per-agent chat history, inbox, config, send-message + clear-chat/clear-session)
   workspace_tab.py — Workspace tab (file upload, Caddy file browser)
   credential_tab.py — Credentials tab (KeePass database management)
   emails_tab.py    — Email tab (Google Workspace OAuth setup)
@@ -81,7 +82,7 @@ Two modules render above the tab strip in `server.py` (after the header, before 
 
 ### Tab Registry (TAB_REGISTRY in server.py ~line 20)
 
-8 tabs in 2 groups. Each entry is `(label, module, display_name[, group])`. The 4th `group` element is optional (defaults to `"General"`). With multiple groups, a `st.segmented_control` bar lets users switch groups, with `st.tabs` inside each group.
+9 tabs in 2 groups. Each entry is `(label, module, display_name[, group])`. The 4th `group` element is optional (defaults to `"General"`). With multiple groups, a `st.segmented_control` bar lets users switch groups, with `st.tabs` inside each group.
 
 | Label | Module | Group |
 |-------|--------|-------|
@@ -89,10 +90,13 @@ Two modules render above the tab strip in `server.py` (after the header, before 
 | Memory | memory_tab | Agent Console |
 | System | system_tab | Agent Console |
 | Services & Cron | services_tab | Agent Console |
-| Agent Overview | overview_tab | Agent Console |
+| Overview | overview_tab | Agent Console |
+| Agents | agents_tab | Agent Console |
 | Workspace | workspace_tab | Core |
 | Credentials | credential_tab | Core |
 | Email | emails_tab | Core |
+
+The **Agents** tab surfaces every entry in `memory/agents.json` (internal + external). Per-agent it shows: chat history (or for external agents, a synthesized inbox+outbox transcript), live + archived inbox traffic, raw config, and operator actions (send-message, clear-chat, clear-session). All actions go through `services.shared.set_agent_control_flag` / `write_to_inbox`, the same code paths as `scripts/interact_with_agent.py`.
 
 ### Header Metrics
 
@@ -111,6 +115,7 @@ Two modules render above the tab strip in `server.py` (after the header, before 
 ### Auto-Refresh
 
 `streamlit-autorefresh` polls at two rates:
+
 - **1 second** when `st.session_state["chat_streaming"]` is `True` (fast polling during chat)
 - **60 seconds** otherwise (normal idle refresh)
 
@@ -233,6 +238,7 @@ All write functions call `_cache_clear_all()` after mutation.
 ### Startup Check (`app/shared.py`)
 
 `_startup_check()` runs once via `@st.cache_resource` in server.py:
+
 1. Creates missing critical directories
 2. Creates or repairs critical JSON files (backs up corrupt as `.corrupt`)
 3. Removes stale `.tmp` files older than 30 seconds
@@ -244,6 +250,7 @@ All JSON mutations use `_write_json_atomic()` from `app/shared.py` — writes to
 ### Tab Crash Isolation
 
 `_safe_render(module, tab_name)` in `server.py` wraps every module's `render()` call (including always-visible sections and all tabs) in a try/except so one broken section cannot crash the portal. Errors are:
+
 - Displayed inline (user sees error in that section/tab only)
 - Logged to `server_errors.json` (agent detects on next cycle, last 20 kept)
 - Special case: Streamlit cache LRU eviction KeyErrors are silently retried once
@@ -287,6 +294,7 @@ All data displayed on the portal **must** include a clear indicator label when t
 | Estimated/projected data | **(Estimated)** | "Balance (Estimated)" |
 
 **Rules:**
+
 - The indicator label must appear **inline** with or immediately adjacent to the data display (e.g., in the section header, metric label, or chart title) — not hidden in a tooltip or footnote.
 - Use `st.caption` or parenthetical text in the `st.metric`/`st.header`/`st.subheader` label to show the indicator.
 - When the data source transitions from non-real to real data, the indicator label must be removed automatically.

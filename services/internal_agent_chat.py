@@ -69,6 +69,7 @@ from shared import (
     read_json_file,
     save_session_id,
     session_path,
+    streaming_path,
     surface_error,
     write_to_inbox,
     write_to_outbox,
@@ -80,6 +81,8 @@ from claude_agent_sdk import (
     ClaudeSDKClient,
     ResultMessage,
     TextBlock,
+    ThinkingBlock,
+    ToolUseBlock,
     create_sdk_mcp_server,
     tool,
 )
@@ -872,6 +875,10 @@ class InternalAgentSession:
             self._ready.set()
             self._loop.close()
             return
+        # If the daemon was killed mid-turn, a stale streaming.json may
+        # still claim "this agent is streaming". Wipe it on startup so the
+        # UI cadence doesn't get pinned at 10s forever.
+        self._clear_streaming()
         try:
             # Trigger one drain at startup in case messages piled up while down.
             self._pending_drain.set()
@@ -1112,6 +1119,7 @@ class InternalAgentSession:
         chunk_q: queue.Queue = queue.Queue()
         done = asyncio.Event()
         text_parts: list[str] = []
+        events: list[dict] = []
         cost = None
         duration_ms = None
         is_error = False
@@ -1119,14 +1127,47 @@ class InternalAgentSession:
         sdk = self._sdk
         assert sdk is not None
 
+        stream_started_at = datetime.now(timezone.utc).isoformat()
+
         async def _runner():
             try:
                 await sdk.query(prompt)
                 async for msg in sdk.receive_response():
                     if isinstance(msg, AssistantMessage):
+                        dirty = False
                         for block in msg.content:
                             if isinstance(block, TextBlock) and block.text:
                                 text_parts.append(block.text)
+                                events.append({"type": "text", "text": block.text})
+                                dirty = True
+                            elif isinstance(block, ToolUseBlock):
+                                events.append(
+                                    {
+                                        "type": "tool_use",
+                                        "name": getattr(block, "name", "") or "",
+                                        "id": getattr(block, "id", "") or "",
+                                    }
+                                )
+                                dirty = True
+                            elif isinstance(block, ThinkingBlock):
+                                thinking_text = getattr(block, "thinking", None) or ""
+                                events.append(
+                                    {"type": "thinking", "text": thinking_text}
+                                )
+                                dirty = True
+                        if dirty:
+                            self._flush_streaming(
+                                started_at=stream_started_at,
+                                ids=ids,
+                                text_parts=text_parts,
+                                events=events,
+                            )
+                            # Cap the in-memory events list so a long
+                            # tool-heavy turn doesn't grow it unbounded.
+                            # The serialized payload is independently
+                            # tail-capped at 200 in _flush_streaming.
+                            if len(events) > 400:
+                                del events[:200]
                     elif isinstance(msg, ResultMessage):
                         sid = getattr(msg, "session_id", None)
                         if sid:
@@ -1145,45 +1186,64 @@ class InternalAgentSession:
             finally:
                 done.set()
 
-        task = asyncio.create_task(_runner())
         try:
-            await asyncio.wait_for(done.wait(), timeout=TURN_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
-            task.cancel()
-            log.error("[%s] turn timed out after %ds", self.name, TURN_TIMEOUT_SECONDS)
-            surface_error(
-                "internal_agent_chat",
-                "turn timeout",
-                context=self.name + ":ids=" + ",".join(ids),
+            # Publish the initial empty streaming buffer inside the try so that
+            # an OSError on this first write still triggers the cleanup branch.
+            self._flush_streaming(
+                started_at=stream_started_at,
+                ids=ids,
+                text_parts=text_parts,
+                events=events,
             )
-            return
+            task = asyncio.create_task(_runner())
+            try:
+                await asyncio.wait_for(done.wait(), timeout=TURN_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                task.cancel()
+                # Wait for the runner to finish reacting to the cancel so it
+                # cannot keep mutating events/text_parts after we clear the
+                # streaming buffer in the outer finally.
+                await asyncio.gather(task, return_exceptions=True)
+                log.error(
+                    "[%s] turn timed out after %ds", self.name, TURN_TIMEOUT_SECONDS
+                )
+                surface_error(
+                    "internal_agent_chat",
+                    "turn timeout",
+                    context=self.name + ":ids=" + ",".join(ids),
+                )
+                return
 
-        # Drain queue
-        while not chunk_q.empty():
-            ev = chunk_q.get_nowait()
-            if "error" in ev:
-                is_error = True
-                text_parts.append("[error] " + str(ev["error"]))
-            else:
-                cost = ev.get("cost")
-                duration_ms = ev.get("duration_ms")
-                is_error = bool(ev.get("is_error")) or is_error
+            # Drain queue
+            while not chunk_q.empty():
+                ev = chunk_q.get_nowait()
+                if "error" in ev:
+                    is_error = True
+                    text_parts.append("[error] " + str(ev["error"]))
+                else:
+                    cost = ev.get("cost")
+                    duration_ms = ev.get("duration_ms")
+                    is_error = bool(ev.get("is_error")) or is_error
 
-        response_text = "".join(text_parts).strip()
-        if not response_text:
-            response_text = "(no response)"
+            response_text = "".join(text_parts).strip()
+            if not response_text:
+                response_text = "(no response)"
 
-        merged_reply_to = reply_to_key if reply_to_key != "__none__" else None
-        self._append_chat_records(
-            ids=ids,
-            merged_reply_to=merged_reply_to,
-            user_text=self._readable_user_record(msgs),
-            assistant_text=response_text,
-            session_id=self._session_id,
-            cost_usd=cost,
-            duration_ms=duration_ms,
-            is_error=is_error,
-        )
+            merged_reply_to = reply_to_key if reply_to_key != "__none__" else None
+            self._append_chat_records(
+                ids=ids,
+                merged_reply_to=merged_reply_to,
+                user_text=self._readable_user_record(msgs),
+                assistant_text=response_text,
+                session_id=self._session_id,
+                cost_usd=cost,
+                duration_ms=duration_ms,
+                is_error=is_error,
+            )
+        finally:
+            # Always remove the streaming buffer, even on timeout / error,
+            # so the UI flips back to non-streaming refresh cadence.
+            self._clear_streaming()
 
         # Outbound delivery is the LLM's responsibility — it must call
         # `mcp__internal_agent_routing__send_reply` during the turn. If
@@ -1280,6 +1340,55 @@ class InternalAgentSession:
             save_session_id(self.name, sid)
         except OSError as exc:
             log.warning("[%s] could not persist session id: %s", self.name, exc)
+
+    # ── streaming buffer (Portal → Agents tab live view) ──────
+    def _flush_streaming(
+        self,
+        *,
+        started_at: str,
+        ids: list[str],
+        text_parts: list[str],
+        events: list[dict],
+    ) -> None:
+        """Atomically write the in-flight streaming buffer.
+
+        Payload mirrors `app/chat.py`'s session-state shape so the agents tab
+        can render the same event types (text, tool_use, thinking).
+
+        Note: ``started_at`` MUST be produced via ``datetime.isoformat()`` so
+        readers can round-trip it through ``datetime.fromisoformat`` on
+        Python <3.11 (which rejects a trailing ``Z`` suffix).
+        """
+        target = streaming_path(self.name)
+        payload = {
+            "name": self.name,
+            "started_at": started_at,
+            "ids": ids,
+            "text": "".join(text_parts),
+            "events": events[-200:],
+        }
+        # Per-write unique tmp suffix avoids a sibling-collision race if two
+        # writers (e.g. a stale tmp from a crashed turn + a fresh one) ever
+        # target the same agent dir. ``Path.replace`` is atomic on the same
+        # filesystem, which is guaranteed here (tmp + target share a parent).
+        tmp = target.with_name(f"{target.name}.{uuid.uuid4().hex[:8]}.tmp")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(payload, indent=2))
+            tmp.replace(target)
+        except OSError as exc:
+            log.warning("[%s] could not flush streaming buffer: %s", self.name, exc)
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _clear_streaming(self) -> None:
+        target = streaming_path(self.name)
+        try:
+            target.unlink(missing_ok=True)
+        except OSError as exc:
+            log.warning("[%s] could not clear streaming buffer: %s", self.name, exc)
 
     # ── operator-driven clears ────────────────────────────────
     #

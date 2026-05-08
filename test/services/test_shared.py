@@ -540,3 +540,85 @@ def test_migrate_chat_layout_handles_meta_with_no_session_id(patch_chat_dir, tmp
     assert not (tmp_path / "memory" / "chat_meta.json").exists()
     assert sh.session_path("main").exists()
     assert sh.session_path("main").read_text() == ""
+
+
+# ---------------------------------------------------------------------------
+# set_agent_control_flag
+# ---------------------------------------------------------------------------
+
+
+def test_set_agent_control_flag_sets_named_flag(patch_shared_paths, tmp_path):
+    sh = patch_shared_paths
+    agents_file = tmp_path / "agents.json"
+    agents_file.write_text(
+        json.dumps(
+            [
+                {"type": "internal", "name": "planner", "status": "online"},
+                {"type": "internal", "name": "summarizer", "status": "online"},
+            ]
+        )
+    )
+
+    ok, matched = sh.set_agent_control_flag(
+        ["planner"], sh.AGENT_CONTROL_CLEAR_CHAT, agents_file=agents_file
+    )
+    assert ok is True
+    assert matched == ["planner"]
+
+    agents = json.loads(agents_file.read_text())
+    by_name = {a["name"]: a for a in agents}
+    assert (
+        by_name["planner"][sh.AGENT_CONTROL_FIELD][sh.AGENT_CONTROL_CLEAR_CHAT] is True
+    )
+    # Untargeted agent is left alone.
+    assert sh.AGENT_CONTROL_FIELD not in by_name["summarizer"]
+
+
+def test_set_agent_control_flag_preserves_unrelated_keys(patch_shared_paths, tmp_path):
+    sh = patch_shared_paths
+    agents_file = tmp_path / "agents.json"
+    agents_file.write_text(
+        json.dumps(
+            [
+                {
+                    "type": "internal",
+                    "name": "planner",
+                    "control": {"future_flag": "keep"},
+                }
+            ]
+        )
+    )
+    sh.set_agent_control_flag(
+        ["planner"], sh.AGENT_CONTROL_CLEAR_SESSION, agents_file=agents_file
+    )
+    ctl = json.loads(agents_file.read_text())[0][sh.AGENT_CONTROL_FIELD]
+    assert ctl["future_flag"] == "keep"
+    assert ctl[sh.AGENT_CONTROL_CLEAR_SESSION] is True
+
+
+def test_set_agent_control_flag_empty_names_is_noop(patch_shared_paths, tmp_path):
+    sh = patch_shared_paths
+    agents_file = tmp_path / "agents.json"
+    ok, matched = sh.set_agent_control_flag(
+        [], sh.AGENT_CONTROL_CLEAR_CHAT, agents_file=agents_file
+    )
+    assert ok is True
+    assert matched == []
+    # File was not touched / created.
+    assert not agents_file.exists()
+
+
+def test_set_agent_control_flag_unknown_name_returns_no_match(
+    patch_shared_paths, tmp_path
+):
+    sh = patch_shared_paths
+    agents_file = tmp_path / "agents.json"
+    agents_file.write_text(json.dumps([{"type": "internal", "name": "planner"}]))
+    ok, matched = sh.set_agent_control_flag(
+        ["ghost"], sh.AGENT_CONTROL_CLEAR_CHAT, agents_file=agents_file
+    )
+    assert ok is True
+    assert matched == []
+    # Real agent untouched.
+    agents = json.loads(agents_file.read_text())
+    assert sh.AGENT_CONTROL_FIELD not in agents[0]

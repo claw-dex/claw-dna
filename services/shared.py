@@ -467,6 +467,16 @@ def session_path(name: str) -> Path:
     return chat_dir(name) / (name + ".session")
 
 
+def streaming_path(name: str) -> Path:
+    """In-flight streaming buffer for surface *name*.
+
+    Presence of this file means a turn is currently streaming. The daemon
+    writes partial text + events here as the SDK emits blocks, then deletes
+    it once the final assistant turn is appended to ``chat_history.json``.
+    """
+    return chat_dir(name) / "streaming.json"
+
+
 def ensure_chat_dir(name: str) -> None:
     """Create the per-surface chat directory and its three files.
 
@@ -675,3 +685,64 @@ def migrate_chat_layout(
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Agent control-flag mutation — single source of truth shared by the CLI
+# (scripts/interact_with_agent.py) and the portal (app/agents_tab.py).
+# ---------------------------------------------------------------------------
+
+# Canonical names for the on-disk control fields. Kept here so writers
+# (CLI, portal) and the daemon's reader (services/internal_agent_chat.py)
+# all reference the same constants.
+AGENT_CONTROL_FIELD = "control"
+AGENT_CONTROL_CLEAR_CHAT = "clear_chat"
+AGENT_CONTROL_CLEAR_SESSION = "clear_session"
+
+
+def set_agent_control_flag(
+    names: list[str],
+    key: str,
+    *,
+    agents_file: Path,
+    value: bool = True,
+) -> tuple[bool, list[str]]:
+    """Set ``control[<key>] = value`` on every named agent in agents.json.
+
+    Done in a single locked read-modify-write so concurrent updates from
+    other writers (other CLI invocations, register_internal_agent.py,
+    the daemon's strip-after-apply path) cannot interleave or drop
+    fields.
+
+    Returns ``(ok, matched_names)``:
+    * ``ok`` is False only when the locked write itself failed; an empty
+      ``names`` list is treated as a successful no-op.
+    * ``matched_names`` lists every name that was actually present in
+      agents.json; absent names are silently ignored so callers can
+      report them with their own UX.
+    """
+    if not names:
+        return True, []
+    targets = set(names)
+    matched: set[str] = set()
+
+    def _rw(items):
+        if not isinstance(items, list):
+            items = []
+        for a in items:
+            if not isinstance(a, dict):
+                continue
+            n = a.get("name")
+            if n not in targets:
+                continue
+            ctl = a.get(AGENT_CONTROL_FIELD)
+            if not isinstance(ctl, dict):
+                ctl = {}
+            ctl[key] = value
+            a[AGENT_CONTROL_FIELD] = ctl
+            matched.add(n)
+        return items
+
+    if not locked_json_rw(_rw, json_file=agents_file, default=[]):
+        return False, []
+    return True, sorted(matched)

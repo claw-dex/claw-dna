@@ -1,4 +1,4 @@
-"""Tab 5: Agent Overview — suggestions, goal performance, evolution balance, health."""
+"""Tab 5: Overview — suggestions, goal performance, evolution balance, health."""
 
 import streamlit as st
 from datetime import datetime, timezone, timedelta
@@ -229,7 +229,7 @@ def render():
     inbox = load_inbox() or []
     errors = load_errors() or []
 
-    st.markdown("## Agent Overview")
+    st.markdown("## Overview")
     st.caption(
         "Suggestions, goal performance, evolution balance, and health — all in one place."
     )

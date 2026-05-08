@@ -106,3 +106,4 @@ There is no `--update` flag — updates are done by re-running the script with t
 ## Related
 
 - `interact-with-agent` — send messages and queue `clear-chat` / `clear-session` control flags via `scripts/interact_with_agent.py`.
+- Portal **🤖 Agents** tab — same actions (send-message, clear-chat, clear-session) plus live inspection of chat history, inbox traffic, and raw `agents.json` config, all from the Streamlit UI.

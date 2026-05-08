@@ -15,6 +15,7 @@ from streamlit_autorefresh import st_autorefresh
 from app.shared import _startup_check, heartbeat_freshness
 from app.data import load_state, load_errors, load_cycle_velocity, load_services
 from app import (
+    agents_tab,
     chat,
     commands_tab,
     memory_tab,
@@ -36,7 +37,8 @@ TAB_REGISTRY = [
     ("📓 Memory", memory_tab, "Memory", "Agent Console"),
     ("⚙️ System", system_tab, "System", "Agent Console"),
     ("🔧 Services & Cron", services_tab, "Services & Cron", "Agent Console"),
-    ("🔭 Agent Overview", overview_tab, "Agent Overview", "Agent Console"),
+    ("🔭 Overview", overview_tab, "Overview", "Agent Console"),
+    ("🤖 Agents", agents_tab, "Agents", "Agent Console"),
     # Core — file / credential / email management
     ("📁 Workspace", workspace_tab, "Workspace", "Core"),
     ("🔑 Credentials", credential_tab, "Credentials", "Core"),
