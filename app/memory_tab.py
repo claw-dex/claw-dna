@@ -7,7 +7,7 @@ import re
 
 import streamlit as st
 
-from app.shared import MEMORY_DIR
+from app.shared import MEMORY_DIR, _STATUS_COLORS, _STATUS_MD_COLORS, _badge
 
 
 def _format_size(num_bytes: int) -> str:
@@ -131,8 +131,13 @@ def render():
                     "failed": "❌",
                     "in_progress": "🔄",
                 }.get(status, "⏳")
+                status_md_color = _STATUS_MD_COLORS.get(status, "gray")
+                status_label = (status or "pending").replace("_", " ")
 
-                with st.expander(f"{status_icon} Cycle {cycle} — {goal[:60]} `{ts}`"):
+                with st.expander(
+                    f"{status_icon} :{status_md_color}[**{status_label}**] · "
+                    f"Cycle {cycle} — {goal[:60]} `{ts}`"
+                ):
                     entry_type = entry.get("cycle_type", "")
                     category = entry.get("cycle_category", "")
                     actions = entry.get("actions", [])
@@ -349,8 +354,13 @@ def render():
                     :19
                 ].replace("T", " ")
                 with st.expander(f"{icon} {content[:80]} `{g_status}`"):
+                    s_color = _STATUS_COLORS.get(g_status, "#666")
+                    st.markdown(
+                        _badge(g_status.replace("_", " "), s_color),
+                        unsafe_allow_html=True,
+                    )
                     st.markdown(f"**Goal:** {content}")
-                    st.caption(f"Status: {g_status} | Created: {created}")
+                    st.caption(f"Created: {created}")
                     if g.get("id"):
                         st.caption(f"ID: {g['id']}")
 

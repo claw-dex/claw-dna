@@ -13,7 +13,13 @@ from app.data import (
     load_scheduled_tasks,
 )
 from app.data.write import delete_scheduled_task
-from app.shared import _badge, _STATUS_COLORS, _TYPE_COLORS, parse_dt
+from app.shared import (
+    _badge,
+    _STATUS_COLORS,
+    _STATUS_MD_COLORS,
+    _TYPE_COLORS,
+    parse_dt,
+)
 
 MAX_ITEMS = 10
 CONTAINER_HEIGHT = 320
@@ -66,6 +72,7 @@ def _build_items(goals, inbox, outbox, reminders, filter_cat):
                     "icon": "🎯",
                     "badge_text": status.replace("_", " ").replace("-", " "),
                     "badge_color": _STATUS_COLORS.get(status, "#666"),
+                    "badge_md_color": _STATUS_MD_COLORS.get(status, "gray"),
                     "text": g.get("goal") or g.get("content") or "",
                     "ts": _extract_ts(g),
                     "pinned": False,
@@ -139,7 +146,8 @@ def _render_detail(item):
     cat = item["cat"]
 
     if cat == "goal":
-        st.markdown(badge, unsafe_allow_html=True)
+        # Status badge is already shown (colored) in the expander title —
+        # don't duplicate it here.
         goal_text = raw.get("goal") or raw.get("content") or ""
         st.markdown(goal_text)
         source = raw.get("source", "")
@@ -394,7 +402,15 @@ def render():
             preview = item["text"][:80] + ("..." if len(item["text"]) > 80 else "")
             time_str = _time_ago(item["ts"])
             pin_marker = "🔴 " if item["pinned"] else ""
-            label = f"{pin_marker}{item['icon']} {item['badge_text']}  ·  {preview}  ·  {time_str}"
+            if item["cat"] == "goal":
+                # Render the status as colored markdown inside the title so
+                # the badge color is visible without expanding the row.
+                badge_md = f":{item['badge_md_color']}[**{item['badge_text']}**]"
+            else:
+                badge_md = item["badge_text"]
+            label = (
+                f"{pin_marker}{item['icon']} {badge_md}  ·  {preview}  ·  {time_str}"
+            )
 
             col_exp, col_btn = st.columns([6, 1])
             with col_exp:

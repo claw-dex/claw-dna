@@ -35,6 +35,15 @@ _STATUS_COLORS = {
     "in_progress": "#2196F3",
     "pending": "#FF9800",
 }
+# Streamlit markdown color names per status — used to colorize status text
+# inside expander labels / markdown contexts (which only support markdown,
+# not HTML). Kept in sync with _STATUS_COLORS above.
+_STATUS_MD_COLORS = {
+    "completed": "green",
+    "failed": "red",
+    "in_progress": "blue",
+    "pending": "orange",
+}
 _TYPE_COLORS = {
     # Inbox types
     "goal": "#2196F3",

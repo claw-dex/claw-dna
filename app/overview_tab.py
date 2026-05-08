@@ -3,7 +3,12 @@
 import streamlit as st
 from datetime import datetime, timezone, timedelta
 
-from app.shared import heartbeat_freshness, parse_dt as _safe_fromisoformat
+from app.shared import (
+    _STATUS_COLORS,
+    _badge,
+    heartbeat_freshness,
+    parse_dt as _safe_fromisoformat,
+)
 
 _CATEGORY_COLORS = {
     "capability": "#2196F3",
@@ -170,6 +175,13 @@ def _render_today_glance(now_utc):
             else ""
         )
 
+        status_color = _STATUS_COLORS.get(status, "#666")
+        status_badge = (
+            f'<span style="background:{status_color};color:#fff;padding:0 5px;'
+            f'border-radius:8px;font-size:10px;font-weight:600;margin:0 3px">'
+            f'{status.replace("_"," ") if status else "?"}</span>'
+        )
+
         items_html.append(
             f'<div style="display:flex;align-items:flex-start;gap:6px;padding:5px 0;'
             f'border-bottom:1px solid #222">'
@@ -177,6 +189,7 @@ def _render_today_glance(now_utc):
             f'<span style="font-size:14px">{status_icon}{type_icon}</span>'
             f'<div style="flex:1;min-width:0">'
             f'<span style="font-size:12px;font-weight:600">#{cn} {ctype}</span>'
+            f"{status_badge}"
             f"{cat_badge}"
             f'<span style="color:#888;font-size:11px;margin-left:4px">{dur_str}</span>'
             f'<div style="color:#bbb;font-size:11px;margin-top:1px;white-space:nowrap;'
@@ -439,7 +452,14 @@ def render():
                 icon = status_icons.get(gstatus, "•")
                 content = g.get("content") or g.get("goal") or ""
                 created = (g.get("created_at") or "")[:10]
-                st.markdown(f"{icon} **{content[:80]}** `{gstatus}` — {created}")
+                badge = _badge(
+                    gstatus.replace("_", " ") if gstatus else "?",
+                    _STATUS_COLORS.get(gstatus, "#666"),
+                )
+                st.markdown(
+                    f"{icon} {badge} &nbsp; **{content[:80]}** — {created}",
+                    unsafe_allow_html=True,
+                )
 
     st.divider()
 
