@@ -75,17 +75,57 @@ from shared import (
     write_to_outbox,
 )
 
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-    ResultMessage,
-    TextBlock,
-    ThinkingBlock,
-    ToolUseBlock,
-    create_sdk_mcp_server,
-    tool,
-)
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Only imported for static analysis — never at runtime at module level.
+    # claude_agent_sdk takes ~550 ms to import; the lazy loader below is
+    # called only when the service actually connects (i.e., never in tests).
+    from claude_agent_sdk import (  # noqa: F401
+        AssistantMessage,
+        ClaudeAgentOptions,
+        ClaudeSDKClient,
+        ResultMessage,
+        TextBlock,
+        ThinkingBlock,
+        ToolUseBlock,
+        create_sdk_mcp_server,
+        tool,
+    )
+
+
+_SDK_IMPORT_CACHE: "SimpleNamespace | None" = None
+
+
+def _import_claude_sdk() -> "SimpleNamespace":
+    """Lazy-load claude_agent_sdk (~550 ms import) on first real SDK call.
+
+    Returns a SimpleNamespace exposing the SDK symbols by attribute. Using
+    attribute access (sdk.ClaudeSDKClient) instead of positional unpacking
+    keeps call sites self-documenting and prevents silent breakage when the
+    set of exports changes. Depends on `from __future__ import annotations`
+    at the top of this module for the SDK-typed annotations to remain
+    string-form and not require the SDK at import time.
+    """
+    global _SDK_IMPORT_CACHE
+    if _SDK_IMPORT_CACHE is not None:
+        return _SDK_IMPORT_CACHE
+    import claude_agent_sdk as _m
+
+    _SDK_IMPORT_CACHE = SimpleNamespace(
+        AssistantMessage=_m.AssistantMessage,
+        ClaudeAgentOptions=_m.ClaudeAgentOptions,
+        ClaudeSDKClient=_m.ClaudeSDKClient,
+        ResultMessage=_m.ResultMessage,
+        TextBlock=_m.TextBlock,
+        ThinkingBlock=_m.ThinkingBlock,
+        ToolUseBlock=_m.ToolUseBlock,
+        create_sdk_mcp_server=_m.create_sdk_mcp_server,
+        tool=_m.tool,
+    )
+    return _SDK_IMPORT_CACHE
+
 
 # --- Paths ---
 BASE = Path("/agent")
@@ -111,6 +151,16 @@ CLAUDE_SYSTEM_PROMPT_MD = Path("/home/agent/claude-system-prompt.md")
 SWEEP_SECONDS = 10
 TURN_TIMEOUT_SECONDS = 600  # safety cap on a single turn
 INBOX_HISTORY_MAX = 500
+
+# --- Session-start backoff ---
+# When an internal-agent session fails to connect, the fleet manager backs
+# off exponentially before retrying.  This prevents rapid-fire error spam
+# in server_errors.json while the underlying issue is being resolved.
+#   first failure  → wait START_BACKOFF_BASE_S (10 s = one sweep tick)
+#   second failure → wait 20 s
+#   third failure  → wait 40 s  … capped at START_BACKOFF_MAX_S (10 min)
+START_BACKOFF_BASE_S: float = float(SWEEP_SECONDS)
+START_BACKOFF_MAX_S: float = 600.0
 SDK_CONNECT_TIMEOUT = 30
 # System-prompt history selection: include every chat record from the last
 # CHAT_HISTORY_RECENT_HOURS regardless of count; if none qualify, fall back
@@ -782,9 +832,10 @@ def _build_send_reply_server(session_name: str, cfg: dict):
     when each is appropriate. The handler closes over `session_name` so
     self-talk and message_id lookups resolve against the right agent.
     """
+    sdk = _import_claude_sdk()
     description = _build_tool_description(cfg)
     handler = _build_send_reply_handler(session_name, cfg)
-    decorated = tool(
+    decorated = sdk.tool(
         SEND_REPLY_TOOL,
         description,
         {
@@ -795,7 +846,7 @@ def _build_send_reply_server(session_name: str, cfg: dict):
             "priority": int,
         },
     )(handler)
-    return create_sdk_mcp_server(ROUTING_MCP_SERVER, tools=[decorated])
+    return sdk.create_sdk_mcp_server(ROUTING_MCP_SERVER, tools=[decorated])
 
 
 # ---------------------------------------------------------------------------
@@ -910,6 +961,7 @@ class InternalAgentSession:
         #   3. an optional `model` override (haiku/sonnet/opus, or a full
         #      model id) — passed through to the SDK, which handles alias
         #      → id resolution. Absent or blank → SDK default.
+        sdk = _import_claude_sdk()
         custom = self.cfg.get("system_prompt") or ""
         if not isinstance(custom, str):
             custom = ""
@@ -920,7 +972,7 @@ class InternalAgentSession:
             else None
         )
         routing_server = _build_send_reply_server(self.name, self.cfg)
-        return ClaudeAgentOptions(
+        return sdk.ClaudeAgentOptions(
             system_prompt=_build_system_prompt(self._chat_history, custom),
             model=model,
             permission_mode="bypassPermissions",
@@ -952,7 +1004,8 @@ class InternalAgentSession:
 
     async def _connect_sdk(self) -> None:
         options = self._build_options()
-        self._sdk = ClaudeSDKClient(options)
+        sdk = _import_claude_sdk()
+        self._sdk = sdk.ClaudeSDKClient(options)
         await self._sdk.connect()
         log.info("[%s] connected (resume=%s)", self.name, self._session_id or "<new>")
 
@@ -1113,6 +1166,12 @@ class InternalAgentSession:
     # ── one turn ───────────────────────────────────────────────
 
     async def _run_turn_for_group(self, reply_to_key: str, msgs: list) -> None:
+        _sdk_mod = _import_claude_sdk()
+        AssistantMessage = _sdk_mod.AssistantMessage
+        ResultMessage = _sdk_mod.ResultMessage
+        TextBlock = _sdk_mod.TextBlock
+        ThinkingBlock = _sdk_mod.ThinkingBlock
+        ToolUseBlock = _sdk_mod.ToolUseBlock
         prompt = self._build_user_prompt(msgs)
         ids = [m["id"] for m in msgs]
 
@@ -1586,6 +1645,11 @@ class Fleet:
 
     def __init__(self):
         self._sessions: dict = {}
+        # Tracks consecutive start failures per agent name so we can back
+        # off exponentially instead of hammering server_errors.json on
+        # every sweep tick.
+        # Schema: {name: {"count": int, "next_try": float (unix timestamp)}}
+        self._start_failures: dict = {}
 
     def reconcile(self) -> None:
         agents = _load_agents()
@@ -1601,20 +1665,65 @@ class Fleet:
                     log.warning("Stop %s failed: %s", name, exc)
                 self._sessions.pop(name, None)
 
+        # Drop backoff state for any agent no longer wanted, including
+        # those that only ever failed to start (never landed in
+        # _sessions). Without this, removed agents leak entries here.
+        for name in list(self._start_failures.keys()):
+            if name not in wanted:
+                self._start_failures.pop(name, None)
+
         # Start new sessions
         for name, cfg in wanted.items():
             if name in self._sessions:
                 # Refresh cfg in-place so routing rule edits take effect.
                 self._sessions[name].cfg = cfg
                 continue
+
+            # Honour exponential backoff after previous start failures.
+            failure_rec = self._start_failures.get(name)
+            now = time.time()
+            if failure_rec and now < failure_rec["next_try"]:
+                log.debug(
+                    "Skipping start for %s — backing off (%.0fs remaining, "
+                    "failure #%d)",
+                    name,
+                    failure_rec["next_try"] - now,
+                    failure_rec["count"],
+                )
+                continue
+
             log.info("Starting session for %s", name)
             try:
                 sess = InternalAgentSession(name, cfg)
                 sess.start()
                 self._sessions[name] = sess
+                # Clear backoff on success.
+                self._start_failures.pop(name, None)
             except Exception as exc:
-                log.error("Failed to start %s: %s", name, exc, exc_info=True)
-                surface_error("internal_agent_chat", exc, context="start:" + name)
+                # Record the failure and compute the next retry window.
+                prev = self._start_failures.get(name, {"count": 0})
+                new_count = prev["count"] + 1
+                delay = min(
+                    START_BACKOFF_BASE_S * (2 ** (new_count - 1)),
+                    START_BACKOFF_MAX_S,
+                )
+                self._start_failures[name] = {
+                    "count": new_count,
+                    "next_try": now + delay,
+                }
+                log.error(
+                    "Failed to start %s (attempt #%d, retrying in %.0fs): %s",
+                    name,
+                    new_count,
+                    delay,
+                    exc,
+                    exc_info=True,
+                )
+                # Only surface the first failure to server_errors.json;
+                # subsequent retries while still broken would otherwise
+                # spam the operator-visible error log every sweep tick.
+                if new_count == 1:
+                    surface_error("internal_agent_chat", exc, context="start:" + name)
 
     def sweep_inboxes(self) -> None:
         for name, sess in self._sessions.items():

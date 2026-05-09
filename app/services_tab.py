@@ -4,6 +4,22 @@ from datetime import datetime, timezone
 
 import streamlit as st
 
+# Number of trailing log lines to show for stdout/stderr in the service detail
+# expander — analogous to `tail -n 200`. The full log is still available via
+# the Download buttons.
+_LOG_TAIL_LINES = 200
+
+
+def _tail_lines(text: str, n: int = _LOG_TAIL_LINES) -> tuple[str, int]:
+    """Return (last n lines joined, total line count) for the given text."""
+    if not text:
+        return "", 0
+    lines = text.splitlines()
+    total = len(lines)
+    if total <= n:
+        return text if text.endswith("\n") else text, total
+    return "\n".join(lines[-n:]), total
+
 
 def render():
     from app.data import (
@@ -176,8 +192,15 @@ def render():
                     stdout_path = logs.get("stdout_path", "")
 
                     if stderr_content:
-                        st.markdown("**stderr** — errors and crash output")
-                        st.code(stderr_content, language="log")
+                        stderr_tail, stderr_total = _tail_lines(stderr_content)
+                        truncated = stderr_total > _LOG_TAIL_LINES
+                        suffix = (
+                            f" — last {_LOG_TAIL_LINES} of {stderr_total} lines"
+                            if truncated
+                            else f" — {stderr_total} line(s)"
+                        )
+                        st.markdown(f"**stderr** — errors and crash output{suffix}")
+                        st.code(stderr_tail, language="log")
                         if stderr_path:
                             try:
                                 with open(
@@ -196,8 +219,15 @@ def render():
                             )
 
                     if stdout_content:
-                        st.markdown("**stdout**")
-                        st.code(stdout_content, language="log")
+                        stdout_tail, stdout_total = _tail_lines(stdout_content)
+                        truncated = stdout_total > _LOG_TAIL_LINES
+                        suffix = (
+                            f" — last {_LOG_TAIL_LINES} of {stdout_total} lines"
+                            if truncated
+                            else f" — {stdout_total} line(s)"
+                        )
+                        st.markdown(f"**stdout**{suffix}")
+                        st.code(stdout_tail, language="log")
                         if stdout_path:
                             try:
                                 with open(

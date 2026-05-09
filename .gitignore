@@ -263,3 +263,9 @@ Thumbs.db
 *.swo
 *~
 .idea/
+
+# Agent
+memory/
+messages/
+web/
+workspace/
