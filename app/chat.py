@@ -723,6 +723,75 @@ def _get_or_recreate_chat() -> "ClaudeChat | None":
     return _get_chat_singleton()
 
 
+def _drain_streaming_events(session) -> None:
+    """Pull pending SDK events from `session` into the streaming buffers.
+
+    Safe to call repeatedly; no-op if `session` is None. Does not commit
+    to `chat_messages` or disk and does not rerun.
+    """
+    if session is None:
+        return
+    new_events = session.poll()
+    for ev in new_events:
+        st.session_state.chat_stream_events.append(ev)
+        if ev["type"] == "text":
+            st.session_state.chat_stream_text += ev["text"]
+        elif ev["type"] == "error":
+            st.session_state.chat_stream_text += f"\n\n**Error:** {ev['error']}"
+
+
+def _commit_streaming_buffer() -> bool:
+    """Flush `chat_stream_text` / `chat_stream_events` into `chat_messages`
+    and disk, then clear the streaming buffers.
+
+    Relaxes the empty-text case: if no text events arrived but tool/thinking
+    events did, synthesize a short placeholder so the turn is still recorded
+    in the visible history. Returns True if a record was appended.
+    """
+    full_text = st.session_state.chat_stream_text
+    events = st.session_state.chat_stream_events
+    if not full_text and events:
+        tool_names = [
+            ev.get("name", "?") for ev in events if ev.get("type") == "tool_use"
+        ]
+        had_thinking = any(ev.get("type") == "thinking" for ev in events)
+        bits: list[str] = []
+        if had_thinking:
+            bits.append("_(thinking only)_")
+        if tool_names:
+            bits.append("Used tools: " + ", ".join(tool_names))
+        if bits:
+            full_text = " ".join(bits)
+    committed = False
+    if full_text:
+        st.session_state.chat_messages.append(
+            {"role": "assistant", "content": full_text}
+        )
+        _save_chat_history(st.session_state.chat_messages)
+        committed = True
+    st.session_state.chat_stream_text = ""
+    st.session_state.chat_stream_events = []
+    return committed
+
+
+def _finalize_assistant_turn(session) -> bool:
+    """If `session` has finished streaming, drain trailing events, commit
+    the assembled reply, persist session_id, and flip `chat_streaming` off.
+
+    Returns True if a record was committed. Does not rerun — the caller
+    decides whether to trigger one.
+    """
+    if session is None or session.is_streaming():
+        return False
+    _drain_streaming_events(session)
+    committed = _commit_streaming_buffer()
+    if session.session_id:
+        st.session_state.chat_session_id = session.session_id
+        _save_chat_session_id(session.session_id)
+    st.session_state.chat_streaming = False
+    return committed
+
+
 @st.fragment(run_every="3s")
 def _chat_stream_fragment():
     """Streaming poll + live-bubble render, scoped to a fragment.
@@ -739,37 +808,15 @@ def _chat_stream_fragment():
     session = st.session_state.get("chat_session")
 
     if st.session_state.get("chat_streaming") and session:
-        new_events = session.poll()
-        for ev in new_events:
-            st.session_state.chat_stream_events.append(ev)
-            if ev["type"] == "text":
-                st.session_state.chat_stream_text += ev["text"]
-            elif ev["type"] == "error":
-                st.session_state.chat_stream_text += f"\n\n**Error:** {ev['error']}"
-
-        if not session.is_streaming():
-            # Final drain to catch any events between last poll() and done_event
-            trailing = session.poll()
-            for ev in trailing:
-                st.session_state.chat_stream_events.append(ev)
-                if ev["type"] == "text":
-                    st.session_state.chat_stream_text += ev["text"]
-                elif ev["type"] == "error":
-                    st.session_state.chat_stream_text += f"\n\n**Error:** {ev['error']}"
-            full_text = st.session_state.chat_stream_text
-            if full_text:
-                st.session_state.chat_messages.append(
-                    {"role": "assistant", "content": full_text}
-                )
-                _save_chat_history(st.session_state.chat_messages)
-            if session.session_id:
-                st.session_state.chat_session_id = session.session_id
-                _save_chat_session_id(session.session_id)
-            st.session_state.chat_streaming = False
-            st.session_state.chat_stream_text = ""
-            st.session_state.chat_stream_events = []
+        _drain_streaming_events(session)
+        if _finalize_assistant_turn(session):
             # App-scoped rerun so the next render() takes the non-fragment
             # path and the 3s polling timer stops.
+            st.rerun(scope="app")
+        elif not session.is_streaming():
+            # Session ended with no text/tool/thinking content — nothing to
+            # commit, but still flip the streaming flag and rerun so the
+            # fragment unmounts.
             st.rerun(scope="app")
 
     # Live bubble — only while streaming.
@@ -853,6 +900,17 @@ def render():
     # server.py keeps its widget identity and the active tab is preserved.
     if st.session_state.chat_streaming:
         _chat_stream_fragment()
+    elif st.session_state.chat_stream_text or st.session_state.chat_stream_events:
+        # Self-heal: a previous turn left text/events in the buffer without
+        # finalizing (e.g. fragment stopped firing before the SDK ended).
+        # Commit them now so they appear in this render's history list.
+        # Guard: only commit when the SDK session also reports done, to
+        # avoid materializing a partial buffer that a still-running turn
+        # is about to extend.
+        sess = st.session_state.get("chat_session")
+        if sess is None or not sess.is_streaming():
+            if _commit_streaming_buffer():
+                st.rerun()
 
     # Clear chat button — fully discard the current SDK session (interrupt any
     # in-flight turn, close the singleton, wipe persisted session_id) so the
@@ -869,10 +927,9 @@ def render():
             refresh_clicked = st.button(
                 "Refresh",
                 key="refresh_chat",
-                disabled=st.session_state.chat_streaming,
                 help=(
-                    "Pull in any messages written by background jobs since the "
-                    "page loaded."
+                    "Drain any pending streamed events from the SDK, commit "
+                    "a finished turn, and reload chat history from disk."
                 ),
             )
     if clear_clicked:
@@ -917,13 +974,37 @@ def render():
         st.session_state.pop("chat_connect_failed", None)
         st.rerun()
     if refresh_clicked:
+        # Step 1: drain any pending SDK events into the streaming buffers,
+        # then finalize if the turn has completed. This is what the fragment
+        # would normally do on its 3s tick — making Refresh do it lets the
+        # user manually pull a stuck/late reply without sending again.
+        committed = False
+        if session is not None:
+            _drain_streaming_events(session)
+            committed = _finalize_assistant_turn(session)
+        # Step 2: reconcile in-memory chat_messages with disk. Prefer the
+        # longer list to avoid wiping a just-appended record before its
+        # disk write has propagated.
         disk = _load_chat_history()
-        if disk != st.session_state.chat_messages:
+        in_mem = st.session_state.chat_messages
+        if len(disk) > len(in_mem):
             st.session_state.chat_messages = disk
             meta_sid = _load_chat_meta().get("session_id")
             if meta_sid and meta_sid != st.session_state.get("chat_session_id"):
                 st.session_state.chat_session_id = meta_sid
             st.toast(f"Loaded {len(disk)} messages from disk.")
+            st.rerun()
+        elif len(in_mem) > len(disk):
+            _save_chat_history(in_mem)
+            st.toast(f"Saved {len(in_mem)} messages to disk.")
+            st.rerun()
+        elif committed:
+            st.rerun()
+        elif st.session_state.chat_streaming:
+            st.toast("Still streaming — buffered events drained.")
+        elif disk != in_mem:
+            st.session_state.chat_messages = disk
+            st.toast(f"Reloaded {len(disk)} messages from disk.")
             st.rerun()
         else:
             st.toast("No new messages.")

@@ -467,16 +467,6 @@ def session_path(name: str) -> Path:
     return chat_dir(name) / (name + ".session")
 
 
-def streaming_path(name: str) -> Path:
-    """In-flight streaming buffer for surface *name*.
-
-    Presence of this file means a turn is currently streaming. The daemon
-    writes partial text + events here as the SDK emits blocks, then deletes
-    it once the final assistant turn is appended to ``chat_history.json``.
-    """
-    return chat_dir(name) / "streaming.json"
-
-
 def ensure_chat_dir(name: str) -> None:
     """Create the per-surface chat directory and its three files.
 

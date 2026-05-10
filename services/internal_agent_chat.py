@@ -23,9 +23,12 @@ Per-message flow:
      the inbox, stamps each envelope with a fresh uuid4 `id` +
      `processed_at`, archives them to `inbox_history.json`, and groups
      them by `reply_to`.
-  4. Each group becomes one merged user turn into the SDK session.
-  5. The assistant's response is persisted to `chat_history.json` (both
-     the `user` and `assistant` records carry the same `source_ids`).
+  4. Each group becomes one merged user turn into the SDK session. The
+     `user` record is appended to `chat_history.json` BEFORE the SDK runs
+     so the portal Chat tab can show the inbound prompt immediately.
+  5. The assistant's response is appended to `chat_history.json` once the
+     SDK turn ends (or an error placeholder on timeout). Both records
+     carry the same `source_ids` for correlation.
   6. Outbound delivery is driven by the LLM itself via the per-session
      `mcp__internal_agent_routing__send_reply` MCP tool. The tool's
      description is built from the agent's `outbox_routing_rules` so the
@@ -69,7 +72,6 @@ from shared import (
     read_json_file,
     save_session_id,
     session_path,
-    streaming_path,
     surface_error,
     write_to_inbox,
     write_to_outbox,
@@ -88,8 +90,6 @@ if TYPE_CHECKING:
         ClaudeSDKClient,
         ResultMessage,
         TextBlock,
-        ThinkingBlock,
-        ToolUseBlock,
         create_sdk_mcp_server,
         tool,
     )
@@ -119,8 +119,6 @@ def _import_claude_sdk() -> "SimpleNamespace":
         ClaudeSDKClient=_m.ClaudeSDKClient,
         ResultMessage=_m.ResultMessage,
         TextBlock=_m.TextBlock,
-        ThinkingBlock=_m.ThinkingBlock,
-        ToolUseBlock=_m.ToolUseBlock,
         create_sdk_mcp_server=_m.create_sdk_mcp_server,
         tool=_m.tool,
     )
@@ -162,6 +160,10 @@ INBOX_HISTORY_MAX = 500
 START_BACKOFF_BASE_S: float = float(SWEEP_SECONDS)
 START_BACKOFF_MAX_S: float = 600.0
 SDK_CONNECT_TIMEOUT = 30
+# Reconnect thrash guard — see InternalAgentSession.__init__.
+RECONNECT_THRASH_THRESHOLD = 3
+RECONNECT_THRASH_WINDOW_S = 60.0
+RECONNECT_COOLDOWN_S = 120.0
 # System-prompt history selection: include every chat record from the last
 # CHAT_HISTORY_RECENT_HOURS regardless of count; if none qualify, fall back
 # to the most recent CHAT_HISTORY_SOFT_LIMIT records, extending the window
@@ -882,6 +884,16 @@ class InternalAgentSession:
         self._session_id: str | None = self._load_session_id()
         self._chat_history: list = read_json_file(_chat_history_path(name), default=[])
 
+        # Reconnect thrash guard: if the SDK subprocess keeps dying we don't
+        # want to spin up new ones every drain tick (each spawn burns
+        # resources and produces an identical [error] record). After
+        # `RECONNECT_THRASH_THRESHOLD` reconnects within
+        # `RECONNECT_THRASH_WINDOW_S` seconds, drains pause until
+        # `_reconnect_cooldown_until`. Operators see one surface_error per
+        # cooldown rather than a flood.
+        self._recent_reconnects: list[float] = []
+        self._reconnect_cooldown_until: float = 0.0
+
     # ── boot / shutdown ────────────────────────────────────────
 
     def start(self) -> None:
@@ -926,10 +938,6 @@ class InternalAgentSession:
             self._ready.set()
             self._loop.close()
             return
-        # If the daemon was killed mid-turn, a stale streaming.json may
-        # still claim "this agent is streaming". Wipe it on startup so the
-        # UI cadence doesn't get pinned at 10s forever.
-        self._clear_streaming()
         try:
             # Trigger one drain at startup in case messages piled up while down.
             self._pending_drain.set()
@@ -1013,6 +1021,93 @@ class InternalAgentSession:
         await self._connect_sdk()
         self._ready.set()
 
+    async def _reconnect_after_error(self, reason: str) -> bool:
+        """Best-effort SDK reconnect after a turn error / timeout.
+
+        The Claude SDK runs Claude Code in a subprocess. If that subprocess
+        dies (OOM kill / SIGKILL / pipe closed) the SDK starts raising
+        "Cannot write to terminated process" and every subsequent turn fails
+        with the same message until we recreate the client. This helper
+        disconnects the dead client and reconnects, preserving
+        ``self._session_id`` so the SDK resumes the same conversation.
+
+        Skips reconnect if shutdown has been requested (avoids creating a
+        fresh client that the shutdown path will then leak as an orphan
+        subprocess). Records each successful reconnect timestamp; the
+        worker loop checks the thrash counter and short-circuits drains
+        when we are reconnecting too often.
+
+        Returns True on success. On failure, leaves ``self._sdk = None`` so
+        the worker loop's self-heal branch retries on the next sweep.
+        """
+        if self._stop_event.is_set():
+            log.info(
+                "[%s] skipping reconnect (%s) — shutdown in progress",
+                self.name,
+                reason,
+            )
+            return False
+        log.warning("[%s] reconnecting SDK after error: %s", self.name, reason)
+        if self._sdk is not None:
+            try:
+                await self._sdk.disconnect()
+            except Exception as exc:
+                log.warning(
+                    "[%s] disconnect during reconnect failed: %s", self.name, exc
+                )
+            self._sdk = None
+        try:
+            await self._connect_sdk()
+        except Exception as exc:
+            log.error(
+                "[%s] reconnect after error failed: %s", self.name, exc, exc_info=True
+            )
+            surface_error(
+                "internal_agent_chat",
+                exc,
+                context="reconnect:" + self.name,
+            )
+            self._sdk = None
+            return False
+
+        # If shutdown was requested while we were reconnecting, immediately
+        # tear the fresh client back down so it is not leaked.
+        if self._stop_event.is_set():
+            try:
+                await self._sdk.disconnect()
+            except Exception as exc:
+                log.warning(
+                    "[%s] post-reconnect shutdown disconnect failed: %s",
+                    self.name,
+                    exc,
+                )
+            self._sdk = None
+            return False
+
+        # Record this reconnect for thrash detection. If we cross the
+        # threshold inside the window, set a cooldown so the worker loop
+        # pauses drains until the subprocess problem is investigated.
+        now = time.monotonic()
+        self._recent_reconnects.append(now)
+        cutoff = now - RECONNECT_THRASH_WINDOW_S
+        self._recent_reconnects = [t for t in self._recent_reconnects if t >= cutoff]
+        if len(self._recent_reconnects) >= RECONNECT_THRASH_THRESHOLD:
+            self._reconnect_cooldown_until = now + RECONNECT_COOLDOWN_S
+            self._recent_reconnects.clear()
+            log.error(
+                "[%s] reconnect thrash detected (%d in %ds) — pausing drains for %ds",
+                self.name,
+                RECONNECT_THRASH_THRESHOLD,
+                int(RECONNECT_THRASH_WINDOW_S),
+                int(RECONNECT_COOLDOWN_S),
+            )
+            surface_error(
+                "internal_agent_chat",
+                "reconnect thrash — drains paused",
+                context=f"{self.name}:reason={reason}",
+            )
+        return True
+
     # ── worker loop ────────────────────────────────────────────
 
     async def _worker(self) -> None:
@@ -1037,13 +1132,26 @@ class InternalAgentSession:
                     exc,
                     context="control:" + self.name,
                 )
-            if self._sdk is None:
-                # A previous clear_session reconnect failed and left us
-                # without an SDK. Skip the drain — the next sweep will
-                # re-trigger _consume_control_flags and retry the
-                # reconnect (the clear_session flag is still set in
-                # agents.json).
+            if self._reconnect_cooldown_until > time.monotonic():
+                # Reconnect thrash cooldown — see _reconnect_after_error.
+                # Skip drains so we don't keep popping inbox messages and
+                # writing identical [error] records while the subprocess
+                # situation is unresolved. The next sweep will re-check
+                # the clock and resume once the cooldown expires.
                 continue
+            if self._sdk is None:
+                # SDK is missing — either a previous clear_session reconnect
+                # failed (clear_session flag still set in agents.json) or a
+                # turn-error self-heal in `_reconnect_after_error` couldn't
+                # bring the client back. Try one reconnect here so a
+                # transient subprocess death recovers without operator
+                # action; if it still fails we skip the drain and the next
+                # sweep retries.
+                ok = await self._reconnect_after_error(
+                    "self-heal: SDK missing at worker tick"
+                )
+                if not ok:
+                    continue
             try:
                 await self._drain_and_process_all()
             except Exception as exc:
@@ -1170,15 +1278,12 @@ class InternalAgentSession:
         AssistantMessage = _sdk_mod.AssistantMessage
         ResultMessage = _sdk_mod.ResultMessage
         TextBlock = _sdk_mod.TextBlock
-        ThinkingBlock = _sdk_mod.ThinkingBlock
-        ToolUseBlock = _sdk_mod.ToolUseBlock
         prompt = self._build_user_prompt(msgs)
         ids = [m["id"] for m in msgs]
 
         chunk_q: queue.Queue = queue.Queue()
         done = asyncio.Event()
         text_parts: list[str] = []
-        events: list[dict] = []
         cost = None
         duration_ms = None
         is_error = False
@@ -1186,47 +1291,25 @@ class InternalAgentSession:
         sdk = self._sdk
         assert sdk is not None
 
-        stream_started_at = datetime.now(timezone.utc).isoformat()
+        merged_reply_to = reply_to_key if reply_to_key != "__none__" else None
+        # Persist the user record up-front so the portal chat tab shows the
+        # received prompt as soon as it arrives, not only after the agent
+        # finishes responding. The assistant record is appended once the
+        # SDK turn completes (or with an error placeholder on timeout).
+        self._append_user_record(
+            ids=ids,
+            merged_reply_to=merged_reply_to,
+            user_text=self._readable_user_record(msgs),
+        )
 
         async def _runner():
             try:
                 await sdk.query(prompt)
                 async for msg in sdk.receive_response():
                     if isinstance(msg, AssistantMessage):
-                        dirty = False
                         for block in msg.content:
                             if isinstance(block, TextBlock) and block.text:
                                 text_parts.append(block.text)
-                                events.append({"type": "text", "text": block.text})
-                                dirty = True
-                            elif isinstance(block, ToolUseBlock):
-                                events.append(
-                                    {
-                                        "type": "tool_use",
-                                        "name": getattr(block, "name", "") or "",
-                                        "id": getattr(block, "id", "") or "",
-                                    }
-                                )
-                                dirty = True
-                            elif isinstance(block, ThinkingBlock):
-                                thinking_text = getattr(block, "thinking", None) or ""
-                                events.append(
-                                    {"type": "thinking", "text": thinking_text}
-                                )
-                                dirty = True
-                        if dirty:
-                            self._flush_streaming(
-                                started_at=stream_started_at,
-                                ids=ids,
-                                text_parts=text_parts,
-                                events=events,
-                            )
-                            # Cap the in-memory events list so a long
-                            # tool-heavy turn doesn't grow it unbounded.
-                            # The serialized payload is independently
-                            # tail-capped at 200 in _flush_streaming.
-                            if len(events) > 400:
-                                del events[:200]
                     elif isinstance(msg, ResultMessage):
                         sid = getattr(msg, "session_id", None)
                         if sid:
@@ -1245,24 +1328,37 @@ class InternalAgentSession:
             finally:
                 done.set()
 
+        task = asyncio.create_task(_runner())
         try:
-            # Publish the initial empty streaming buffer inside the try so that
-            # an OSError on this first write still triggers the cleanup branch.
-            self._flush_streaming(
-                started_at=stream_started_at,
-                ids=ids,
-                text_parts=text_parts,
-                events=events,
-            )
-            task = asyncio.create_task(_runner())
-            try:
-                await asyncio.wait_for(done.wait(), timeout=TURN_TIMEOUT_SECONDS)
-            except asyncio.TimeoutError:
-                task.cancel()
-                # Wait for the runner to finish reacting to the cancel so it
-                # cannot keep mutating events/text_parts after we clear the
-                # streaming buffer in the outer finally.
-                await asyncio.gather(task, return_exceptions=True)
+            await asyncio.wait_for(done.wait(), timeout=TURN_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            # `_runner` may have pushed an `{"error": ...}` envelope into
+            # `chunk_q` *before* the cancel landed (e.g. the SDK subprocess
+            # died which is itself why we ran past TURN_TIMEOUT_SECONDS).
+            # Drain it here so the assistant record carries the real
+            # exception message instead of a generic "timed out" marker.
+            runner_error: str | None = None
+            while not chunk_q.empty():
+                ev = chunk_q.get_nowait()
+                if "error" in ev:
+                    runner_error = str(ev["error"])
+                    break
+            if runner_error is not None:
+                log.error(
+                    "[%s] turn timed out after %ds (runner error: %s)",
+                    self.name,
+                    TURN_TIMEOUT_SECONDS,
+                    runner_error,
+                )
+                surface_error(
+                    "internal_agent_chat",
+                    "turn timeout: " + runner_error,
+                    context=self.name + ":ids=" + ",".join(ids),
+                )
+                assistant_text = "[error] " + runner_error
+            else:
                 log.error(
                     "[%s] turn timed out after %ds", self.name, TURN_TIMEOUT_SECONDS
                 )
@@ -1271,38 +1367,63 @@ class InternalAgentSession:
                     "turn timeout",
                     context=self.name + ":ids=" + ",".join(ids),
                 )
-                return
-
-            # Drain queue
-            while not chunk_q.empty():
-                ev = chunk_q.get_nowait()
-                if "error" in ev:
-                    is_error = True
-                    text_parts.append("[error] " + str(ev["error"]))
-                else:
-                    cost = ev.get("cost")
-                    duration_ms = ev.get("duration_ms")
-                    is_error = bool(ev.get("is_error")) or is_error
-
-            response_text = "".join(text_parts).strip()
-            if not response_text:
-                response_text = "(no response)"
-
-            merged_reply_to = reply_to_key if reply_to_key != "__none__" else None
-            self._append_chat_records(
+                assistant_text = f"[error] turn timed out after {TURN_TIMEOUT_SECONDS}s"
+            # Any partial text already in `text_parts` is intentionally
+            # dropped here in favor of the explicit error marker — without
+            # the streaming buffer there's no way for an operator to tell
+            # mid-output truncation from a complete reply, so we surface
+            # the failure cleanly instead of presenting a half-answer.
+            self._append_assistant_record(
                 ids=ids,
                 merged_reply_to=merged_reply_to,
-                user_text=self._readable_user_record(msgs),
-                assistant_text=response_text,
+                assistant_text=assistant_text,
                 session_id=self._session_id,
-                cost_usd=cost,
-                duration_ms=duration_ms,
-                is_error=is_error,
+                cost_usd=None,
+                duration_ms=None,
+                is_error=True,
             )
-        finally:
-            # Always remove the streaming buffer, even on timeout / error,
-            # so the UI flips back to non-streaming refresh cadence.
-            self._clear_streaming()
+            # The SDK subprocess may be wedged after a timeout — recreate
+            # the client so the next inbox drain starts from a clean state.
+            # `self._session_id` is preserved so the SDK resumes the same
+            # conversation.
+            await self._reconnect_after_error(
+                runner_error or f"turn timeout after {TURN_TIMEOUT_SECONDS}s"
+            )
+            return
+
+        # Drain queue
+        runner_error: str | None = None
+        while not chunk_q.empty():
+            ev = chunk_q.get_nowait()
+            if "error" in ev:
+                is_error = True
+                runner_error = str(ev["error"])
+                text_parts.append("[error] " + runner_error)
+            else:
+                cost = ev.get("cost")
+                duration_ms = ev.get("duration_ms")
+                is_error = bool(ev.get("is_error")) or is_error
+
+        response_text = "".join(text_parts).strip()
+        if not response_text:
+            response_text = "(no response)"
+
+        self._append_assistant_record(
+            ids=ids,
+            merged_reply_to=merged_reply_to,
+            assistant_text=response_text,
+            session_id=self._session_id,
+            cost_usd=cost,
+            duration_ms=duration_ms,
+            is_error=is_error,
+        )
+
+        # If the SDK raised (e.g. the Claude Code subprocess was killed —
+        # "Cannot write to terminated process"), reconnect now so the next
+        # turn doesn't keep raising the same error against a dead client.
+        # `self._session_id` is preserved across reconnect for resume.
+        if runner_error is not None:
+            await self._reconnect_after_error(runner_error)
 
         # Outbound delivery is the LLM's responsibility — it must call
         # `mcp__internal_agent_routing__send_reply` during the turn. If
@@ -1346,26 +1467,54 @@ class InternalAgentSession:
 
     # ── persistence ────────────────────────────────────────────
 
-    def _append_chat_records(
+    def _append_user_record(
         self,
         *,
         ids: list,
         merged_reply_to: str | None,
         user_text: str,
+    ) -> None:
+        """Persist the inbound user prompt to chat_history.json immediately
+        so the portal Chat tab can show it before the agent finishes.
+
+        Note: this and `_append_assistant_record` are intentionally two
+        separate `locked_json_rw` calls. If the daemon is SIGKILLed between
+        them, the transcript will contain an unpaired user record at the
+        tail — that is the documented crash signature and is preferable to
+        a transactional combined write, which would re-introduce the bug
+        this split solved (no chat update until the SDK turn finishes).
+        Inbox history at `_pop_and_group_inbox` preserves the full audit
+        trail of incoming envelopes regardless of crash timing.
+        """
+        user_rec = {
+            "role": "user",
+            "ts": _now_iso(),
+            "content": user_text,
+            "source_ids": list(ids),
+            "merged_reply_to": merged_reply_to,
+        }
+
+        def _rw(items):
+            if not isinstance(items, list):
+                items = []
+            items.append(user_rec)
+            return items
+
+        locked_json_rw(_rw, json_file=_chat_history_path(self.name), default=[])
+        self._chat_history.append(user_rec)
+
+    def _append_assistant_record(
+        self,
+        *,
+        ids: list,
+        merged_reply_to: str | None,
         assistant_text: str,
         session_id: str | None,
         cost_usd,
         duration_ms,
         is_error: bool,
     ) -> None:
-        ts = _now_iso()
-        user_rec = {
-            "role": "user",
-            "ts": ts,
-            "content": user_text,
-            "source_ids": list(ids),
-            "merged_reply_to": merged_reply_to,
-        }
+        """Append the assistant's final response after the SDK turn ends."""
         asst_rec = {
             "role": "assistant",
             "ts": _now_iso(),
@@ -1381,14 +1530,12 @@ class InternalAgentSession:
         def _rw(items):
             if not isinstance(items, list):
                 items = []
-            items.append(user_rec)
             items.append(asst_rec)
             return items
 
         locked_json_rw(_rw, json_file=_chat_history_path(self.name), default=[])
         # keep in-memory copy in sync (used by reconnect/system prompt);
         # never truncated — the system-prompt builder picks its own window.
-        self._chat_history.append(user_rec)
         self._chat_history.append(asst_rec)
 
     def _load_session_id(self) -> str | None:
@@ -1399,55 +1546,6 @@ class InternalAgentSession:
             save_session_id(self.name, sid)
         except OSError as exc:
             log.warning("[%s] could not persist session id: %s", self.name, exc)
-
-    # ── streaming buffer (Portal → Agents tab live view) ──────
-    def _flush_streaming(
-        self,
-        *,
-        started_at: str,
-        ids: list[str],
-        text_parts: list[str],
-        events: list[dict],
-    ) -> None:
-        """Atomically write the in-flight streaming buffer.
-
-        Payload mirrors `app/chat.py`'s session-state shape so the agents tab
-        can render the same event types (text, tool_use, thinking).
-
-        Note: ``started_at`` MUST be produced via ``datetime.isoformat()`` so
-        readers can round-trip it through ``datetime.fromisoformat`` on
-        Python <3.11 (which rejects a trailing ``Z`` suffix).
-        """
-        target = streaming_path(self.name)
-        payload = {
-            "name": self.name,
-            "started_at": started_at,
-            "ids": ids,
-            "text": "".join(text_parts),
-            "events": events[-200:],
-        }
-        # Per-write unique tmp suffix avoids a sibling-collision race if two
-        # writers (e.g. a stale tmp from a crashed turn + a fresh one) ever
-        # target the same agent dir. ``Path.replace`` is atomic on the same
-        # filesystem, which is guaranteed here (tmp + target share a parent).
-        tmp = target.with_name(f"{target.name}.{uuid.uuid4().hex[:8]}.tmp")
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            tmp.write_text(json.dumps(payload, indent=2))
-            tmp.replace(target)
-        except OSError as exc:
-            log.warning("[%s] could not flush streaming buffer: %s", self.name, exc)
-            try:
-                tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
-
-    def _clear_streaming(self) -> None:
-        target = streaming_path(self.name)
-        try:
-            target.unlink(missing_ok=True)
-        except OSError as exc:
-            log.warning("[%s] could not clear streaming buffer: %s", self.name, exc)
 
     # ── operator-driven clears ────────────────────────────────
     #

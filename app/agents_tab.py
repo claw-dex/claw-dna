@@ -3,10 +3,14 @@
 Surfaces every entry in `/agent/memory/agents.json` (internal + external)
 and lets the operator inspect or interact with one agent at a time:
 
-* **💬 Chat** — for internal agents, the daemon's `chat_history.json`. For
-  external agents, a synthesized transcript of inbox traffic (main → agent,
-  rendered as `user`) merged with outbox traffic (agent → main, rendered
-  as `assistant`).
+* **💬 Chat** — for internal agents, the daemon's `chat_history.json`.
+  The daemon writes the inbound user record as soon as a message arrives
+  and appends the assistant record once the SDK turn finishes, so a
+  user-only tail in the transcript is the expected mid-turn state — not
+  a stuck or broken agent. The portal refreshes on the global 60s tick.
+  For external agents, a synthesized transcript of inbox traffic
+  (main → agent, rendered as `user`) merged with outbox traffic
+  (agent → main, rendered as `assistant`).
 * **📥 Inbox** — the live `inbox.json` plus `inbox_history.json` so the
   operator can see what was sent vs. processed.
 * **⚙️ Config** — responsibilities, system_prompt, routing rules /
@@ -20,7 +24,7 @@ from __future__ import annotations
 
 import sys
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import streamlit as st
@@ -37,7 +41,6 @@ from shared import (  # noqa: E402
     chat_history_path,
     read_json_file,
     set_agent_control_flag,
-    streaming_path,
     write_to_inbox,
 )
 
@@ -53,11 +56,6 @@ _GOAL_STATUS_ICONS = {
 }
 # Order delegated goals by lifecycle: active first, terminal last.
 _GOAL_STATUS_ORDER = {"in_progress": 0, "pending": 1, "completed": 2, "failed": 3}
-
-# A streaming.json older than this is treated as stale (daemon likely died
-# mid-turn before it could clean up). We still render whatever partial text
-# is in the file but stop forcing the 10s refresh cadence on its account.
-_STREAM_STALE_AFTER = timedelta(seconds=900)
 
 _BASE = Path("/agent")
 _AGENTS_FILE = _BASE / "memory" / "agents.json"
@@ -89,36 +87,6 @@ def _load_agents() -> list[dict]:
 def _load_internal_chat(name: str) -> list[dict]:
     records = read_json_file(chat_history_path(name), default=[])
     return records if isinstance(records, list) else []
-
-
-def _load_streaming(name: str) -> dict | None:
-    """Return the daemon's in-flight streaming buffer, or ``None`` if absent."""
-    payload = read_json_file(streaming_path(name), default=None)
-    if not isinstance(payload, dict):
-        return None
-    return payload
-
-
-def _is_stream_active(payload: dict | None) -> bool:
-    """True iff a streaming buffer exists and is fresher than the stale cap.
-
-    A missing or unparseable ``started_at`` is treated as inactive — a corrupt
-    buffer must not pin the UI at the 10 s refresh cadence. The daemon
-    (``_flush_streaming``) always writes timestamps via ``datetime.isoformat``
-    (so ``+00:00``, never ``Z``) — keep that invariant or this parse breaks.
-    """
-    if not payload:
-        return False
-    started_at = payload.get("started_at")
-    if not isinstance(started_at, str):
-        return False
-    try:
-        started = datetime.fromisoformat(started_at)
-    except ValueError:
-        return False
-    if started.tzinfo is None:
-        started = started.replace(tzinfo=timezone.utc)
-    return datetime.now(timezone.utc) - started < _STREAM_STALE_AFTER
 
 
 def _ts(item: dict) -> str:
@@ -212,14 +180,15 @@ def _agent_inbox_history_path(agent: dict) -> Path | None:
 # ─── pure render helpers (testable) ──────────────────────────────────────
 
 
-def _render_chat(history: list[dict], streaming: dict | None = None) -> None:
+def _render_chat(history: list[dict]) -> None:
     """Render a list of {role, content, ts} records as chat bubbles.
 
-    If *streaming* is provided, append a live "Streaming..." assistant bubble
-    after the history showing the daemon's in-flight text/tool_use/thinking
-    events (mirrors `app/chat.py`'s session-state shape).
+    The daemon writes the user record to ``chat_history.json`` as soon as
+    the inbound prompt is received, then appends the assistant record once
+    the SDK turn finishes — so a partial transcript (user-only) is the
+    expected mid-turn state and does not need a separate live buffer.
     """
-    if not history and not streaming:
+    if not history:
         st.caption("(empty)")
         return
     for msg in history:
@@ -232,24 +201,6 @@ def _render_chat(history: list[dict], streaming: dict | None = None) -> None:
                 st.caption(ts)
             content = msg.get("content") or ""
             st.markdown(str(content) if content else "_(no content)_")
-    if streaming:
-        partial_text = str(streaming.get("text") or "")
-        events = streaming.get("events") or []
-        with st.chat_message("assistant"):
-            started_at = streaming.get("started_at") or ""
-            if started_at:
-                st.caption(f"streaming since {started_at}")
-            st.markdown(partial_text or "Processing...")
-            if isinstance(events, list):
-                for ev in events:
-                    if not isinstance(ev, dict):
-                        continue
-                    if ev.get("type") == "tool_use":
-                        st.caption(f"Used tool: {ev.get('name') or '?'}")
-                    elif ev.get("type") == "thinking":
-                        with st.expander("Thinking..."):
-                            st.markdown(str(ev.get("text") or ""))
-            st.caption("Streaming..." if partial_text else "Thinking...")
 
 
 def _render_inbox(agent: dict) -> None:
@@ -493,38 +444,6 @@ def _handle_clear_flag(name: str, flag: str, label: str) -> None:
 # ─── top-level render ────────────────────────────────────────────────────
 
 
-@st.fragment(run_every="3s")
-def _agent_stream_fragment() -> None:
-    """Per-agent streaming poll + chat render, scoped to a fragment.
-
-    Only this region reruns every 3s while the selected internal agent is
-    streaming, so neither the outer `st.tabs` in `server.py` nor the inner
-    `st.tabs` (Chat / Inbox / Goals / Config / Actions) in this module is
-    re-identified — the active tab on both levels stays put.
-
-    The selected agent name lives in
-    ``st.session_state["agents_tab_streaming_name"]``; ``render()`` writes it
-    when streaming is active and clears it otherwise. When the stream ends
-    (file goes missing or buffer falls past `_STREAM_STALE_AFTER`), the
-    fragment issues an app-scoped rerun so it is not re-mounted on the next
-    full pass and the 3s timer stops.
-    """
-    name = st.session_state.get("agents_tab_streaming_name") or ""
-    if not name:
-        return
-    streaming_payload = _load_streaming(name)
-    history = _load_internal_chat(name)
-    if not _is_stream_active(streaming_payload):
-        # Stream finished (or buffer went stale). Render the final history
-        # *before* bouncing — otherwise the fragment paints an empty frame
-        # in the gap between this tick and the app-scoped rerun.
-        _render_chat(history, streaming=streaming_payload)
-        st.session_state.pop("agents_tab_streaming_name", None)
-        st.rerun(scope="app")
-        return
-    _render_chat(history, streaming=streaming_payload)
-
-
 def render() -> None:
     st.subheader("Agents")
     agents = _load_agents()
@@ -549,11 +468,11 @@ def render() -> None:
     )
     agent = agents[idx]
 
-    # Streaming cadence is driven by `_agent_stream_fragment` (run_every=3s,
-    # mounted only when the selected internal agent is actively streaming).
-    # When idle we rely on the global 60s tick in `server.py` for refresh.
-    # Scoping to a fragment prevents both the outer (server.py) and inner
-    # (this module's) `st.tabs` widgets from being re-identified mid-stream.
+    # The chat tab refreshes on the global 60s portal tick. The daemon
+    # writes the inbound user record to chat_history.json as soon as the
+    # message is received and appends the assistant record on completion,
+    # so each refresh shows the latest available state without any
+    # streaming buffer.
     name = agent.get("name") or ""
 
     delegated_goals = _load_agent_goals(name)
@@ -563,16 +482,7 @@ def render() -> None:
     )
     with chat_tab:
         if agent.get("type") == "internal":
-            streaming_payload = _load_streaming(name)
-            if _is_stream_active(streaming_payload):
-                st.session_state["agents_tab_streaming_name"] = name
-                _agent_stream_fragment()
-            else:
-                # Idle path — clear the marker idempotently so the fragment
-                # isn't mounted next pass. Covers stream-just-ended,
-                # agent-switched-to-idle, and stale-buffer cases.
-                st.session_state.pop("agents_tab_streaming_name", None)
-                _render_chat(_load_internal_chat(name), streaming=streaming_payload)
+            _render_chat(_load_internal_chat(name))
         else:
             st.caption(
                 "External agents have no local chat_history; this is a "

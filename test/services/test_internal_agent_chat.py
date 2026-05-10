@@ -818,7 +818,8 @@ def test_fleet_shutdown_continues_when_one_session_stop_raises(patch_iac_paths):
 
 def _make_session_skeleton(iac, name: str = "x"):
     """Build an InternalAgentSession-like object stubbed enough to call
-    `_append_chat_records` directly, without going through SDK / threads.
+    `_append_user_record` / `_append_assistant_record` directly, without
+    going through SDK / threads.
     """
     sess = iac.InternalAgentSession.__new__(iac.InternalAgentSession)
     sess.name = name
@@ -827,16 +828,22 @@ def _make_session_skeleton(iac, name: str = "x"):
     return sess
 
 
-def test_append_chat_records_never_truncates_disk_or_memory(patch_iac_paths):
+def test_append_user_and_assistant_records_never_truncate_disk_or_memory(
+    patch_iac_paths,
+):
     iac = patch_iac_paths
     sess = _make_session_skeleton(iac, "x")
     # Write far more than the old 1000-record cap to prove no truncation.
     n_turns = 1500
     for i in range(n_turns):
-        sess._append_chat_records(
+        sess._append_user_record(
             ids=[f"id-{i}"],
             merged_reply_to=None,
             user_text=f"u{i}",
+        )
+        sess._append_assistant_record(
+            ids=[f"id-{i}"],
+            merged_reply_to=None,
             assistant_text=f"a{i}",
             session_id=None,
             cost_usd=None,
@@ -850,6 +857,32 @@ def test_append_chat_records_never_truncates_disk_or_memory(patch_iac_paths):
     # First record must still be the very first turn (no head trimming).
     assert on_disk[0]["content"] == "u0"
     assert on_disk[-1]["content"] == f"a{n_turns - 1}"
+
+
+def test_user_record_visible_before_assistant_record(patch_iac_paths):
+    """The user record must land on disk before the assistant record so the
+    portal Chat tab can show the inbound prompt mid-turn."""
+    iac = patch_iac_paths
+    sess = _make_session_skeleton(iac, "y")
+    sess._append_user_record(ids=["id-0"], merged_reply_to=None, user_text="hello")
+    after_user = json.loads(iac._chat_history_path("y").read_text())
+    assert len(after_user) == 1
+    assert after_user[0]["role"] == "user"
+    assert after_user[0]["content"] == "hello"
+
+    sess._append_assistant_record(
+        ids=["id-0"],
+        merged_reply_to=None,
+        assistant_text="world",
+        session_id=None,
+        cost_usd=None,
+        duration_ms=None,
+        is_error=False,
+    )
+    after_asst = json.loads(iac._chat_history_path("y").read_text())
+    assert len(after_asst) == 2
+    assert after_asst[1]["role"] == "assistant"
+    assert after_asst[1]["content"] == "world"
 
 
 # ---------------------------------------------------------------------------

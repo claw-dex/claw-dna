@@ -321,3 +321,160 @@ def test_append_inbox_message_missing_mv2(tmp_path):
             mi.append_inbox_message(str(tmp_path / "no.mv2"), {"content": "hi"})
             is False
         )
+
+
+# ---------------------------------------------------------------------------
+# Build staging-file rebuild — verify the canonical .mv2 stays untouched
+# during the build and is only swapped after seal() succeeds.
+# ---------------------------------------------------------------------------
+
+
+class _FakeMemvid:
+    """Minimal memvid stand-in that writes a marker to its target path."""
+
+    def __init__(self, path: str, marker: str = "fresh") -> None:
+        self.path = Path(path)
+        self.path.write_text(marker)
+        self.put_many_calls: list = []
+        self.sealed = False
+
+    def put_many(self, requests, opts=None):
+        self.put_many_calls.append((list(requests), dict(opts or {})))
+        return [f"frame-{i}" for i in range(len(requests))]
+
+    def seal(self) -> None:
+        self.sealed = True
+
+
+class _FakeSdk:
+    """memvid_sdk stand-in that records every create() call."""
+
+    def __init__(self, *, fail_put_many: bool = False) -> None:
+        self.created: list[_FakeMemvid] = []
+        self.fail_put_many = fail_put_many
+
+    def create(self, path, **_kwargs):
+        mem = _FakeMemvid(path)
+        if self.fail_put_many:
+
+            def _boom(_requests, opts=None):
+                raise RuntimeError("simulated put_many failure")
+
+            mem.put_many = _boom  # type: ignore[assignment]
+        self.created.append(mem)
+        return mem
+
+    def use(self, *_a, **_kw):  # not exercised by build()
+        raise AssertionError("use() should not be called during --build")
+
+
+def _seed_memory(mem_dir: Path) -> None:
+    mem_dir.mkdir()
+    (mem_dir / "journal.json").write_text(
+        json.dumps(
+            [{"cycle_number": 1, "summary": "did the thing", "actions": ["did it"]}]
+        )
+    )
+
+
+def test_build_writes_to_staging_and_swaps(tmp_path, monkeypatch):
+    """Successful build: staging path is used, then swapped in atomically."""
+    mem_dir = tmp_path / "memory"
+    _seed_memory(mem_dir)
+    mv2 = tmp_path / "long_term_memory.mv2"
+    mv2.write_text("OLD INDEX")  # pretend a previous index exists
+
+    fake = _FakeSdk()
+    monkeypatch.setattr(mi, "memvid_sdk", fake)
+
+    mi.build(str(mem_dir), str(mv2), quiet=True)
+
+    # Exactly one create() call, and it targeted the staging path.
+    assert len(fake.created) == 1
+    assert fake.created[0].path == mv2.with_suffix(mv2.suffix + ".rebuild")
+    assert fake.created[0].sealed is True
+    assert fake.created[0].put_many_calls, "put_many was not invoked"
+
+    # After swap: canonical holds the freshly-built content; previous
+    # canonical is preserved as .backup; staging file is gone.
+    assert mv2.exists()
+    assert mv2.read_text() == "fresh"
+    backup = mv2.with_suffix(mv2.suffix + ".backup")
+    assert backup.exists() and backup.read_text() == "OLD INDEX"
+    assert not mv2.with_suffix(mv2.suffix + ".rebuild").exists()
+
+
+def test_build_first_run_no_backup(tmp_path, monkeypatch):
+    """First build (no pre-existing canonical) — no backup is created."""
+    mem_dir = tmp_path / "memory"
+    _seed_memory(mem_dir)
+    mv2 = tmp_path / "long_term_memory.mv2"  # does not exist
+
+    fake = _FakeSdk()
+    monkeypatch.setattr(mi, "memvid_sdk", fake)
+
+    mi.build(str(mem_dir), str(mv2), quiet=True)
+
+    assert mv2.exists() and mv2.read_text() == "fresh"
+    assert not mv2.with_suffix(mv2.suffix + ".backup").exists()
+    assert not mv2.with_suffix(mv2.suffix + ".rebuild").exists()
+
+
+def test_build_swap_failure_leaves_canonical_untouched(tmp_path, monkeypatch):
+    """If the rename swap fails, canonical is NOT replaced and staging is removed."""
+    mem_dir = tmp_path / "memory"
+    _seed_memory(mem_dir)
+    mv2 = tmp_path / "long_term_memory.mv2"
+    mv2.write_text("OLD INDEX")
+
+    fake = _FakeSdk()
+    monkeypatch.setattr(mi, "memvid_sdk", fake)
+
+    def _replace_boom(_a, _b):
+        raise OSError("simulated rename failure")
+
+    monkeypatch.setattr(mi.os, "replace", _replace_boom)
+
+    with pytest.raises(OSError):
+        mi.build(str(mem_dir), str(mv2), quiet=True)
+
+    # Canonical .mv2 must be unchanged; staging must be cleaned up.
+    assert mv2.read_text() == "OLD INDEX"
+    assert not mv2.with_suffix(mv2.suffix + ".rebuild").exists()
+
+
+def test_build_put_many_failure_leaves_canonical_untouched(tmp_path, monkeypatch):
+    """If put_many raises, the swap is skipped and canonical stays intact."""
+    mem_dir = tmp_path / "memory"
+    _seed_memory(mem_dir)
+    mv2 = tmp_path / "long_term_memory.mv2"
+    mv2.write_text("OLD INDEX")
+
+    fake = _FakeSdk(fail_put_many=True)
+    monkeypatch.setattr(mi, "memvid_sdk", fake)
+
+    with pytest.raises(RuntimeError, match="simulated put_many failure"):
+        mi.build(str(mem_dir), str(mv2), quiet=True)
+
+    # Canonical untouched; no backup created (swap never happened); staging gone.
+    assert mv2.read_text() == "OLD INDEX"
+    assert not mv2.with_suffix(mv2.suffix + ".backup").exists()
+    assert not mv2.with_suffix(mv2.suffix + ".rebuild").exists()
+
+
+def test_build_removes_stale_staging_before_start(tmp_path, monkeypatch):
+    """A leftover .rebuild file from a prior crash is cleared at the start."""
+    mem_dir = tmp_path / "memory"
+    _seed_memory(mem_dir)
+    mv2 = tmp_path / "long_term_memory.mv2"
+    stale = mv2.with_suffix(mv2.suffix + ".rebuild")
+    stale.write_text("STALE PARTIAL")
+
+    fake = _FakeSdk()
+    monkeypatch.setattr(mi, "memvid_sdk", fake)
+
+    mi.build(str(mem_dir), str(mv2), quiet=True)
+
+    # The stale partial was overwritten by a fresh build (then renamed away).
+    assert mv2.exists() and mv2.read_text() == "fresh"
+    assert not stale.exists()

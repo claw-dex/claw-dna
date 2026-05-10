@@ -34,7 +34,7 @@ Exit codes: 0 = success, 1 = error
 """
 
 import json
-import shutil
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -502,39 +502,28 @@ def gather_all_chunks(memory_dir: Path) -> list:
 # ---------------------------------------------------------------------------
 
 
-def _rollback_build(
-    mv2: Path, backup: Path | None, err: BaseException, quiet: bool
-) -> None:
-    """Restore the pre-rebuild state after a failed/aborted build.
+def _cleanup_staging(staging: Path, err: BaseException, quiet: bool) -> None:
+    """Remove the partial staging .mv2 after a failed/aborted build.
 
-    If a backup was taken (an .mv2 existed before the rebuild started), copy it
-    back over the partial .mv2. If no backup existed (fresh build), just remove
-    the partial file. Best-effort — rollback failures are reported to stderr but
-    do not mask the original exception (the caller re-raises ``err``).
+    The canonical .mv2 was never opened by the rebuild (we built into the
+    staging file), so there is nothing to restore — only the partial staging
+    file needs to be cleaned up. Best-effort: cleanup failures are reported
+    to stderr but never mask the original exception (the caller re-raises).
     """
     err_label = f"{type(err).__name__}: {err}"
     try:
-        if backup is not None and backup.exists():
-            shutil.copy2(backup, mv2)
-            if not quiet:
-                print(
-                    f"[INGEST] Rebuild failed ({err_label}) — restored "
-                    f"{mv2.name} from {backup.name}",
-                    file=sys.stderr,
-                )
-        else:
-            if mv2.exists():
-                mv2.unlink()
-            if not quiet:
-                print(
-                    f"[INGEST] Rebuild failed ({err_label}) — no backup to "
-                    f"restore; removed partial {mv2.name}",
-                    file=sys.stderr,
-                )
+        if staging.exists():
+            staging.unlink()
+        if not quiet:
+            print(
+                f"[INGEST] Rebuild failed ({err_label}) — removed partial "
+                f"{staging.name}; canonical index left untouched",
+                file=sys.stderr,
+            )
     except Exception as rb_err:
         print(
-            f"[INGEST] Rollback ALSO failed: {type(rb_err).__name__}: {rb_err} "
-            f"(original error: {err_label})",
+            f"[INGEST] Staging cleanup ALSO failed: "
+            f"{type(rb_err).__name__}: {rb_err} (original error: {err_label})",
             file=sys.stderr,
         )
 
@@ -583,24 +572,21 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
                 )
         return
 
-    # Backup existing .mv2 before full rebuild. The backup is also our
-    # rollback source: if the rebuild raises (or a per-chunk loop is killed
-    # mid-flight by Ctrl-C / OOM), we copy the backup back over the partial
-    # .mv2 so the index is never left in a half-written state.
-    backup: Path | None = None
-    if mv2.exists():
-        backup = mv2.with_suffix(mv2.suffix + ".backup")
-        shutil.copy2(mv2, backup)
-        if not quiet:
-            print(f"[INGEST] Backed up {mv2.name} → {backup.name}")
-        mv2.unlink()
+    # Build into a staging file so the canonical .mv2 stays openable by other
+    # processes (live inbox ingest, recall, append-*) for the full duration
+    # of the rebuild. Only after the new index is sealed do we swap names.
+    staging = mv2.with_suffix(mv2.suffix + ".rebuild")
+    backup = mv2.with_suffix(mv2.suffix + ".backup")
 
     mv2.parent.mkdir(parents=True, exist_ok=True)
 
+    # Stale staging file from a previously crashed/killed rebuild — drop it.
+    staging.unlink(missing_ok=True)
+
     try:
-        mem = memvid_sdk.create(str(mv2), enable_vec=True, enable_lex=True)
+        mem = memvid_sdk.create(str(staging), enable_vec=True, enable_lex=True)
         if not quiet:
-            print(f"[INGEST] Created {mv2}")
+            print(f"[INGEST] Building into staging file {staging}")
 
         # Single Rust-side batch: ~100x faster than a Python put-loop. The
         # SDK commits once at the end of put_many; we still call seal()
@@ -619,36 +605,42 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
             "enable_embedding": ENABLE_EMBEDDING,
             # 3 = SDK default zstd level when compression is enabled, 0 = off.
             # Mirrors the per-chunk ``vector_compression`` flag the loop used.
-            "compression_level": 3 if _should_compress(mv2) else 0,
+            "compression_level": 3 if _should_compress(staging) else 0,
         }
         if EMBED_MODEL is not None:
             opts["embedding_model"] = EMBED_MODEL
-        try:
-            frame_ids = mem.put_many(requests, opts=opts)
-            # put_many is all-or-nothing at the FFI boundary: either it
-            # returns a frame_id per request or raises. So fail is always
-            # 0 here; partial success would surface via the except branch.
-            ok = len(frame_ids)
-            fail = len(requests) - ok
-        except Exception as e:
-            ok, fail = 0, len(requests)
-            if not quiet:
-                print(f"  WARN: put_many failed: {str(e)[:200]}", file=sys.stderr)
+        # put_many is all-or-nothing at the FFI boundary: it returns a
+        # frame_id per request or raises. Let failures propagate — swapping
+        # an empty/partial staging index over a healthy canonical would be
+        # worse than aborting the rebuild and leaving canonical untouched.
+        frame_ids = mem.put_many(requests, opts=opts)
+        ok = len(frame_ids)
+        fail = len(requests) - ok
 
-        # Terminal finalize before process exit. seal() forces a final
-        # commit + index flush so the .mv2 is fully searchable on close.
-        try:
-            mem.seal()
+        # Terminal finalize before swap. seal() forces a final commit +
+        # index flush so the staging .mv2 is fully searchable on close.
+        # If seal raises, the staging index isn't trustworthy — propagate
+        # so cleanup runs and the canonical stays untouched.
+        mem.seal()
+        if not quiet:
+            print(f"[INGEST] Committed {ok} frames to staging index")
+
+        # Atomic swap: rename the canonical .mv2 to .backup (if it exists),
+        # then rename the freshly-built staging file into its place. Both
+        # renames are atomic on POSIX; the canonical name is briefly absent
+        # between the two calls but never half-written.
+        if mv2.exists():
+            os.replace(mv2, backup)
             if not quiet:
-                print(f"[INGEST] Committed {ok} frames to index")
-        except Exception as e:
-            if not quiet:
-                print(f"  WARN: commit failed: {e}", file=sys.stderr)
+                print(f"[INGEST] Renamed {mv2.name} → {backup.name}")
+        os.replace(staging, mv2)
+        if not quiet:
+            print(f"[INGEST] Promoted staging → {mv2.name}")
     except BaseException as e:
         # Catch BaseException so KeyboardInterrupt / SystemExit also trigger
-        # rollback before propagating — a half-built .mv2 is worse than no
-        # change at all when we have a known-good backup.
-        _rollback_build(mv2, backup, e, quiet)
+        # cleanup before propagating. The canonical .mv2 was never opened
+        # by the rebuild, so we only need to drop the partial staging file.
+        _cleanup_staging(staging, e, quiet)
         raise
 
     size_kb = mv2.stat().st_size / 1024 if mv2.exists() else 0
