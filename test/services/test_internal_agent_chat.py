@@ -626,14 +626,20 @@ def test_pop_and_group_inbox_atomically_empties_and_archives(patch_iac_paths):
         assert m["processed_at"]
 
 
-def test_pop_and_group_inbox_skips_non_message_types(patch_iac_paths):
+def test_pop_and_group_inbox_accepts_goal_and_message_types(patch_iac_paths):
     iac = patch_iac_paths
     sess = _make_dummy_session(iac)
     _seed_inbox(
         iac,
         "planner",
         [
-            {"type": "goal", "content": "x", "timestamp": "2026-05-03T12:00:00+00:00"},
+            {
+                "type": "goal",
+                "content": "x",
+                "reply_to": "messages/inbox.json",
+                "from": "main",
+                "timestamp": "2026-05-03T12:00:00+00:00",
+            },
             {
                 "type": "message",
                 "content": "y",
@@ -644,10 +650,43 @@ def test_pop_and_group_inbox_skips_non_message_types(patch_iac_paths):
         ],
     )
     groups = sess._pop_and_group_inbox()
-    # The "goal" entry is rejected; only the "message" entry is grouped.
+    # Both "goal" and "message" entries are accepted and grouped together
+    # under the same reply_to key — internal agents do not differentiate
+    # the two types operationally.
+    keys = list(groups.keys())
+    assert keys == ["messages/inbox.json"]
+    assert len(groups["messages/inbox.json"]) == 2
+    types = sorted(m["type"] for m in groups["messages/inbox.json"])
+    assert types == ["goal", "message"]
+
+
+def test_pop_and_group_inbox_skips_unknown_types(patch_iac_paths):
+    iac = patch_iac_paths
+    sess = _make_dummy_session(iac)
+    _seed_inbox(
+        iac,
+        "planner",
+        [
+            {
+                "type": "event",
+                "content": "x",
+                "timestamp": "2026-05-03T12:00:00+00:00",
+            },
+            {
+                "type": "message",
+                "content": "y",
+                "reply_to": "messages/inbox.json",
+                "from": "main",
+                "timestamp": "2026-05-03T12:00:01+00:00",
+            },
+        ],
+    )
+    groups = sess._pop_and_group_inbox()
+    # Unknown types (e.g. "event", "agent_*" reply types) are still rejected.
     keys = list(groups.keys())
     assert keys == ["messages/inbox.json"]
     assert len(groups["messages/inbox.json"]) == 1
+    assert groups["messages/inbox.json"][0]["type"] == "message"
 
 
 def test_pop_and_group_inbox_groups_missing_reply_to_under_none_key(patch_iac_paths):

@@ -164,6 +164,31 @@ SDK_CONNECT_TIMEOUT = 30
 RECONNECT_THRASH_THRESHOLD = 3
 RECONNECT_THRASH_WINDOW_S = 60.0
 RECONNECT_COOLDOWN_S = 120.0
+# How many attempts a single inbox-group turn gets before we give up. The
+# extra attempt(s) are only consumed when the SDK error matches a known
+# "subprocess died" signature — see `_is_dead_subprocess_error`.
+MAX_TURN_ATTEMPTS = 2
+# Substrings the Claude SDK surfaces when its Claude Code subprocess has
+# been killed (SIGKILL / OOM / pipe closed). When we see these we
+# reconnect and retry the turn once with the same session_id. Observed
+# emitted by claude-agent-sdk ~0.x — re-validate on SDK upgrades since
+# this is a brittle substring match against exception text. The negative
+# `exit code: -` prefix matches SIGKILL (-9), SIGTERM (-15), SIGABRT (-6),
+# etc. without enumerating each signal individually.
+_DEAD_SUBPROCESS_HINTS = (
+    "Cannot write to terminated process",
+    "exit code: -",
+    "BrokenPipeError",
+    "process is not running",
+)
+
+
+def _is_dead_subprocess_error(msg: str) -> bool:
+    if not msg:
+        return False
+    return any(h in msg for h in _DEAD_SUBPROCESS_HINTS)
+
+
 # System-prompt history selection: include every chat record from the last
 # CHAT_HISTORY_RECENT_HOURS regardless of count; if none qualify, fall back
 # to the most recent CHAT_HISTORY_SOFT_LIMIT records, extending the window
@@ -524,10 +549,11 @@ ROUTING_MCP_SERVER = "internal_agent_routing"
 SEND_REPLY_TOOL = "send_reply"
 SEND_REPLY_TOOL_FQN = "mcp__" + ROUTING_MCP_SERVER + "__" + SEND_REPLY_TOOL
 
-# Allowed envelope types — only the agent-originated reply types from
-# the inbox.json schema. Internal agents may not synthesize `goal` /
-# `message` / `event` entries; those are reserved for users / schedulers
-# / webhooks respectively.
+# Allowed envelope types an internal agent is permitted to *synthesize*
+# (i.e. write via send_reply). Internal agents may RECEIVE both `message`
+# and `goal` entries from their inbox (see _pop_and_group_inbox), but they
+# may not synthesize `goal` / `message` / `event` themselves — those types
+# are reserved for users / schedulers / webhooks respectively.
 _ALLOWED_REPLY_TYPES = (
     "agent_response",
     "agent_needs_human",
@@ -926,6 +952,12 @@ class InternalAgentSession:
         """Mark that drain is pending. Worker picks it up between turns."""
         self._pending_drain.set()
 
+    def is_alive(self) -> bool:
+        """True iff this session has a connected SDK and shutdown has not
+        been requested. Public predicate so the fleet (and tests) don't
+        have to reach into ``_sdk`` / ``_stop_event`` directly."""
+        return self._sdk is not None and not self._stop_event.is_set()
+
     # ── thread entry ───────────────────────────────────────────
 
     def _run_loop(self) -> None:
@@ -1219,7 +1251,13 @@ class InternalAgentSession:
                     context=self.name + ":" + repr(raw)[:200],
                 )
                 continue
-            if raw.get("type") != "message":
+            # Internal/external agents accept both "message" and "goal"
+            # envelopes from their inbox — they don't differentiate the two
+            # operationally, but mirroring the main agent's input shape lets
+            # any caller (portal UI, scheduler, scripts) deliver either type
+            # without a special-case path. Anything else (e.g. "event",
+            # "agent_*" reply types, unknown) is still surfaced as an error.
+            if raw.get("type") not in ("message", "goal"):
                 surface_error(
                     "internal_agent_chat",
                     "unsupported inbox type=" + str(raw.get("type")),
@@ -1273,34 +1311,29 @@ class InternalAgentSession:
 
     # ── one turn ───────────────────────────────────────────────
 
-    async def _run_turn_for_group(self, reply_to_key: str, msgs: list) -> None:
+    async def _invoke_sdk_once(
+        self, prompt: str, ids: list[str]
+    ) -> tuple[str | None, list[str], float | None, int | None, bool, bool]:
+        """Run a single SDK turn against ``self._sdk``.
+
+        Returns ``(runner_error, text_parts, cost_usd, duration_ms,
+        sdk_is_error, timed_out)``. ``runner_error`` is the stringified
+        exception text from the SDK loop (e.g. "Cannot write to terminated
+        process") if the SDK raised, otherwise ``None``. ``text_parts`` is
+        the assistant text accumulated so far — even on error, it carries
+        any partial output up to the failure point.
+        """
         _sdk_mod = _import_claude_sdk()
         AssistantMessage = _sdk_mod.AssistantMessage
         ResultMessage = _sdk_mod.ResultMessage
         TextBlock = _sdk_mod.TextBlock
-        prompt = self._build_user_prompt(msgs)
-        ids = [m["id"] for m in msgs]
 
         chunk_q: queue.Queue = queue.Queue()
         done = asyncio.Event()
         text_parts: list[str] = []
-        cost = None
-        duration_ms = None
-        is_error = False
 
         sdk = self._sdk
         assert sdk is not None
-
-        merged_reply_to = reply_to_key if reply_to_key != "__none__" else None
-        # Persist the user record up-front so the portal chat tab shows the
-        # received prompt as soon as it arrives, not only after the agent
-        # finishes responding. The assistant record is appended once the
-        # SDK turn completes (or with an error placeholder on timeout).
-        self._append_user_record(
-            ids=ids,
-            merged_reply_to=merged_reply_to,
-            user_text=self._readable_user_record(msgs),
-        )
 
         async def _runner():
             try:
@@ -1329,22 +1362,103 @@ class InternalAgentSession:
                 done.set()
 
         task = asyncio.create_task(_runner())
+        timed_out = False
         try:
             await asyncio.wait_for(done.wait(), timeout=TURN_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-            # `_runner` may have pushed an `{"error": ...}` envelope into
-            # `chunk_q` *before* the cancel landed (e.g. the SDK subprocess
-            # died which is itself why we ran past TURN_TIMEOUT_SECONDS).
-            # Drain it here so the assistant record carries the real
-            # exception message instead of a generic "timed out" marker.
-            runner_error: str | None = None
-            while not chunk_q.empty():
-                ev = chunk_q.get_nowait()
-                if "error" in ev:
+            timed_out = True
+
+        runner_error: str | None = None
+        cost: float | None = None
+        duration_ms: int | None = None
+        sdk_is_error = False
+        while not chunk_q.empty():
+            ev = chunk_q.get_nowait()
+            if "error" in ev:
+                sdk_is_error = True
+                if runner_error is None:
                     runner_error = str(ev["error"])
-                    break
+            else:
+                cost = ev.get("cost")
+                duration_ms = ev.get("duration_ms")
+                sdk_is_error = bool(ev.get("is_error")) or sdk_is_error
+        return runner_error, text_parts, cost, duration_ms, sdk_is_error, timed_out
+
+    async def _run_turn_for_group(self, reply_to_key: str, msgs: list) -> None:
+        prompt = self._build_user_prompt(msgs)
+        ids = [m["id"] for m in msgs]
+        merged_reply_to = reply_to_key if reply_to_key != "__none__" else None
+
+        # Persist the user record up-front so the portal chat tab shows the
+        # received prompt as soon as it arrives, not only after the agent
+        # finishes responding. The assistant record is appended once the
+        # SDK turn completes (or with an error placeholder on timeout).
+        self._append_user_record(
+            ids=ids,
+            merged_reply_to=merged_reply_to,
+            user_text=self._readable_user_record(msgs),
+        )
+
+        # Retry-once loop: if the SDK reports its Claude Code subprocess
+        # has died (e.g. "Cannot write to terminated process", exit -9),
+        # reconnect (preserving session_id) and re-run the same turn. We
+        # do NOT retry on plain timeouts, on `is_error=True` ResultMessages,
+        # or on other exceptions — those are surfaced as-is so operators
+        # can see real model/tool failures rather than burning attempts.
+        attempts = 0
+        runner_error: str | None = None
+        text_parts: list[str] = []
+        cost: float | None = None
+        duration_ms: int | None = None
+        sdk_is_error = False
+        timed_out = False
+        # Track whether the in-loop retry already triggered a reconnect for
+        # this turn. The trailing reconnect at the end of the function
+        # (after the assistant record is written) is a belt-and-suspenders
+        # for non-retryable errors — but if the in-loop retry already
+        # reconnected we must NOT reconnect again, otherwise a single
+        # subprocess-death turn would burn 2 entries from the thrash budget
+        # instead of 1.
+        reconnected_in_loop = False
+        while True:
+            attempts += 1
+            # NOTE: the second invocation's text_parts/cost/duration_ms/
+            # sdk_is_error/timed_out fully replace the first attempt's by
+            # design — we never concatenate partial output across attempts
+            # because there's no streaming buffer for operators to tell
+            # mid-output truncation apart from a complete reply.
+            (
+                runner_error,
+                text_parts,
+                cost,
+                duration_ms,
+                sdk_is_error,
+                timed_out,
+            ) = await self._invoke_sdk_once(prompt, ids)
+            if (
+                runner_error is not None
+                and _is_dead_subprocess_error(runner_error)
+                and attempts < MAX_TURN_ATTEMPTS
+            ):
+                log.warning(
+                    "[%s] SDK subprocess died (attempt #%d): %s — reconnecting and retrying",
+                    self.name,
+                    attempts,
+                    runner_error,
+                )
+                if await self._reconnect_after_error(runner_error):
+                    reconnected_in_loop = True
+                    continue
+                # Reconnect failed; fall through and surface the error.
+                reconnected_in_loop = True
+            break
+
+        if timed_out:
+            # Prefer the underlying SDK exception over a generic "timed out"
+            # marker — the SDK subprocess may have died which is itself why
+            # we ran past TURN_TIMEOUT_SECONDS.
             if runner_error is not None:
                 log.error(
                     "[%s] turn timed out after %ds (runner error: %s)",
@@ -1368,9 +1482,8 @@ class InternalAgentSession:
                     context=self.name + ":ids=" + ",".join(ids),
                 )
                 assistant_text = f"[error] turn timed out after {TURN_TIMEOUT_SECONDS}s"
-            # Any partial text already in `text_parts` is intentionally
-            # dropped here in favor of the explicit error marker — without
-            # the streaming buffer there's no way for an operator to tell
+            # Any partial `text_parts` is intentionally dropped — without a
+            # streaming buffer there's no way for an operator to distinguish
             # mid-output truncation from a complete reply, so we surface
             # the failure cleanly instead of presenting a half-answer.
             self._append_assistant_record(
@@ -1385,25 +1498,17 @@ class InternalAgentSession:
             # The SDK subprocess may be wedged after a timeout — recreate
             # the client so the next inbox drain starts from a clean state.
             # `self._session_id` is preserved so the SDK resumes the same
-            # conversation.
-            await self._reconnect_after_error(
-                runner_error or f"turn timeout after {TURN_TIMEOUT_SECONDS}s"
-            )
+            # conversation. Skipped if the in-loop retry already
+            # reconnected this turn (avoids double-counting thrash entries).
+            if not reconnected_in_loop:
+                await self._reconnect_after_error(
+                    runner_error or f"turn timeout after {TURN_TIMEOUT_SECONDS}s"
+                )
             return
 
-        # Drain queue
-        runner_error: str | None = None
-        while not chunk_q.empty():
-            ev = chunk_q.get_nowait()
-            if "error" in ev:
-                is_error = True
-                runner_error = str(ev["error"])
-                text_parts.append("[error] " + runner_error)
-            else:
-                cost = ev.get("cost")
-                duration_ms = ev.get("duration_ms")
-                is_error = bool(ev.get("is_error")) or is_error
-
+        is_error = sdk_is_error
+        if runner_error is not None:
+            text_parts.append("[error] " + runner_error)
         response_text = "".join(text_parts).strip()
         if not response_text:
             response_text = "(no response)"
@@ -1418,11 +1523,12 @@ class InternalAgentSession:
             is_error=is_error,
         )
 
-        # If the SDK raised (e.g. the Claude Code subprocess was killed —
-        # "Cannot write to terminated process"), reconnect now so the next
-        # turn doesn't keep raising the same error against a dead client.
+        # If the SDK still raised after the retry loop exhausted (or the
+        # error wasn't a retryable subprocess-death signature), reconnect
+        # now so the next turn doesn't keep raising against a dead client.
         # `self._session_id` is preserved across reconnect for resume.
-        if runner_error is not None:
+        # Skipped if the in-loop retry already reconnected this turn.
+        if runner_error is not None and not reconnected_in_loop:
             await self._reconnect_after_error(runner_error)
 
         # Outbound delivery is the LLM's responsibility — it must call
@@ -1438,6 +1544,8 @@ class InternalAgentSession:
             header = (
                 "[from="
                 + str(m.get("from") or "?")
+                + " type="
+                + str(m.get("type") or "message")
                 + " reply_to="
                 + str(m.get("reply_to") or "")
                 + " id="
@@ -1823,6 +1931,19 @@ class Fleet:
                 if new_count == 1:
                     surface_error("internal_agent_chat", exc, context="start:" + name)
 
+        # Reflect live session state back into agents.json so the portal,
+        # `register_internal_agent --list`, and the main agent's [AGENTS]
+        # panel see "online" for every agent we currently have a working
+        # SDK client for. `mark_internal_agents_online` is a no-op when
+        # the on-disk status is already "online", so the cost is one
+        # locked read per sweep tick in steady state.
+        live = [name for name, sess in self._sessions.items() if sess.is_alive()]
+        if live:
+            try:
+                mark_internal_agents_online(live)
+            except Exception as exc:
+                log.warning("mark_internal_agents_online failed: %s", exc)
+
     def sweep_inboxes(self) -> None:
         for name, sess in self._sessions.items():
             try:
@@ -1889,6 +2010,41 @@ def mark_internal_agents_offline(names: list[str]) -> None:
             if a.get("status") == "deactivated":
                 continue
             a["status"] = "offline"
+        return items
+
+    locked_json_rw(_rw, json_file=AGENTS_FILE, default=[])
+
+
+def mark_internal_agents_online(names: list[str]) -> None:
+    """Flip every named internal agent in agents.json to status='online'.
+
+    Called from `Fleet.reconcile` for every successfully-running session
+    on each sweep. This is the symmetric counterpart of
+    ``mark_internal_agents_offline`` — without it, agents marked offline
+    on the previous shutdown stay offline forever in agents.json even
+    after the daemon reconnects them, which makes the portal show stale
+    state. Only writes when the on-disk status would actually change so
+    we don't pay a write+lock cost every 10 s for steady-state agents.
+    Agents in `deactivated` state are intentionally left alone.
+    """
+    if not names:
+        return
+    target = set(names)
+
+    def _rw(items):
+        if not isinstance(items, list):
+            return items
+        for a in items:
+            if not isinstance(a, dict):
+                continue
+            if a.get("type") != "internal":
+                continue
+            if a.get("name") not in target:
+                continue
+            if a.get("status") == "deactivated":
+                continue
+            if a.get("status") != "online":
+                a["status"] = "online"
         return items
 
     locked_json_rw(_rw, json_file=AGENTS_FILE, default=[])
