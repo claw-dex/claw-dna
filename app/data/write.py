@@ -205,7 +205,9 @@ def delete_inbox_item(item_index: int):
 def clear_outbox():
     """Archive outbox messages to outbox_history.json, then clear outbox."""
     outbox_path = f"{MESSAGES_DIR}/outbox.json"
-    history_path = f"{MEMORY_DIR}/outbox_history.json"
+    # outbox_history lives alongside the other messaging artifacts under
+    # /agent/messages/ (inbox.json, inbox_history.json, outbox.json).
+    history_path = f"{MESSAGES_DIR}/outbox_history.json"
 
     # Read current outbox
     outbox_data = _read_json_safe(outbox_path, [])

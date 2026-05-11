@@ -533,7 +533,7 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
     if not dry_run:
         _require_sdk()
     mem_dir = Path(memory_dir)
-    mv2 = Path(mv2_path)
+    mv2_file = Path(mv2_path)
 
     chunks = gather_all_chunks(mem_dir)
     if not quiet and not json_mode:
@@ -575,10 +575,10 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
     # Build into a staging file so the canonical .mv2 stays openable by other
     # processes (live inbox ingest, recall, append-*) for the full duration
     # of the rebuild. Only after the new index is sealed do we swap names.
-    staging = mv2.with_suffix(mv2.suffix + ".rebuild")
-    backup = mv2.with_suffix(mv2.suffix + ".backup")
+    staging = mv2_file.with_suffix(mv2_file.suffix + ".rebuild")
+    backup = mv2_file.with_suffix(mv2_file.suffix + ".backup")
 
-    mv2.parent.mkdir(parents=True, exist_ok=True)
+    mv2_file.parent.mkdir(parents=True, exist_ok=True)
 
     # Stale staging file from a previously crashed/killed rebuild — drop it.
     staging.unlink(missing_ok=True)
@@ -629,13 +629,13 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
         # then rename the freshly-built staging file into its place. Both
         # renames are atomic on POSIX; the canonical name is briefly absent
         # between the two calls but never half-written.
-        if mv2.exists():
-            os.replace(mv2, backup)
+        if mv2_file.exists():
+            os.replace(mv2_file, backup)
             if not quiet:
-                print(f"[INGEST] Renamed {mv2.name} → {backup.name}")
-        os.replace(staging, mv2)
+                print(f"[INGEST] Renamed {mv2_file.name} → {backup.name}")
+        os.replace(staging, mv2_file)
         if not quiet:
-            print(f"[INGEST] Promoted staging → {mv2.name}")
+            print(f"[INGEST] Promoted staging → {mv2_file.name}")
     except BaseException as e:
         # Catch BaseException so KeyboardInterrupt / SystemExit also trigger
         # cleanup before propagating. The canonical .mv2 was never opened
@@ -643,14 +643,14 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
         _cleanup_staging(staging, e, quiet)
         raise
 
-    size_kb = mv2.stat().st_size / 1024 if mv2.exists() else 0
+    size_kb = mv2_file.stat().st_size / 1024 if mv2_file.exists() else 0
 
     if json_mode:
         print(
             json.dumps(
                 {
                     "mode": "build",
-                    "mv2": str(mv2),
+                    "mv2": str(mv2_file),
                     "total_chunks": len(chunks),
                     "ingested": ok,
                     "failed": fail,

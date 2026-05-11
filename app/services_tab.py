@@ -21,6 +21,81 @@ def _tail_lines(text: str, n: int = _LOG_TAIL_LINES) -> tuple[str, int]:
     return "\n".join(lines[-n:]), total
 
 
+@st.fragment(run_every="10s")
+def _render_service_logs(name: str) -> None:
+    """Render stdout/stderr tails for a service, refreshing every 10s.
+
+    Scoped as a fragment so the log panel polls the on-disk log files at a
+    faster cadence than the global 60s portal tick, without rerunning the
+    rest of the page (which would collapse the expander and reset tab state).
+    """
+    from app.data import load_service_logs
+
+    logs = load_service_logs(name)
+    st.caption("**Logs**")
+    if not logs:
+        st.caption("No log files found for this service.")
+        return
+
+    stderr_content = logs.get("stderr", "")
+    stdout_content = logs.get("stdout", "")
+    stderr_path = logs.get("stderr_path", "")
+    stdout_path = logs.get("stdout_path", "")
+
+    if stderr_content:
+        stderr_tail, stderr_total = _tail_lines(stderr_content)
+        truncated = stderr_total > _LOG_TAIL_LINES
+        suffix = (
+            f" — last {_LOG_TAIL_LINES} of {stderr_total} lines"
+            if truncated
+            else f" — {stderr_total} line(s)"
+        )
+        st.markdown(f"**stderr** — errors and crash output{suffix}")
+        st.code(stderr_tail, language="log")
+        if stderr_path:
+            try:
+                with open(stderr_path, "r", encoding="utf-8", errors="replace") as _f:
+                    _full_stderr = _f.read()
+            except OSError:
+                _full_stderr = stderr_content
+            st.download_button(
+                "Download stderr log",
+                data=_full_stderr,
+                file_name=f"service-{name}.stderr.log",
+                mime="text/plain",
+                key=f"dl_stderr_{name}",
+                width="content",
+            )
+
+    if stdout_content:
+        stdout_tail, stdout_total = _tail_lines(stdout_content)
+        truncated = stdout_total > _LOG_TAIL_LINES
+        suffix = (
+            f" — last {_LOG_TAIL_LINES} of {stdout_total} lines"
+            if truncated
+            else f" — {stdout_total} line(s)"
+        )
+        st.markdown(f"**stdout**{suffix}")
+        st.code(stdout_tail, language="log")
+        if stdout_path:
+            try:
+                with open(stdout_path, "r", encoding="utf-8", errors="replace") as _f:
+                    _full_stdout = _f.read()
+            except OSError:
+                _full_stdout = stdout_content
+            st.download_button(
+                "Download stdout log",
+                data=_full_stdout,
+                file_name=f"service-{name}.stdout.log",
+                mime="text/plain",
+                key=f"dl_stdout_{name}",
+                width="content",
+            )
+
+    if not stderr_content and not stdout_content:
+        st.caption("No log output available.")
+
+
 def render():
     from app.data import (
         load_services_full,
@@ -183,72 +258,9 @@ def render():
                         language="bash",
                     )
 
-                # Logs
-                st.caption("**Logs**")
-                if logs:
-                    stderr_content = logs.get("stderr", "")
-                    stdout_content = logs.get("stdout", "")
-                    stderr_path = logs.get("stderr_path", "")
-                    stdout_path = logs.get("stdout_path", "")
-
-                    if stderr_content:
-                        stderr_tail, stderr_total = _tail_lines(stderr_content)
-                        truncated = stderr_total > _LOG_TAIL_LINES
-                        suffix = (
-                            f" — last {_LOG_TAIL_LINES} of {stderr_total} lines"
-                            if truncated
-                            else f" — {stderr_total} line(s)"
-                        )
-                        st.markdown(f"**stderr** — errors and crash output{suffix}")
-                        st.code(stderr_tail, language="log")
-                        if stderr_path:
-                            try:
-                                with open(
-                                    stderr_path, "r", encoding="utf-8", errors="replace"
-                                ) as _f:
-                                    _full_stderr = _f.read()
-                            except OSError:
-                                _full_stderr = stderr_content
-                            st.download_button(
-                                "Download stderr log",
-                                data=_full_stderr,
-                                file_name=f"service-{name}.stderr.log",
-                                mime="text/plain",
-                                key=f"dl_stderr_{name}",
-                                width="content",
-                            )
-
-                    if stdout_content:
-                        stdout_tail, stdout_total = _tail_lines(stdout_content)
-                        truncated = stdout_total > _LOG_TAIL_LINES
-                        suffix = (
-                            f" — last {_LOG_TAIL_LINES} of {stdout_total} lines"
-                            if truncated
-                            else f" — {stdout_total} line(s)"
-                        )
-                        st.markdown(f"**stdout**{suffix}")
-                        st.code(stdout_tail, language="log")
-                        if stdout_path:
-                            try:
-                                with open(
-                                    stdout_path, "r", encoding="utf-8", errors="replace"
-                                ) as _f:
-                                    _full_stdout = _f.read()
-                            except OSError:
-                                _full_stdout = stdout_content
-                            st.download_button(
-                                "Download stdout log",
-                                data=_full_stdout,
-                                file_name=f"service-{name}.stdout.log",
-                                mime="text/plain",
-                                key=f"dl_stdout_{name}",
-                                width="content",
-                            )
-
-                    if not stderr_content and not stdout_content:
-                        st.caption("No log output available.")
-                else:
-                    st.caption("No log files found for this service.")
+                # Logs — refreshed at 10s via st.fragment, independent of
+                # the global 60s portal tick.
+                _render_service_logs(name)
 
     st.divider()
 

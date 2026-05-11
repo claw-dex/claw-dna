@@ -54,7 +54,7 @@ def paths(tmp_path, monkeypatch):
         history=mem / "command_history.json",
         inbox=msg / "inbox.json",
         outbox=msg / "outbox.json",
-        outbox_history=mem / "outbox_history.json",
+        outbox_history=msg / "outbox_history.json",
         services=mem / "services.json",
         goal_history=mem / "goal_history.json",
     )

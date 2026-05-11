@@ -409,6 +409,72 @@ class ClaudeChat:
                 break
         return "\n".join(parts)
 
+    def _msg_to_events(self, msg, *, streamed_any: bool) -> tuple[list[dict], bool]:
+        """Translate one SDK message into zero or more typed event dicts.
+
+        Shared between `_async_stream` (in-turn) and `_async_drain` (Refresh
+        button) so the two paths cannot disagree on event shape. Returns
+        ``(events, new_streamed_any)``: events to enqueue, and the updated
+        `streamed_any` flag that controls whether a final AssistantMessage
+        TextBlock should be re-emitted (skip when deltas already covered it).
+        """
+        events: list[dict] = []
+        if isinstance(msg, StreamEvent):
+            event = msg.event
+            sid = getattr(msg, "session_id", None)
+            if sid:
+                with self._lock:
+                    self._session_id = sid
+            if event.get("type") == "content_block_delta":
+                text = (event.get("delta") or {}).get("text", "")
+                if text:
+                    streamed_any = True
+                    events.append({"type": "text", "text": text})
+        elif isinstance(msg, AssistantMessage):
+            for block in msg.content:
+                if isinstance(block, TextBlock) and block.text:
+                    if not streamed_any:
+                        events.append({"type": "text", "text": block.text})
+                elif isinstance(block, ToolUseBlock):
+                    events.append(
+                        {
+                            "type": "tool_use",
+                            "name": block.name,
+                            "tool_id": block.id,
+                            "input": block.input,
+                        }
+                    )
+                elif isinstance(block, ThinkingBlock):
+                    events.append({"type": "thinking", "text": block.thinking})
+            streamed_any = False
+        elif isinstance(msg, SystemMessage):
+            events.append({"type": "system", "subtype": msg.subtype, "data": msg.data})
+        elif isinstance(msg, ResultMessage):
+            sid = getattr(msg, "session_id", None)
+            if sid:
+                with self._lock:
+                    self._session_id = sid
+            events.append(
+                {
+                    "type": "result",
+                    "cost": msg.total_cost_usd,
+                    "duration_ms": msg.duration_ms,
+                    "is_error": msg.is_error,
+                    "num_turns": msg.num_turns,
+                    "session_id": self._session_id,
+                }
+            )
+        return events, streamed_any
+
+    # Drain window after the turn's ResultMessage. The SDK occasionally
+    # pushes follow-up messages 100-1500 ms after the Result on the same
+    # receive channel. A short window (the original 50 ms) stranded those
+    # in the SDK's internal anyio memory channel, where the *next* turn's
+    # iterator picked them up — surfacing as "response to message N
+    # appears at the start of turn N+1." 1.5 s catches the common case
+    # while keeping turn-end latency bounded.
+    _POST_RESULT_DRAIN_TIMEOUT_S = 1.5
+
     async def _async_stream(
         self, prompt: str, chunk_q: queue.Queue, done_event: threading.Event
     ) -> None:
@@ -418,8 +484,9 @@ class ClaudeChat:
         so that after the turn's `ResultMessage` we can keep pulling on the
         *same* iterator for a short drain window — catching any late-arriving
         messages so they do not leak into the next turn. Opening a parallel
-        iterator on the SDK's shared receive stream would steal messages and
-        race the next turn, so the drain must reuse this iterator.
+        iterator on the SDK's shared receive stream while a query is active
+        would steal messages and race this loop, so the in-turn drain must
+        reuse this iterator. (See `drain_pending` for the between-turn case.)
         """
         try:
             await self._sdk.query(prompt)
@@ -429,7 +496,10 @@ class ClaudeChat:
             while True:
                 if result_seen:
                     try:
-                        msg = await asyncio.wait_for(it.__anext__(), timeout=0.05)
+                        msg = await asyncio.wait_for(
+                            it.__anext__(),
+                            timeout=self._POST_RESULT_DRAIN_TIMEOUT_S,
+                        )
                     except (asyncio.TimeoutError, StopAsyncIteration):
                         break
                 else:
@@ -437,66 +507,12 @@ class ClaudeChat:
                         msg = await it.__anext__()
                     except StopAsyncIteration:
                         break
-                if result_seen:
-                    # Late-arriving message after this turn's ResultMessage —
-                    # discard so it doesn't appear as the next turn's response.
-                    continue
-                if isinstance(msg, StreamEvent):
-                    event = msg.event
-                    sid = getattr(msg, "session_id", None)
-                    if sid:
-                        with self._lock:
-                            self._session_id = sid
-                    if event.get("type") == "content_block_delta":
-                        text = (event.get("delta") or {}).get("text", "")
-                        if text:
-                            streamed_any = True
-                            chunk_q.put({"type": "text", "text": text})
-                elif isinstance(msg, AssistantMessage):
-                    for block in msg.content:
-                        if isinstance(block, TextBlock) and block.text:
-                            if not streamed_any:
-                                chunk_q.put({"type": "text", "text": block.text})
-                        elif isinstance(block, ToolUseBlock):
-                            chunk_q.put(
-                                {
-                                    "type": "tool_use",
-                                    "name": block.name,
-                                    "tool_id": block.id,
-                                    "input": block.input,
-                                }
-                            )
-                        elif isinstance(block, ThinkingBlock):
-                            chunk_q.put(
-                                {
-                                    "type": "thinking",
-                                    "text": block.thinking,
-                                }
-                            )
-                    streamed_any = False  # reset for next AssistantMessage round
-                elif isinstance(msg, SystemMessage):
-                    chunk_q.put(
-                        {
-                            "type": "system",
-                            "subtype": msg.subtype,
-                            "data": msg.data,
-                        }
-                    )
-                elif isinstance(msg, ResultMessage):
-                    sid = getattr(msg, "session_id", None)
-                    if sid:
-                        with self._lock:
-                            self._session_id = sid
-                    chunk_q.put(
-                        {
-                            "type": "result",
-                            "cost": msg.total_cost_usd,
-                            "duration_ms": msg.duration_ms,
-                            "is_error": msg.is_error,
-                            "num_turns": msg.num_turns,
-                            "session_id": self._session_id,
-                        }
-                    )
+                events, streamed_any = self._msg_to_events(
+                    msg, streamed_any=streamed_any
+                )
+                for ev in events:
+                    chunk_q.put(ev)
+                if isinstance(msg, ResultMessage):
                     result_seen = True
                     # Continue iterating in drain mode to catch any late
                     # post-Result messages on this same iterator.
@@ -504,6 +520,40 @@ class ClaudeChat:
             chunk_q.put({"type": "error", "error": str(exc)})
         finally:
             done_event.set()
+
+    async def _async_drain(self, total_timeout_s: float) -> list[dict]:
+        """Pull any messages the SDK has buffered on its receive channel
+        without sending a new query.
+
+        Used by the Refresh button to recover late-arriving content that
+        slipped past `_async_stream`'s post-result drain window. Must only
+        run when no turn is in flight — otherwise it competes with the
+        active stream's iterator on the same anyio memory channel.
+        """
+        events: list[dict] = []
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + total_timeout_s
+        it = self._sdk.receive_messages().__aiter__()
+        streamed_any = False
+        try:
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                per_msg_timeout = min(0.2, remaining)
+                try:
+                    msg = await asyncio.wait_for(
+                        it.__anext__(), timeout=per_msg_timeout
+                    )
+                except (asyncio.TimeoutError, StopAsyncIteration):
+                    break
+                new_events, streamed_any = self._msg_to_events(
+                    msg, streamed_any=streamed_any
+                )
+                events.extend(new_events)
+        except Exception as exc:
+            events.append({"type": "error", "error": str(exc)})
+        return events
 
     # ── public API ────────────────────────────────────────────
 
@@ -583,6 +633,28 @@ class ClaudeChat:
         if self._done_event is None:
             return False
         return not self._done_event.is_set()
+
+    def drain_pending(self, total_timeout_s: float = 2.0) -> list[dict]:
+        """Drain SDK-buffered messages without sending a new query.
+
+        Returns the typed event dicts collected (same shape as `poll()`).
+        Safe to call only when no turn is in flight; while streaming, the
+        active `_async_stream` owns the receive iterator and a parallel
+        drain would steal messages. We hold `_submit_lock` so `submit()`
+        cannot start a new turn mid-drain.
+        """
+        with self._submit_lock:
+            if self.is_streaming():
+                return []
+            if self._closed or self._sdk is None:
+                return []
+            try:
+                fut = asyncio.run_coroutine_threadsafe(
+                    self._async_drain(total_timeout_s), self._loop
+                )
+                return fut.result(timeout=total_timeout_s + 2.0)
+            except Exception:
+                return []
 
     def is_alive(self) -> bool:
         """Return True if the background thread is still running."""
@@ -981,6 +1053,21 @@ def render():
         committed = False
         if session is not None:
             _drain_streaming_events(session)
+            # If no turn is in flight, also drain the SDK's own internal
+            # receive channel — that's where late post-Result messages
+            # park if they slipped past _async_stream's drain window.
+            # Without this, the reply to message N would only surface
+            # when the user sends message N+1.
+            if not session.is_streaming():
+                leftover = session.drain_pending(total_timeout_s=2.0)
+                for ev in leftover:
+                    st.session_state.chat_stream_events.append(ev)
+                    if ev["type"] == "text":
+                        st.session_state.chat_stream_text += ev["text"]
+                    elif ev["type"] == "error":
+                        st.session_state.chat_stream_text += (
+                            f"\n\n**Error:** {ev['error']}"
+                        )
             committed = _finalize_assistant_turn(session)
         # Step 2: reconcile in-memory chat_messages with disk. Prefer the
         # longer list to avoid wiping a just-appended record before its

@@ -180,6 +180,30 @@ def _agent_inbox_history_path(agent: dict) -> Path | None:
 # ─── pure render helpers (testable) ──────────────────────────────────────
 
 
+@st.fragment(run_every="10s")
+def _render_chat_fragment(name: str) -> None:
+    """Refresh the chat transcript every 10s without rerunning the whole page.
+
+    Takes the agent ``name`` (hashable) rather than the agent dict — Streamlit
+    uses fragment args for instance identity, so passing a mutable dict would
+    invalidate the fragment whenever any field on the agent record changes.
+    The agent record is re-looked-up from agents.json on each tick.
+    """
+    agent = next((a for a in _load_agents() if a.get("name") == name), None)
+    if agent is None:
+        st.caption(f"Agent {name!r} no longer registered.")
+        return
+    if agent.get("type") == "internal":
+        _render_chat(_load_internal_chat(name))
+    else:
+        st.caption(
+            "External agents have no local chat_history; this is a "
+            "synthesized transcript merging inbox (main → agent) and "
+            "outbox (agent → main)."
+        )
+        _render_chat(_synthesize_external_chat(agent))
+
+
 def _render_chat(history: list[dict]) -> None:
     """Render a list of {role, content, ts} records as chat bubbles.
 
@@ -481,15 +505,9 @@ def render() -> None:
         ["💬 Chat", "📥 Inbox", goal_label, "⚙️ Config", "🛠️ Actions"]
     )
     with chat_tab:
-        if agent.get("type") == "internal":
-            _render_chat(_load_internal_chat(name))
-        else:
-            st.caption(
-                "External agents have no local chat_history; this is a "
-                "synthesized transcript merging inbox (main → agent) and "
-                "outbox (agent → main)."
-            )
-            _render_chat(_synthesize_external_chat(agent))
+        # Chat transcript polls on a 10s cadence via st.fragment, independent
+        # of the global 60s portal tick.
+        _render_chat_fragment(name)
     with inbox_tab:
         _render_inbox(agent)
     with goals_tab:

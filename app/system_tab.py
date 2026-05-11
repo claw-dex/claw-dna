@@ -376,7 +376,6 @@ _MEMORY_FILE_LABELS = {
     "journal_archive.json": ("Journal (archive)", "Archived older journal entries"),
     "cycles.json": ("Cycles", "Complete cycle history with durations"),
     "outbox.json": ("Outbox", "Pending messages for the user"),
-    "outbox_history.json": ("Outbox History", "All past agent→user messages"),
     "server_errors.json": ("Tab Errors", "Portal tab crash errors"),
     "bootstrap.json": ("Bootstrap Config", "First-cycle initialization data (stable)"),
     "command_history.json": ("Command History", "Agent Console command history"),
@@ -393,7 +392,6 @@ _MEMORY_AGE_EXEMPT = {
     "bootstrap.json",
     "link_cache.json",
     "command_history.json",
-    "outbox_history.json",
 }
 
 

@@ -7,7 +7,13 @@ import re
 
 import streamlit as st
 
-from app.shared import MEMORY_DIR, _STATUS_COLORS, _STATUS_MD_COLORS, _badge
+from app.shared import (
+    MEMORY_DIR,
+    MESSAGES_DIR,
+    _STATUS_COLORS,
+    _STATUS_MD_COLORS,
+    _badge,
+)
 
 
 def _format_size(num_bytes: int) -> str:
@@ -69,8 +75,10 @@ def render():
     ltm_path = f"{MEMORY_DIR}/long_term_memory.mv2"
     journal_path = f"{MEMORY_DIR}/journal.json"
     journal_archive_path = f"{MEMORY_DIR}/journal_archive.json"
-    inbox_history_path = f"{MEMORY_DIR}/inbox_history.json"
-    outbox_history_path = f"{MEMORY_DIR}/outbox_history.json"
+    # inbox_history / outbox_history live alongside the other messaging
+    # artifacts under /agent/messages/, not /agent/memory/.
+    inbox_history_path = f"{MESSAGES_DIR}/inbox_history.json"
+    outbox_history_path = f"{MESSAGES_DIR}/outbox_history.json"
     cycles_path = f"{MEMORY_DIR}/cycles.json"
 
     journal_n = _json_count(journal_path)

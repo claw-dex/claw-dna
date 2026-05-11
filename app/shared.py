@@ -184,6 +184,52 @@ def _startup_check():
             except OSError:
                 pass
 
+    # 4. One-time migration: outbox_history.json was previously written to
+    # /agent/memory/, but it belongs alongside the other messaging files
+    # under /agent/messages/. If only the old location exists, move it; if
+    # both exist, merge the legacy file into the new one (deduped by
+    # timestamp) and drop the legacy file.
+    legacy_outbox_history = f"{MEMORY_DIR}/outbox_history.json"
+    new_outbox_history = f"{MESSAGES_DIR}/outbox_history.json"
+    if os.path.exists(legacy_outbox_history):
+        try:
+            if not os.path.exists(new_outbox_history):
+                shutil.move(legacy_outbox_history, new_outbox_history)
+                issues.append(
+                    f"Migrated outbox_history.json: {legacy_outbox_history} → {new_outbox_history}"
+                )
+            else:
+                with open(legacy_outbox_history) as f:
+                    legacy = json.load(f)
+                with open(new_outbox_history) as f:
+                    current = json.load(f)
+                if not isinstance(legacy, list):
+                    legacy = []
+                if not isinstance(current, list):
+                    current = []
+                seen_ts = {
+                    e.get("timestamp")
+                    for e in current
+                    if isinstance(e, dict) and e.get("timestamp")
+                }
+                merged = list(current)
+                for entry in legacy:
+                    if not isinstance(entry, dict):
+                        continue
+                    ts = entry.get("timestamp")
+                    if ts and ts in seen_ts:
+                        continue
+                    merged.append(entry)
+                    if ts:
+                        seen_ts.add(ts)
+                _write_json_atomic(new_outbox_history, merged, indent=2)
+                os.unlink(legacy_outbox_history)
+                issues.append(
+                    f"Merged legacy outbox_history.json into {new_outbox_history}"
+                )
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            issues.append(f"outbox_history migration failed: {exc}")
+
     if issues:
         print(f"[Agent] Startup check: fixed {len(issues)} issue(s):", flush=True)
         for issue in issues:
