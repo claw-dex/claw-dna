@@ -255,6 +255,7 @@ vendor/
 target/
 **/*.rs.bk
 Cargo.lock.bak
+core.*
 
 # OS / Editor
 .DS_Store
@@ -265,3 +266,7 @@ Thumbs.db
 .idea/
 
 # Agent
+/memory/
+/messages/
+/web/
+/workspace/
