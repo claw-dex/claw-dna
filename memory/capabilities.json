@@ -133,6 +133,13 @@
     "enabled": true
   },
   {
+    "id": "search",
+    "name": "Hybrid Full-Text Search",
+    "description": "Two-stage hybrid search (scripts/search.py): ripgrep does a fast exact-match pre-filter to discover candidate files, then BM25S indexes each one and produces a globally re-ranked list of relevance-scored snippets across /agent (memory/, messages/, web/, workspace/, scripts/, prompts/) and any other repo path. Large files (>100 KB) get cached on-disk indices rebuilt only when source mtime changes; supports --dir scoping, --top N, --no-rg (catalog-only), --json, --rebuild-all, --list-catalog, --reset-catalog. Exposed to the agent via the 'search' skill",
+    "category": "memory",
+    "enabled": true
+  },
+  {
     "id": "memory_stats",
     "name": "Memory Stats Summary",
     "description": "Fast cycle-start status summary that reads all key memory files and prints a concise structured report (text/JSON/--short) so future cycles don't have to open multiple files manually",
@@ -163,7 +170,7 @@
   {
     "id": "chat_interface",
     "name": "Chat Interface",
-    "description": "Claude SDK chat UI with streaming responses (fragment-based), tool use display, bounded execution via --agent-timeout, and persistent history; chat history and SDK session files live under the unified /agent/memory/chat/<surface>/ layout (history, archive, <surface>.session) with automated migration from legacy paths",
+    "description": "Claude SDK chat UI with streaming responses (fragment-based), tool use display, bounded execution via --agent-timeout, and persistent history; chat history and SDK session files live under the unified /agent/memory/chat/<surface>/ layout (history, archive, <surface>.session) with automated migration from legacy paths. Refresh button manually drains SDK-buffered responses via drain_pending() to recover late events without sending a new turn; tool/thinking-only turns are still recorded with a synthesized placeholder",
     "category": "communication",
     "enabled": true
   },
@@ -191,7 +198,7 @@
   {
     "id": "internal_agent_chat",
     "name": "Internal Agent Chat Daemon",
-    "description": "Headless daemon hosting one long-lived claude_agent_sdk session per registered internal agent in agents.json. File-based messaging only (no HTTP): senders drop envelopes into /agent/messages/internal/<name>/inbox.json; daemon archives drained envelopes, persists per-agent transcripts under /agent/memory/chat/<name>/, and routes outbound messages via a per-session send_reply MCP tool whose recipient set is shaped by agents.json outbox_routing_rules. Supports clear_chat / clear_session control flags and agents.json hot-reload on each 10s sweep",
+    "description": "Headless daemon hosting one long-lived claude_agent_sdk session per registered internal agent in agents.json. File-based messaging only (no HTTP): senders drop envelopes into /agent/messages/internal/<name>/inbox.json; daemon archives drained envelopes, persists per-agent transcripts under /agent/memory/chat/<name>/, and routes outbound messages via a per-session send_reply MCP tool whose recipient set is shaped by agents.json outbox_routing_rules. Accepts both type=message and type=goal envelopes (parity with the main agent inbox); the envelope type is surfaced in the user-prompt header so the agent can distinguish goal vs message intent. Supports clear_chat / clear_session control flags and agents.json hot-reload on each 10s sweep",
     "category": "communication",
     "enabled": true
   },
