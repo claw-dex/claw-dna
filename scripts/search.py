@@ -32,6 +32,7 @@ import os
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -100,6 +101,11 @@ FORCED_INCLUDE_DIRS = [
 # Maximum number of files rg may auto-add to the catalog in a single run.
 # Prevents a broad query from bloating the catalog with thousands of log files.
 MAX_RG_CATALOG_ADDITIONS = 20
+
+# Default per-run concurrency for per-file BM25 indexing + retrieval.
+# bm25s leans on numpy/scipy which release the GIL, so threads give a real
+# wall-clock speedup for catalogs with many >100 KB files.
+DEFAULT_WORKERS = 4
 
 
 # ── Directory bootstrap ────────────────────────────────────────────────────
@@ -406,6 +412,96 @@ def _get_retriever(
     return bm25s.BM25.load(str(idx_dir), load_corpus=False)
 
 
+# ══ Concurrency helpers ═══════════════════════════════════════════════════
+
+
+def _resolve_workers(workers: Optional[int]) -> int:
+    """Clamp the worker count to a sane range. None / <=0 → DEFAULT_WORKERS."""
+    if workers is None or workers <= 0:
+        return DEFAULT_WORKERS
+    return workers
+
+
+def _search_files_concurrent(
+    files: List[str],
+    query: str,
+    workers: int = DEFAULT_WORKERS,
+    search_fn: Optional[Callable[[str, str], List[Dict]]] = None,
+) -> Tuple[List[Dict], int]:
+    """Run `search_fn(file, query)` across `files` in a thread pool.
+
+    - Skips files that don't exist on disk (matches the prior sequential
+      loop's behaviour).
+    - With workers <= 1 (or a single file) runs sequentially to avoid
+      thread-pool overhead.
+    - Returns (all_hits, n_searched) where order of all_hits does not
+      matter — caller re-ranks by BM25 score.
+    """
+    if search_fn is None:
+        search_fn = search_file
+    existing = [fp for fp in files if Path(fp).exists()]
+    n_searched = len(existing)
+    if not existing:
+        return [], 0
+
+    if workers <= 1 or len(existing) == 1:
+        all_hits: List[Dict] = []
+        for fp in existing:
+            all_hits.extend(search_fn(fp, query))
+        return all_hits, n_searched
+
+    pool_size = min(workers, len(existing))
+    all_hits = []
+    with ThreadPoolExecutor(max_workers=pool_size) as ex:
+        for hits in ex.map(lambda fp: search_fn(fp, query), existing):
+            all_hits.extend(hits)
+    return all_hits, n_searched
+
+
+def _rebuild_indices_concurrent(
+    files: List[str],
+    workers: int = DEFAULT_WORKERS,
+) -> List[Tuple[str, str]]:
+    """Rebuild cached indices for every >100 KB file in `files`.
+
+    Returns a list of (status, message) tuples in the input file order so the
+    caller can print a deterministic log. Status is one of:
+    "skip-missing", "skip-small", "skip-empty", "built", "error".
+
+    A single bad file (parse failure, retriever build crash) is captured as
+    ("error", "...") instead of propagating, so one corrupt file cannot poison
+    the whole batch.
+    """
+
+    def _one(fp: str) -> Tuple[str, str]:
+        try:
+            if not Path(fp).exists():
+                return ("skip-missing", f"  skip  {fp}  (missing)")
+            size = os.path.getsize(fp)
+            if size <= LARGE_FILE_THRESHOLD:
+                return (
+                    "skip-small",
+                    f"  skip  {fp}  ({size/1024:.0f} KB < 100 KB, not cached)",
+                )
+            docs, _ = file_to_docs(fp)
+            if not docs:
+                return ("skip-empty", f"  skip  {fp}  (no parseable docs)")
+            t0 = time.perf_counter()
+            _get_retriever(fp, docs, force_rebuild=True)
+            elapsed = (time.perf_counter() - t0) * 1000
+            return ("built", f"  built {fp}  ({len(docs)} docs, {elapsed:.0f} ms)")
+        except Exception as exc:
+            return ("error", f"  error {fp}  ({exc})")
+
+    if workers <= 1 or len(files) <= 1:
+        return [_one(fp) for fp in files]
+
+    pool_size = min(workers, len(files))
+    with ThreadPoolExecutor(max_workers=pool_size) as ex:
+        # Preserve input order for deterministic output.
+        return list(ex.map(_one, files))
+
+
 # ══ Snippet ════════════════════════════════════════════════════════════════
 
 
@@ -623,6 +719,17 @@ def main() -> None:
         action="store_true",
         help="Emit machine-readable JSON instead of the default formatted output",
     )
+    parser.add_argument(
+        "--workers",
+        "-w",
+        type=int,
+        default=DEFAULT_WORKERS,
+        metavar="N",
+        help=(
+            f"Number of concurrent worker threads for per-file BM25 indexing "
+            f"and retrieval (default: {DEFAULT_WORKERS}; set to 1 to disable)"
+        ),
+    )
 
     args = parser.parse_args()
     ensure_dirs()
@@ -651,23 +758,13 @@ def main() -> None:
 
     if args.rebuild_all:
         catalog = load_catalog()
-        print(f"\nRebuilding indices for {len(catalog)} catalog file(s)…\n")
-        for fp in catalog:
-            if not Path(fp).exists():
-                print(f"  skip  {fp}  (missing)")
-                continue
-            size = os.path.getsize(fp)
-            if size <= LARGE_FILE_THRESHOLD:
-                print(f"  skip  {fp}  ({size/1024:.0f} KB < 100 KB, not cached)")
-                continue
-            docs, _ = file_to_docs(fp)
-            if not docs:
-                print(f"  skip  {fp}  (no parseable docs)")
-                continue
-            t0 = time.perf_counter()
-            _get_retriever(fp, docs, force_rebuild=True)
-            elapsed = (time.perf_counter() - t0) * 1000
-            print(f"  built {fp}  ({len(docs)} docs, {elapsed:.0f} ms)")
+        workers = _resolve_workers(args.workers)
+        print(
+            f"\nRebuilding indices for {len(catalog)} catalog file(s) "
+            f"({workers} worker(s))…\n"
+        )
+        for _status, msg in _rebuild_indices_concurrent(catalog, workers=workers):
+            print(msg)
         print("\nDone.\n")
         return
 
@@ -701,15 +798,12 @@ def main() -> None:
         else catalog
     )
 
-    # ── 4. Search scoped catalog files ────────────────────────────────────
-    all_hits: List[Dict] = []
-    n_searched = 0
-    for fp in scoped_catalog:
-        if not Path(fp).exists():
-            continue
-        hits = search_file(fp, args.query)
-        all_hits.extend(hits)
-        n_searched += 1
+    # ── 4. Search scoped catalog files (concurrent thread pool) ───────────
+    all_hits, n_searched = _search_files_concurrent(
+        scoped_catalog,
+        args.query,
+        workers=_resolve_workers(args.workers),
+    )
 
     # ── 5. Global re-rank ──────────────────────────────────────────────────
     all_hits.sort(key=lambda h: h["score"], reverse=True)

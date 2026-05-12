@@ -603,9 +603,10 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
         ]
         opts: dict = {
             "enable_embedding": ENABLE_EMBEDDING,
-            # 3 = SDK default zstd level when compression is enabled, 0 = off.
-            # Mirrors the per-chunk ``vector_compression`` flag the loop used.
-            "compression_level": 3 if _should_compress(staging) else 0,
+            # Rebuilds always compress: staging starts at 0 bytes, so a
+            # size-threshold check would never trigger here even when the
+            # canonical index is large. Use the SDK default zstd level (3).
+            "compression_level": 3,
         }
         if EMBED_MODEL is not None:
             opts["embedding_model"] = EMBED_MODEL

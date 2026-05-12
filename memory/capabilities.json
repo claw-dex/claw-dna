@@ -170,7 +170,7 @@
   {
     "id": "chat_interface",
     "name": "Chat Interface",
-    "description": "Claude SDK chat UI with streaming responses (fragment-based), tool use display, bounded execution via --agent-timeout, and persistent history; chat history and SDK session files live under the unified /agent/memory/chat/<surface>/ layout (history, archive, <surface>.session) with automated migration from legacy paths. Refresh button manually drains SDK-buffered responses via drain_pending() to recover late events without sending a new turn; tool/thinking-only turns are still recorded with a synthesized placeholder",
+    "description": "Claude SDK chat UI with streaming responses (fragment-based), tool use display, bounded execution via --agent-timeout, and persistent history; chat history and SDK session files live under the unified /agent/memory/chat/<surface>/ layout (history, archive, <surface>.session) with automated migration from legacy paths",
     "category": "communication",
     "enabled": true
   },
@@ -198,7 +198,7 @@
   {
     "id": "internal_agent_chat",
     "name": "Internal Agent Chat Daemon",
-    "description": "Headless daemon hosting one long-lived claude_agent_sdk session per registered internal agent in agents.json. File-based messaging only (no HTTP): senders drop envelopes into /agent/messages/internal/<name>/inbox.json; daemon archives drained envelopes, persists per-agent transcripts under /agent/memory/chat/<name>/, and routes outbound messages via a per-session send_reply MCP tool whose recipient set is shaped by agents.json outbox_routing_rules. Accepts both type=message and type=goal envelopes (parity with the main agent inbox); the envelope type is surfaced in the user-prompt header so the agent can distinguish goal vs message intent. Supports clear_chat / clear_session control flags and agents.json hot-reload on each 10s sweep",
+    "description": "Headless daemon hosting one long-lived claude_agent_sdk session per registered internal agent in agents.json. File-based messaging only (no HTTP): senders drop envelopes into /agent/messages/internal/<name>/inbox.json; daemon archives drained envelopes, persists per-agent transcripts under /agent/memory/chat/<name>/, and routes outbound messages via a per-session send_reply MCP tool whose recipient set is shaped by agents.json outbox_routing_rules. Supports clear_chat / clear_session control flags and agents.json hot-reload on each 10s sweep",
     "category": "communication",
     "enabled": true
   },

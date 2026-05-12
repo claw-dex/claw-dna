@@ -445,6 +445,189 @@ def test_print_results_json_emits_valid_json(capsys):
     assert captured.err == ""
 
 
+# ── Concurrency helpers ───────────────────────────────────────────────────
+
+
+def test_resolve_workers_default_when_none():
+    assert s._resolve_workers(None) == s.DEFAULT_WORKERS
+
+
+def test_resolve_workers_default_when_zero_or_negative():
+    assert s._resolve_workers(0) == s.DEFAULT_WORKERS
+    assert s._resolve_workers(-3) == s.DEFAULT_WORKERS
+
+
+def test_resolve_workers_passes_through_positive():
+    assert s._resolve_workers(1) == 1
+    assert s._resolve_workers(8) == 8
+
+
+def test_search_files_concurrent_skips_missing(tmp_path):
+    real = tmp_path / "real.txt"
+    real.write_text("x")
+    missing = tmp_path / "missing.txt"  # never created
+
+    calls = []
+
+    def fake(fp, query):
+        calls.append(fp)
+        return [{"file": fp, "doc_id": "0", "score": 1.0, "snippet": query}]
+
+    hits, n = s._search_files_concurrent(
+        [str(real), str(missing)], "q", workers=1, search_fn=fake
+    )
+    assert calls == [str(real)]
+    assert n == 1
+    assert hits == [{"file": str(real), "doc_id": "0", "score": 1.0, "snippet": "q"}]
+
+
+def test_search_files_concurrent_empty_list():
+    hits, n = s._search_files_concurrent([], "q", workers=4, search_fn=lambda *_: [])
+    assert hits == [] and n == 0
+
+
+def test_search_files_concurrent_aggregates_all_hits(tmp_path):
+    files = []
+    for i in range(5):
+        p = tmp_path / f"f{i}.txt"
+        p.write_text("x")
+        files.append(str(p))
+
+    def fake(fp, query):
+        return [{"file": fp, "doc_id": "0", "score": float(len(fp)), "snippet": query}]
+
+    hits, n = s._search_files_concurrent(files, "q", workers=4, search_fn=fake)
+    assert n == 5
+    # one hit per file, regardless of dispatch order
+    assert sorted(h["file"] for h in hits) == sorted(files)
+
+
+def test_search_files_concurrent_runs_in_parallel(tmp_path):
+    """4 sleeps of 0.1s with 4 workers: prove the worker pool actually
+    overlaps work. ``peak`` is the load-bearing assertion (it directly
+    proves >1 thread ran concurrently); the wall-time deadline is a loose
+    sanity check chosen to be insensitive to scheduler jitter on a busy CI
+    runner. If this test goes flaky, relax the wall-time bound first."""
+    import threading
+    import time as _time
+
+    files = []
+    for i in range(4):
+        p = tmp_path / f"f{i}.txt"
+        p.write_text("x")
+        files.append(str(p))
+
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def fake(fp, _query):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        _time.sleep(0.1)
+        with lock:
+            active -= 1
+        return []
+
+    t0 = _time.perf_counter()
+    s._search_files_concurrent(files, "q", workers=4, search_fn=fake)
+    elapsed = _time.perf_counter() - t0
+
+    # Load-bearing: proves real overlap occurred. With workers=4 and 4 tasks
+    # we expect peak == 4 on an unloaded host; require >=2 to tolerate CI
+    # scheduler jitter while still failing if execution serialized.
+    assert peak >= 2, f"expected concurrent execution; peak active = {peak}"
+    # Loose wall-time sanity check: sequential would take >=0.4s; allow up
+    # to 0.6s to accommodate ThreadPoolExecutor startup + GC pauses.
+    assert elapsed < 0.6, f"expected <0.6s wall time; got {elapsed:.2f}s"
+
+
+def test_search_files_concurrent_workers_one_uses_sequential(tmp_path):
+    """With workers=1 the helper must NOT create a thread pool — proven by
+    asserting all calls happen on the main thread."""
+    import threading
+
+    files = []
+    for i in range(3):
+        p = tmp_path / f"f{i}.txt"
+        p.write_text("x")
+        files.append(str(p))
+
+    main_tid = threading.get_ident()
+    seen_tids = []
+
+    def fake(fp, _q):
+        seen_tids.append(threading.get_ident())
+        return []
+
+    s._search_files_concurrent(files, "q", workers=1, search_fn=fake)
+    assert all(t == main_tid for t in seen_tids)
+
+
+def test_rebuild_indices_concurrent_status_codes(tmp_path, monkeypatch):
+    # big.txt is 7 bytes, small.txt is 1 byte → threshold of 5 splits them
+    # cleanly into "large" (cached) vs "small" (skip) cohorts.
+    big = tmp_path / "big.txt"
+    big.write_text("a\n\nb\n\nc")  # 3 paragraphs → docs
+    small = tmp_path / "small.txt"
+    small.write_text("x")
+    missing = tmp_path / "absent.txt"
+
+    monkeypatch.setattr(s, "LARGE_FILE_THRESHOLD", 5)
+    # Stub the heavy retriever build so the test stays pure.
+    monkeypatch.setattr(s, "_get_retriever", lambda *a, **k: object())
+
+    results = s._rebuild_indices_concurrent(
+        [str(big), str(small), str(missing)], workers=2
+    )
+    statuses = [r[0] for r in results]
+    assert statuses == ["built", "skip-small", "skip-missing"]
+    # input order preserved
+    assert str(big) in results[0][1]
+    assert str(small) in results[1][1]
+    assert str(missing) in results[2][1]
+
+
+def test_rebuild_indices_concurrent_skip_empty(tmp_path, monkeypatch):
+    big = tmp_path / "big.txt"
+    big.write_text("x" * 200)
+    monkeypatch.setattr(s, "LARGE_FILE_THRESHOLD", 5)
+    monkeypatch.setattr(s, "file_to_docs", lambda _p: ([], []))
+    monkeypatch.setattr(s, "_get_retriever", lambda *a, **k: object())
+
+    results = s._rebuild_indices_concurrent([str(big)], workers=1)
+    assert results[0][0] == "skip-empty"
+
+
+def test_rebuild_indices_concurrent_traps_per_file_errors(tmp_path, monkeypatch):
+    """A single bad file must not abort the whole batch — see code review.
+
+    The worker is told to raise on the first file; we still expect a result
+    tuple for it (status="error") AND a normal "built" tuple for the second
+    file, both in input order.
+    """
+    bad = tmp_path / "bad.txt"
+    bad.write_text("x" * 200)
+    good = tmp_path / "good.txt"
+    good.write_text("x" * 200)
+
+    monkeypatch.setattr(s, "LARGE_FILE_THRESHOLD", 5)
+    monkeypatch.setattr(s, "file_to_docs", lambda _p: (["doc"], ["0"]))
+
+    def flaky_retriever(fp, *_a, **_k):
+        if "bad" in fp:
+            raise RuntimeError("boom")
+        return object()
+
+    monkeypatch.setattr(s, "_get_retriever", flaky_retriever)
+
+    results = s._rebuild_indices_concurrent([str(bad), str(good)], workers=2)
+    assert [r[0] for r in results] == ["error", "built"]
+    assert "boom" in results[0][1]
+
+
 def test_print_results_json_unicode_preserved(capsys):
     s._print_results_json(
         hits=[

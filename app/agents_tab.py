@@ -23,6 +23,7 @@ and lets the operator inspect or interact with one agent at a time:
 from __future__ import annotations
 
 import sys
+import urllib.parse
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -180,6 +181,22 @@ def _agent_inbox_history_path(agent: dict) -> Path | None:
 # ─── pure render helpers (testable) ──────────────────────────────────────
 
 
+_CHAT_TAIL_LIMIT = 10
+
+
+def _caddy_url(abs_path: str | Path) -> str:
+    """Map an absolute path under /agent to its Caddy file-browser URL.
+
+    Paths outside ``/agent/`` are returned unchanged (passthrough). Path
+    segments are percent-encoded so agent names containing parens, spaces,
+    or other markdown-sensitive characters cannot break the rendered link.
+    """
+    p = str(abs_path)
+    if p.startswith("/agent/"):
+        return "/_" + urllib.parse.quote(p, safe="/")
+    return p
+
+
 @st.fragment(run_every="10s")
 def _render_chat_fragment(name: str) -> None:
     """Refresh the chat transcript every 10s without rerunning the whole page.
@@ -194,7 +211,10 @@ def _render_chat_fragment(name: str) -> None:
         st.caption(f"Agent {name!r} no longer registered.")
         return
     if agent.get("type") == "internal":
-        _render_chat(_load_internal_chat(name))
+        _render_chat(
+            _load_internal_chat(name),
+            source_path=str(chat_history_path(name)),
+        )
     else:
         st.caption(
             "External agents have no local chat_history; this is a "
@@ -204,8 +224,13 @@ def _render_chat_fragment(name: str) -> None:
         _render_chat(_synthesize_external_chat(agent))
 
 
-def _render_chat(history: list[dict]) -> None:
+def _render_chat(history: list[dict], source_path: str | None = None) -> None:
     """Render a list of {role, content, ts} records as chat bubbles.
+
+    Only the last ``_CHAT_TAIL_LIMIT`` records are rendered. When the history
+    is longer, a header banner shows how many older messages are hidden and
+    links to the full file via the Caddy file browser (if ``source_path``
+    is supplied).
 
     The daemon writes the user record to ``chat_history.json`` as soon as
     the inbound prompt is received, then appends the assistant record once
@@ -215,7 +240,20 @@ def _render_chat(history: list[dict]) -> None:
     if not history:
         st.caption("(empty)")
         return
-    for msg in history:
+    older = max(0, len(history) - _CHAT_TAIL_LIMIT)
+    if older > 0:
+        if source_path:
+            url = _caddy_url(source_path)
+            st.markdown(
+                f"📜 _Showing last {_CHAT_TAIL_LIMIT} of {len(history)} messages — "
+                f"[{older} older in full history]({url})_"
+            )
+        else:
+            st.markdown(
+                f"📜 _Showing last {_CHAT_TAIL_LIMIT} of {len(history)} messages "
+                f"({older} older hidden)_"
+            )
+    for msg in history[-_CHAT_TAIL_LIMIT:]:
         role = msg.get("role") or "assistant"
         # Streamlit accepts only "user" / "assistant" — fall back gracefully.
         bubble_role = "user" if role == "user" else "assistant"
