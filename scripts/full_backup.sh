@@ -67,18 +67,27 @@ for p in \
   /home/agent/.claude \
   /home/agent/.bashrc \
   /home/agent/.gitconfig \
-  /home/agent/.profile \
-  /home/agent/.claude.json
+  /home/agent/.profile
 do
   [ -e "$p" ] && HOME_PARTS+=("$p")
 done
 
+# Exclude credential/session/runtime state from the source container so a
+# restore on a new host doesn't overwrite fresh tokens with expired ones.
 zip -r "$STAGING/home_agent.zip" \
   "${HOME_PARTS[@]}" \
   --exclude "*.lock" \
   --exclude "*/__pycache__/*" \
   --exclude "*/.git/*" \
-  --exclude "/home/agent/.claude/projects/-agent/*"
+  --exclude "/home/agent/.claude/projects/-agent/*" \
+  --exclude "/home/agent/.claude/.credentials.json" \
+  --exclude "/home/agent/.claude/mcp-needs-auth-cache.json" \
+  --exclude "/home/agent/.claude/daemon/*" \
+  --exclude "/home/agent/.claude/daemon.lock" \
+  --exclude "/home/agent/.claude/daemon.log" \
+  --exclude "/home/agent/.claude/daemon.status.json" \
+  --exclude "/home/agent/.claude/ide/*" \
+  --exclude "/home/agent/.claude/sessions/*"
 
 # ── Phase 3: Final archive ────────────────────────────────────────────────────
 echo ""

@@ -6,6 +6,116 @@ This is your very first cycle. The multi-service gateway is running:
 Caddy (port 8080) and Streamlit (port 8081 at /app/).
 Your task: initialize your memory and evolve the agent to serve the user's first goal.
 
+## Step 0: Check for Migration Backup
+
+Before anything else, capture the migration backup path (if any) from
+`/agent/memory/portal_config.json`:
+
+```bash
+CFG=/agent/memory/portal_config.json
+BACKUP_ZIP=$([ -f "$CFG" ] && jq -r '.bootstrap_backup_path // ""' "$CFG" || echo "")
+if [ -n "$BACKUP_ZIP" ]; then
+  echo "Migration mode — restoring from: $BACKUP_ZIP"
+else
+  echo "Normal first-cycle mode — no migration backup"
+fi
+```
+
+**If `$BACKUP_ZIP` is non-empty**, this is a **migration cycle**, not a normal
+first-cycle evolution. The user uploaded an `agent_full_backup_*.zip` via the
+portal's first-run form, and you must restore from it instead of building
+something new.
+
+### Step 0.1 — Remember the user's submitted goal
+
+The first goal entry user submitted is already in your prompt context under `<your_goals>`.
+
+**Remember its full text now** — Phase 2 of Recovery will overwrite
+`goal.json` with the backup's contents, erasing this entry. You will write it back in Step 0.3.
+
+The goal may be either:
+
+- The **synthetic** goal the portal wrote when only a backup was uploaded
+  (e.g. `"Migrate agent state from uploaded backup: <name>"`), or
+- The **user's typed goal**, which is a post-migration instruction (e.g.
+  `"Migrate, but skip rebuilding long-term memory; then add a Trading tab"`).
+
+If the goal contains directives that change *how* migration is performed
+(skip steps, alter ingest flags, etc.), honor them when executing the Phases
+below.
+
+### Step 0.2 — Run Recovery
+
+Follow **Phases 1–5 of the Recovery section** in
+`skills/full-backup-and-migrate/SKILL.md` exactly, using `$BACKUP_ZIP`
+as the `BACKUP_ZIP` variable referenced throughout the skill. Skip or modify
+individual phases only if the preserved goal explicitly tells you to (and log
+what you skipped in the cycle-close summary).
+
+### Step 0.3 — Restore the preserved goal
+
+After Recovery completes, `goal.json` reflects the source-agent's goal history.
+Append the goal text you remembered in Step 0.1 with a fresh `id` (to avoid
+collision with restored entries) and `status: in_progress` — you will work on
+it within this same bootstrap cycle and finalize its status in Step 0.5:
+
+```bash
+GOAL_FILE=/agent/memory/goal.json
+# Substitute the goal text you remembered from Step 0.1:
+GOAL_TEXT='<paste the original first-goal text here>'
+NEXT_NUM=$(jq '[.[].id | capture("goal-(?<n>\\d+)"; "g") | .n | tonumber] | (max // 0) + 1' "$GOAL_FILE")
+NEW_ID="goal-${NEXT_NUM}"
+NOW=$(date -u +%Y-%m-%dT%H:%M:%S%z)
+tmp="${GOAL_FILE}.tmp"
+jq --arg goal "$GOAL_TEXT" --arg id "$NEW_ID" --arg ts "$NOW" \
+   '. + [{id:$id, goal:$goal, status:"in_progress", created_at:$ts, source:"migration-preserved"}]' \
+   "$GOAL_FILE" > "$tmp" && mv "$tmp" "$GOAL_FILE"
+echo "Re-appended preserved goal as $NEW_ID"
+```
+
+### Step 0.4 — Clear the migration marker
+
+Prevent re-fired heartbeats from re-triggering migration:
+
+```bash
+CFG=/agent/memory/portal_config.json
+tmp="${CFG}.tmp"
+jq 'del(.bootstrap_backup_path)' "$CFG" > "$tmp" && mv "$tmp" "$CFG"
+```
+
+### Step 0.5 — Act on the preserved goal and finalize its status
+
+Work on the goal **within this same bootstrap cycle**. Using the goal text you
+remembered in Step 0.1 (now persisted as `$NEW_ID` in `goal.json` with
+`status: in_progress`), decide whether it is:
+
+- **Synthetic-only** (`"Migrate agent state from uploaded backup: …"`) → no
+  further work required. If migration succeeded, update `$NEW_ID` to
+  `status: completed`. If migration failed or any phase produced unresolved
+  errors, update to `status: failed`.
+- **User-supplied with post-migration instructions** → execute those
+  instructions now (portal edits, capability installs, scripts, etc., similar
+  to Steps 2–3 below but driven entirely by the preserved goal). When done,
+  update `$NEW_ID` to `status: completed` if everything succeeded, or
+  `status: failed` if any required step could not be completed.
+
+Use the same `jq` pattern as Step 6 below to flip the status (substituting
+`$NEW_ID` instead of the first goal).
+
+### Step 0.6 — Cycle-close and stop
+
+Run `cycle_close.py` with `--type evolve --category capability` and a summary
+describing what was restored, any post-migration work performed, and the final
+status of `$NEW_ID`. Then **stop bootstrap here.** Do **not** run Steps 1–6 —
+memory, capabilities, state, prompts, and skills were just restored from
+backup and re-running first-cycle evolution would clobber them.
+
+---
+
+**If `$BACKUP_ZIP` is empty**, continue with Step 1 below as the normal
+first-cycle evolution. Migration mode and first-goal mode are mutually
+exclusive paths through this bootstrap.
+
 ## Step 1: Read Your Goal
 
 The user's first goal is in `/agent/memory/goal.json` (appended below this document).

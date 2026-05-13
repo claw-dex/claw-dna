@@ -138,12 +138,21 @@ def _safe_render(module, tab_name: str):
 
 # ── First-run setup screen ────────────────────────────────────
 def _render_first_run():
+    import fnmatch
+    import json
+    import os
+    import zipfile
+    from pathlib import Path
+
     from app.data import (
         write_first_goal,
         trigger_bootstrap_heartbeat,
         load_goals,
         save_portal_config,
     )
+
+    BACKUP_DIR = "/agent/backup"
+    BACKUP_NAME_PATTERN = "agent_full_backup_*.zip"
 
     st.subheader("Welcome — First Run Setup")
 
@@ -157,13 +166,31 @@ def _render_first_run():
             if goals
             else st.session_state.get("first_goal", "")
         )
-        st.success("Goal saved. The agent is bootstrapping...")
-        if goal_text:
-            st.write(f"**Your goal:** {goal_text}")
-        st.info(
-            "The agent is reading your goal and initialising. "
-            "This page will update automatically when it is ready."
-        )
+        # Detect in-flight migration so the user sees the right framing
+        migration_path = ""
+        try:
+            _cfg_path = "/agent/memory/portal_config.json"
+            if os.path.exists(_cfg_path):
+                with open(_cfg_path) as _cf:
+                    migration_path = json.load(_cf).get("bootstrap_backup_path", "")
+        except Exception:
+            migration_path = ""
+
+        if migration_path:
+            st.success("Backup uploaded. The agent is migrating…")
+            st.write(f"**Restoring from:** `{migration_path}`")
+            st.info(
+                "The agent is unpacking and applying the backup. "
+                "This page will update automatically when migration completes."
+            )
+        else:
+            st.success("Goal saved. The agent is bootstrapping...")
+            if goal_text:
+                st.write(f"**Your goal:** {goal_text}")
+            st.info(
+                "The agent is reading your goal and initialising. "
+                "This page will update automatically when it is ready."
+            )
         st.write("To start the automatic heartbeat, run from your terminal:")
         st.code("./orchestrator.sh", language="bash")
         st.caption("Auto-refresh every 60 seconds.")
@@ -172,9 +199,13 @@ def _render_first_run():
             "Tell the agent what you would like it to work on. "
             "It will bootstrap itself with your goal in mind and may customise its interface accordingly."
         )
+        st.caption(
+            "Migrating from another agent container? Skip the goal and upload your "
+            "`agent_full_backup_*.zip` instead — the agent will restore from it on first cycle."
+        )
         with st.form("first_run_form"):
             first_goal = st.text_area(
-                "Your first goal",
+                "Your first goal (optional if uploading a backup)",
                 placeholder="e.g. Monitor my stock portfolio, Help me learn Python, Build a web scraper…",
                 height=150,
             )
@@ -188,22 +219,87 @@ def _render_first_run():
                 index=default_idx,
                 help="The agent will use this to show dates/times in your local timezone.",
             )
+            backup_file = st.file_uploader(
+                "Migrate from existing agent backup (optional)",
+                type=["zip"],
+                accept_multiple_files=False,
+                help=(
+                    "Upload an `agent_full_backup_*.zip` produced by the "
+                    "`full-backup-and-migrate` skill on another container. "
+                    "When provided, the agent will restore from this backup "
+                    "instead of bootstrapping toward a new goal."
+                ),
+            )
             submitted = st.form_submit_button("Start Agent", type="primary")
 
         if submitted:
-            if not first_goal or not first_goal.strip():
-                st.error("Please enter a goal to get started.")
-            else:
-                ts = datetime.now(timezone.utc).isoformat()
-                write_first_goal(first_goal.strip(), ts)
-                save_portal_config("timezone", selected_tz)
-                result = trigger_bootstrap_heartbeat()
-                if result.get("ok"):
-                    st.session_state["bootstrap_triggered"] = True
-                    st.session_state["first_goal"] = first_goal.strip()
-                    st.rerun()
+            goal_text = (first_goal or "").strip()
+            has_backup = backup_file is not None
+
+            if not has_backup and not goal_text:
+                st.error(
+                    "Please enter a goal, or upload a backup zip to migrate from "
+                    "another container."
+                )
+                return
+
+            backup_path = None
+            if has_backup:
+                safe_name = Path(backup_file.name).name
+                if not fnmatch.fnmatch(safe_name, BACKUP_NAME_PATTERN):
+                    st.error(
+                        f"Backup file must match `{BACKUP_NAME_PATTERN}` "
+                        f"(got `{safe_name}`)."
+                    )
+                    return
+                os.makedirs(BACKUP_DIR, exist_ok=True)
+                dst = Path(BACKUP_DIR) / safe_name
+                if dst.exists():
+                    st.error(
+                        f"`{dst}` already exists on this container. Remove or "
+                        f"rename it before uploading a backup with the same name."
+                    )
+                    return
+                tmp_dst = dst.with_suffix(dst.suffix + ".part")
+                try:
+                    with st.spinner(f"Saving backup to {dst}…"):
+                        with open(tmp_dst, "wb") as out:
+                            for chunk in iter(
+                                lambda: backup_file.read(8 * 1024 * 1024), b""
+                            ):
+                                out.write(chunk)
+                        if not zipfile.is_zipfile(tmp_dst):
+                            raise ValueError("uploaded file is not a valid zip archive")
+                        os.replace(tmp_dst, dst)
+                    backup_path = str(dst)
+                except Exception as e:
+                    try:
+                        tmp_dst.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    st.error(f"Failed to save backup: {e}")
+                    return
+                if goal_text:
+                    st.info(
+                        "A backup was uploaded — the agent will restore from it first, "
+                        "then act on your typed goal as a post-migration instruction "
+                        "(e.g. skip rebuild, run extra setup, etc.)."
+                    )
                 else:
-                    st.error(f"Failed to start agent: {result.get('error')}")
+                    goal_text = f"Migrate agent state from uploaded backup: {safe_name}"
+
+            ts = datetime.now(timezone.utc).isoformat()
+            write_first_goal(goal_text, ts)
+            save_portal_config("timezone", selected_tz)
+            if backup_path:
+                save_portal_config("bootstrap_backup_path", backup_path)
+            result = trigger_bootstrap_heartbeat()
+            if result.get("ok"):
+                st.session_state["bootstrap_triggered"] = True
+                st.session_state["first_goal"] = goal_text
+                st.rerun()
+            else:
+                st.error(f"Failed to start agent: {result.get('error')}")
 
 
 # ── One-time initialization (runs once per server process) ────
