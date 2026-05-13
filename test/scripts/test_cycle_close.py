@@ -14,6 +14,10 @@ import cycle_close as cc
 def patched(monkeypatch, agent_root):
     monkeypatch.setattr(cc, "MEMORY", agent_root / "memory")
     monkeypatch.setattr(cc, "SCRIPTS", agent_root / "scripts")
+    monkeypatch.setattr(cc, "INBOX_FILE", agent_root / "messages" / "inbox.json")
+    monkeypatch.setattr(
+        cc, "INBOX_HISTORY_FILE", agent_root / "messages" / "inbox_history.json"
+    )
     return agent_root
 
 

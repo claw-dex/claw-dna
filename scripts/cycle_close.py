@@ -72,6 +72,8 @@ from pathlib import Path
 
 MEMORY = Path("/agent/memory")
 SCRIPTS = Path("/agent/scripts")
+INBOX_FILE = Path("/agent/messages/inbox.json")
+INBOX_HISTORY_FILE = Path("/agent/messages/inbox_history.json")
 
 
 # ── Inlined: normalize_cycles logic ─────────────────────────────────────────
@@ -247,8 +249,8 @@ def _archive_inbox(
     Returns the number of items archived, or -1 on failure. Returns 0 when
     inbox is missing or has no archivable items.
     """
-    inbox_path = Path("/agent/messages/inbox.json")
-    history_path = Path("/agent/messages/inbox_history.json")
+    inbox_path = INBOX_FILE
+    history_path = INBOX_HISTORY_FILE
     lock_path = str(inbox_path) + ".lock"
 
     if not inbox_path.exists():

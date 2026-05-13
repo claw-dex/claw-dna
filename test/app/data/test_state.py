@@ -175,5 +175,62 @@ def test_load_service_logs_truncates_large_output(memory_dir, tmp_path):
     )
     result = state.load_service_logs("svc")
     assert "truncated" in result["stdout"]
-    # cap is 20000; truncation marker added afterward
-    assert len(result["stdout"]) >= 20000
+    # Marker is prepended; content body is at most `cap` bytes of tail.
+    assert result["stdout"].startswith("... (truncated")
+
+
+# ---------- _read_log_capped tail behavior ----------
+
+
+def test_read_log_capped_returns_empty_for_no_path(tmp_path):
+    assert state._read_log_capped("") == ""
+    assert state._read_log_capped(None) == ""
+
+
+def test_read_log_capped_returns_empty_for_missing_file(tmp_path):
+    assert state._read_log_capped(str(tmp_path / "does_not_exist.log")) == ""
+
+
+def test_read_log_capped_returns_full_content_when_under_cap(tmp_path):
+    log = tmp_path / "small.log"
+    log.write_text("line1\nline2\nline3\n")
+    result = state._read_log_capped(str(log), cap=20000)
+    assert result == "line1\nline2\nline3\n"
+    assert "truncated" not in result
+
+
+def test_read_log_capped_returns_tail_not_head_when_over_cap(tmp_path):
+    """Regression: previously read first `cap` bytes; must now read the tail."""
+    log = tmp_path / "big.log"
+    head = "HEAD_LINE\n" + ("filler line\n" * 5000)  # well over 20KB
+    tail = "TAIL_LINE_FIRST\nTAIL_LINE_LAST\n"
+    log.write_text(head + tail)
+    result = state._read_log_capped(str(log), cap=20000)
+    assert "TAIL_LINE_LAST" in result
+    assert "HEAD_LINE" not in result
+    # Marker is prepended, not appended — the freshest output sits at the bottom.
+    assert result.startswith("... (truncated")
+    assert result.rstrip().endswith("TAIL_LINE_LAST")
+
+
+def test_read_log_capped_drops_partial_first_line_on_truncation(tmp_path):
+    log = tmp_path / "big.log"
+    # Build a file where the byte at (size - cap) lands mid-line. Each line
+    # is 100 bytes; cap of 250 makes the seek land inside a line.
+    lines = [f"line-{i:03d}-" + "x" * 90 + "\n" for i in range(50)]
+    log.write_text("".join(lines))
+    result = state._read_log_capped(str(log), cap=250)
+    # Body (after marker) must not contain a leading partial line.
+    body = result.split("\n", 1)[1]  # drop the marker line
+    for raw_line in body.split("\n"):
+        if not raw_line:
+            continue
+        assert raw_line.startswith("line-"), f"partial line leaked: {raw_line!r}"
+
+
+def test_read_log_capped_handles_non_utf8_bytes(tmp_path):
+    log = tmp_path / "binary.log"
+    log.write_bytes(b"hello \xff\xfe world\n")
+    result = state._read_log_capped(str(log))
+    assert "hello" in result
+    assert "world" in result

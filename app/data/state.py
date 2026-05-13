@@ -94,14 +94,29 @@ def load_services_full():
 
 
 def _read_log_capped(path, cap=20000):
-    """Read a log file up to cap characters, with a truncation marker if larger."""
+    """Read the tail of a log file (last `cap` bytes), with a truncation marker if larger.
+
+    Reads from the end so the caller (which typically tails the last N lines)
+    sees the most recent output instead of the head of the file.
+    """
     if not path:
         return ""
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read(cap)
-        if len(content) >= cap:
-            content += f"\n\n... (truncated — output capped at {cap:,} characters)"
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            if size > cap:
+                f.seek(size - cap)
+            raw = f.read()
+        content = raw.decode("utf-8", errors="replace")
+        if size > cap:
+            # Drop the partial first line so we start on a clean line boundary.
+            nl = content.find("\n")
+            if nl != -1:
+                content = content[nl + 1 :]
+            content = (
+                f"... (truncated — showing last {cap:,} characters of "
+                f"{size:,}-byte log)\n" + content
+            )
         return content
     except (FileNotFoundError, OSError):
         return ""

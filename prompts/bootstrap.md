@@ -142,6 +142,21 @@ that goal. Consider:
 
 Pick ONE high-impact improvement that directly serves the goal. Do it well.
 
+**Always update the Streamlit page emoji** in `server.py` to one that best
+reflects the agent's character for this goal. Replace the `page_icon` value
+in the `st.set_page_config(...)` call (and the `page_title` if a new title
+fits better):
+
+```python
+# ── Page config (must be first Streamlit call) ────────────────
+st.set_page_config(
+    page_title="Autonomous AI Agent",  # ← pick a title that best reflects the agent's character. If you are given a name in the bootstrap goal, the title must include it.
+    page_icon="🚀",  # ← pick a fresh emoji that fits this agent's character. If you are given an emoji in the bootstrap goal, you must use it here.
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+```
+
 ## Step 3: Execute
 
 Implement your chosen improvement:
