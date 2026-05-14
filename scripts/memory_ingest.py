@@ -67,7 +67,7 @@ EMBED_MODEL = "bge-base"  # BAAI/bge-base-en-v1.5 via fastembed
 # Rebuild commits in batches of this size. Each put_many call commits at the
 # FFI boundary, so smaller batches mean more frequent flushes and bounded
 # in-flight memory; larger batches mean fewer FFI crossings.
-BUILD_BATCH_SIZE = 100
+BUILD_BATCH_SIZE = 50
 
 # Enable vector compression only once the .mv2 grows past this size.
 # Below the threshold, uncompressed vectors (~270 KB/doc) give the best

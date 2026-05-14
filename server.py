@@ -213,13 +213,13 @@ def _render_first_run():
             "Upload an `agent_full_backup_*.zip` produced by the "
             "`full-backup-and-migrate` skill on another container. When "
             "provided, the agent will restore from this backup instead of "
-            "bootstrapping toward a new goal. Uploads are streamed in 32MB "
-            "chunks to bypass Cloud Platform's 100MB request-body limit."
+            "bootstrapping toward a new goal. Uploads are streamed in 16MB "
+            "chunks to bypass Cloud Platform's request-body limit."
         )
         backup_file = uploader(
             "Select backup zip",
             key="first_run_backup_uploader",
-            chunk_size=32,
+            chunk_size=16,
         )
 
         with st.form("first_run_form"):

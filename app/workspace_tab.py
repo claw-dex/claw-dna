@@ -82,7 +82,7 @@ def render():
             expanded=True,
         ):
             st.caption(
-                "Streamed in 32MB chunks to bypass Cloud Platform's request-body "
+                "Streamed in 16MB chunks to bypass Cloud Platform's request-body "
                 "limit. One file at a time."
             )
             big_subdir = st.text_input(
@@ -94,7 +94,7 @@ def render():
             big_uploaded = uploader(
                 "Choose a large file",
                 key="workspace_chunk_uploader",
-                chunk_size=32,
+                chunk_size=16,
             )
             big_submit = st.button(
                 "Upload large file",
