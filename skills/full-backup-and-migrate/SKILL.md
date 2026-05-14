@@ -60,7 +60,7 @@ The `/agent/memory/backups/` directory is moved to `/tmp/agent_memory_backups_<t
 
 - `*.lock` files
 - `__pycache__/` directories
-- `.git/` directories
+- `.git/` directories — **except in `/agent/workspace/`, `/agent/web/`, and `/home/agent/`**, where nested `.git/` dirs of cloned repos are preserved. (Stripping them turns the clone into a plain dir tree; subsequent `git` commands then walk up to `/agent/.git` and silently attach to the wrong repo.)
 
 ### Output
 

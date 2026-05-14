@@ -47,15 +47,30 @@ zip_dir() {
     --exclude "*/.git/*"
 }
 
-zip_dir memory    /agent/memory
-zip_dir messages  /agent/messages
-zip_dir web       /agent/web
-zip_dir workspace /agent/workspace
-zip_dir app       /agent/app
-zip_dir prompts   /agent/prompts
-zip_dir scripts   /agent/scripts
-zip_dir skills    /agent/skills
-zip_dir services  /agent/services
+# /agent/workspace/, /agent/web/, and /home/agent/ can contain cloned repos
+# (e.g. /agent/workspace/<project>/.git/). Do NOT exclude .git for these —
+# stripping it leaves a directory tree with no repo metadata, and any later
+# `git` command run inside walks up the parent chain and silently attaches
+# to /agent/.git instead. Keep .git dirs intact so clones restore as real
+# git working trees.
+zip_dir_keepgit() {
+  local name=$1
+  local src=$2
+  echo "  → ${name}.zip  ($src, .git preserved)"
+  zip -r "$STAGING/${name}.zip" "$src" \
+    --exclude "*.lock" \
+    --exclude "*/__pycache__/*"
+}
+
+zip_dir          memory    /agent/memory
+zip_dir          messages  /agent/messages
+zip_dir_keepgit  web       /agent/web
+zip_dir_keepgit  workspace /agent/workspace
+zip_dir          app       /agent/app
+zip_dir          prompts   /agent/prompts
+zip_dir          scripts   /agent/scripts
+zip_dir          skills    /agent/skills
+zip_dir          services  /agent/services
 
 # home_agent — selective: credentials + configs + .claude (minus heavy workspace)
 echo "  → home_agent.zip  (selective paths from /home/agent/)"
@@ -78,7 +93,6 @@ zip -r "$STAGING/home_agent.zip" \
   "${HOME_PARTS[@]}" \
   --exclude "*.lock" \
   --exclude "*/__pycache__/*" \
-  --exclude "*/.git/*" \
   --exclude "/home/agent/.claude/projects/-agent/*" \
   --exclude "/home/agent/.claude/.credentials.json" \
   --exclude "/home/agent/.claude/mcp-needs-auth-cache.json" \
