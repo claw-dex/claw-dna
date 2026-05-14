@@ -203,6 +203,25 @@ def _render_first_run():
             "Migrating from another agent container? Skip the goal and upload your "
             "`agent_full_backup_*.zip` instead — the agent will restore from it on first cycle."
         )
+        from streamlit_chunk_file_uploader import uploader
+
+        # The chunked uploader must live OUTSIDE st.form — it relies on
+        # per-chunk reruns which forms suppress until submission. Place it
+        # above the form and read it back via its widget key after submit.
+        st.markdown("**Migrate from existing agent backup (optional)**")
+        st.caption(
+            "Upload an `agent_full_backup_*.zip` produced by the "
+            "`full-backup-and-migrate` skill on another container. When "
+            "provided, the agent will restore from this backup instead of "
+            "bootstrapping toward a new goal. Uploads are streamed in 32MB "
+            "chunks to bypass Cloud Platform's 100MB request-body limit."
+        )
+        backup_file = uploader(
+            "Select backup zip",
+            key="first_run_backup_uploader",
+            chunk_size=32,
+        )
+
         with st.form("first_run_form"):
             first_goal = st.text_area(
                 "Your first goal (optional if uploading a backup)",
@@ -218,17 +237,6 @@ def _render_first_run():
                 options=tz_list,
                 index=default_idx,
                 help="The agent will use this to show dates/times in your local timezone.",
-            )
-            backup_file = st.file_uploader(
-                "Migrate from existing agent backup (optional)",
-                type=["zip"],
-                accept_multiple_files=False,
-                help=(
-                    "Upload an `agent_full_backup_*.zip` produced by the "
-                    "`full-backup-and-migrate` skill on another container. "
-                    "When provided, the agent will restore from this backup "
-                    "instead of bootstrapping toward a new goal."
-                ),
             )
             submitted = st.form_submit_button("Start Agent", type="primary")
 
@@ -263,11 +271,12 @@ def _render_first_run():
                 tmp_dst = dst.with_suffix(dst.suffix + ".part")
                 try:
                     with st.spinner(f"Saving backup to {dst}…"):
+                        # streamlit-chunk-file-uploader has already assembled
+                        # the full payload server-side by the time we get a
+                        # non-None handle; .read() returns the complete bytes.
+                        data = backup_file.read()
                         with open(tmp_dst, "wb") as out:
-                            for chunk in iter(
-                                lambda: backup_file.read(8 * 1024 * 1024), b""
-                            ):
-                                out.write(chunk)
+                            out.write(data)
                         if not zipfile.is_zipfile(tmp_dst):
                             raise ValueError("uploaded file is not a valid zip archive")
                         os.replace(tmp_dst, dst)
