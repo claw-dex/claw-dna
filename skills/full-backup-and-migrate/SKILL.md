@@ -46,7 +46,8 @@ If unsure which side you are on, check whether `/agent/backup/agent_full_backup_
 | `/agent/services/` | Background service files |
 | `/agent/` root files (selective) | `server.py`, `AGENTS.md`, `pyproject.toml`, `uv.lock`, `.streamlit/`, `test/` — packaged as `root_files.zip`. Forbidden-to-modify root files (constitution.md, system.md, agent.sh, heartbeat.sh, bootstrap.sh, Caddyfile, app/commands_tab.py, scripts/app_check.py) are omitted; they come back from bootstrap. |
 | `/home/agent/` (selective) | `.keepass/`, `.ssh/`, `.config/`, `.claude/` (excluding the `-agent` workspace), and root dotfiles |
-| `git.zip` (optional) | Git history bundle of `/agent/.git` — used in Phase 4 to apply only the delta for files that already exist in the target repo. Absent if `git bundle` failed. |
+| `git.zip` (optional) | Git history bundle of `/agent/.git` — used in Phase 4a to apply only the delta for files that already exist in the target repo. Absent if `git bundle` failed. |
+| `git_head.txt` (optional) | Plain-text file containing `git rev-parse HEAD` from the source agent at backup time. Used in Phase 4b to determine ancestry (target ahead / backup ahead / diverged) when `git.zip` is absent, preventing git-tracked files from being silently regressed to an older backup version. |
 | `caddy_config.json` (optional) | Live Caddy admin-API config snapshot from `localhost:2019/config/`. Used in Phase 4.5 to restore agent-driven Caddy routes (the static `Caddyfile` is read-only). Absent if the admin API was unreachable when the backup ran. |
 
 ### What gets cleaned before zipping
@@ -81,6 +82,7 @@ The `/agent/memory/backups/` directory is moved to `/tmp/agent_memory_backups_<t
   ├── services.zip
   ├── home_agent.zip
   ├── root_files.zip      (loose, optional)
+  ├── git_head.txt        (loose, optional)
   └── caddy_config.json   (loose, optional)
 ```
 
@@ -161,9 +163,10 @@ The script runs these phases (mirrors the previous doc):
 | 2 | Full-override copy of `memory/`, `messages/`, `workspace/`, `web/`, `home/agent/`, plus per-file restore of repo-root files (`server.py`, `AGENTS.md`, `pyproject.toml`, `uv.lock`, `.streamlit/`, `test/`) | — |
 | 2b | `cd /agent && uv sync` if `pyproject.toml`/`uv.lock` changed | — |
 | 3 | Selective copy of `app/`, `prompts/`, `scripts/`, `skills/`, `services/` (skips files that already exist on target); skipped paths logged to `/tmp/<restore_name>_skipped.txt` | — |
-| 4a | Git-bundle delta apply for *tracked, modified* files only — **per-file, no commits**. For each file in Phase 3's skipped list that (a) differs from target and (b) is tracked in `/agent`'s git repo, the script generates a single-file patch from the bundle and tries `git apply --3way`. Files that apply cleanly are left as **uncommitted working-tree changes**. Files that fail or leave conflict markers are reverted to HEAD (`git checkout -- <file>`) and listed in `/tmp/<restore_name>_needs_merge.txt`. Untracked-but-divergent files go to `/tmp/<restore_name>_untracked.txt`. The script never aborts on conflict — it skips and moves on. | When the run finishes, **resolve files in `_needs_merge.txt` manually** (use the bundle, the backup tree, or `git diff` against the listed paths). For files in `_untracked.txt`, use the **Phase 4b** diff loop below. If `git.zip` is missing or no merge-base exists, the whole 4a path is skipped and **Phase 4b** is the only option. |
+| 4a | Git-bundle delta apply for *tracked, modified* files only — **per-file, no commits**. For each file in Phase 3's skipped list that (a) differs from target and (b) is tracked in `/agent`'s git repo, the script generates a single-file patch from the bundle and tries `git apply --3way`. Files that apply cleanly are left as **uncommitted working-tree changes**. Files that fail or leave conflict markers are reverted to HEAD (`git checkout -- <file>`) and listed in `/tmp/<restore_name>_needs_merge.txt`. Untracked-but-divergent files go to `/tmp/<restore_name>_untracked.txt`. The script never aborts on conflict — it skips and moves on. | When the run finishes, **resolve files in `_needs_merge.txt` manually** (use the bundle, the backup tree, or `git diff` against the listed paths). For files in `_untracked.txt`, use the **Phase 4b** ancestry check below. If `git.zip` is missing or no merge-base exists, the whole 4a path is skipped and **Phase 4b** runs automatically. |
+| 4b | **Automated ancestry check** (runs only when Phase 4a was skipped). Reads `git_head.txt` from the backup and uses `git merge-base` to classify each divergent skipped file: `target_ahead` (backup is older → keep target's version), `backup_ahead` (backup is newer → apply backup's version), `diverged`/`unknown` (flag to `/tmp/<restore_name>_review_4b.txt` for manual resolution). Prevents git-tracked files from being silently regressed to an older backup version. | Resolve any files in `_review_4b.txt` manually — see Step 3 below. |
 | 4.5 | POSTs `caddy_config.json` to `localhost:2019/load` to restore live Caddy routes (no-op if the file is absent) | If the POST fails: investigate Caddy with `ps`, container logs; re-run the snippet by hand. |
-| 5 | Removes `/tmp/<restore_name>/`, moves backup zip into `/agent/backup/` if uploaded elsewhere, runs `uv run python scripts/self_test.py`, gateway probe, then `service_manager.py auto-start` + `health` | If `self_test.py` fails: read the output, fix the issue, then re-run the script with `--skip-self-test` once you've verified by hand. |
+| 5 | Removes `/tmp/<restore_name>/`, moves backup zip into `/agent/backup/` if uploaded elsewhere, runs `uv run python scripts/self_test.py`, gateway probe, then `uv sync` + `service_manager.py auto-start` + `health`. `uv sync` always runs before services regardless of whether `pyproject.toml` changed — the venv is not in the backup and may be missing packages (e.g. `psutil`) on a fresh container. | If `self_test.py` fails: read the output, fix the issue, then re-run the script with `--skip-self-test` once you've verified by hand. |
 
 Script flags:
 
@@ -173,44 +176,51 @@ Script flags:
 
 **Resilience contract:** the script never aborts on a single-file failure. Bad inner zips, failed copies, conflict-on-apply, and unreachable Caddy admin all log a warning and continue. Only a self-test failure causes a non-zero exit, and even then services and Phase 4.5 still run. **On a self-test failure** the script leaves `/tmp/<restore_name>/` and the backup zip in place so you can re-run with `--tail-only` after fixing. On success it removes `/tmp/<restore_name>/` and moves the zip into `/agent/backup/`.
 
-### Step 3 — Handle conflicts or 4b fallback if the script reports them
+### Step 3 — Handle conflicts or Phase 4b review items
 
 The script prints either:
 
 - `Phase 4a conflicts (skipped, reverted to HEAD): N file(s) — see /tmp/<restore_name>_needs_merge.txt` → review each path in that log, reconcile against the backup tree (still at `/tmp/<restore_name>/agent/<rel>` if Phase 5 self-test failed; otherwise re-extract the backup zip), edit in `/agent/<rel>`, and leave the result as uncommitted working-tree changes. No need to re-run the script for this — Phases 0–4 already happened and Phase 4.5/5 succeeded. Only re-run `--tail-only` if the self-test was failing because of these unresolved files.
-- `No git.zip in backup — fall back to manual diff review (Phase 4b).` → follow Phase 4b below.
+- `Needs manual review: N file(s) — see /tmp/<restore_name>_review_4b.txt` → Phase 4b ran but found files it couldn't classify automatically (`diverged` or `unknown` ancestry). Review each path in that log.
 
-#### Phase 4b — Manual diff review (fallback)
+#### Phase 4b — what the script does automatically
 
-Use only when the script reported missing `git.zip` or no merge-base. The script left `/tmp/<restore_name>/` in place if it exited at Phase 4a, but cleared it if it reached Phase 5; in the cleared case, re-unzip the backup to a temp dir first.
+When `git.zip` is missing or Phase 4a was skipped, Phase 4b reads `git_head.txt` from the backup and calls `git merge-base` to determine ancestry:
+
+| Ancestry result | Meaning | Action taken |
+|-----------------|---------|--------------|
+| `target_ahead` | Backup HEAD is an ancestor of target HEAD — backup is older | Git-tracked divergent files: **keep target's version** (logged as `KEPT_TARGET` in `_review_4b.txt`) |
+| `backup_ahead` | Target HEAD is an ancestor of backup HEAD — backup is newer | Divergent files: **apply backup's version** (logged as `APPLIED_BACKUP`) |
+| `diverged` | Commits have forked since the common ancestor | Flag to `_review_4b.txt` as `REVIEW_NEEDED` for manual resolution |
+| `unknown` | `git_head.txt` absent, backup HEAD not in target repo, or git errors | Same as `diverged` — flag for manual review |
+
+**Critical safety guarantee:** a file is never silently overwritten with an older backup version. `target_ahead` always keeps the target's (newer) copy.
+
+#### Manual review for `_review_4b.txt` items
+
+For files listed as `REVIEW_NEEDED` in `/tmp/<restore_name>_review_4b.txt`, inspect each manually:
 
 ```bash
-RESTORE_DIR=/tmp/<restore_name>           # whatever the script printed
-SKIPPED_LOG=/tmp/<restore_name>_skipped.txt
+RESTORE_DIR=/tmp/<restore_name>           # wherever the script left it
+REVIEW_LOG=/tmp/<restore_name>_review_4b.txt
 
-while IFS= read -r dst_file; do
-  rel="${dst_file#/agent/}"
+grep REVIEW_NEEDED "$REVIEW_LOG" | awk '{print $NF}' | while IFS= read -r rel; do
   src_file="$RESTORE_DIR/agent/$rel"
-
+  dst_file="/agent/$rel"
   [ -f "$src_file" ] || continue
-
-  if diff -q "$src_file" "$dst_file" > /dev/null 2>&1; then
-    echo "IDENTICAL (skip): $dst_file"
-    continue
-  fi
-
   echo ""
-  echo "=== DIFF: $dst_file ==="
+  echo "=== DIFF: $rel ==="
   diff "$src_file" "$dst_file" || true
-done < "$SKIPPED_LOG"
+done
 ```
 
 Decide per file:
 
-- **Identical** → already skipped automatically
-- **Backup has new additions** → manually apply (e.g. new functions, new config keys)
-- **Current is ahead** → keep current; backup is stale for this file
+- **Backup has additions target lacks** → manually apply (e.g. new functions, new config keys)
+- **Target is ahead** → keep target; backup is stale for this file
 - **Both changed differently** → merge manually, keeping functional correctness of the current file
+
+> **Never delete a file on the target just because it is absent from the backup.** The backup is a point-in-time snapshot — a file missing from it was either added after the backup was taken or was never included in that particular backup run. Absence in the backup is not evidence of deletion. Only remove a file from the target if you have explicit evidence (e.g. a `git rm` commit) that it was intentionally deleted.
 
 ### Step 4 — Self-test failure troubleshooting
 

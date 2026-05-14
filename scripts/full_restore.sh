@@ -378,9 +378,93 @@ if [ $TAIL_ONLY -eq 0 ]; then
     NEEDS_MANUAL_4B=1
   fi
 
+  # ── Phase 4b: Automated ancestry check ──────────────────────────────────────
+  # Runs only when Phase 4a was skipped (no git.zip or no merge-base). Reads
+  # git_head.txt from the backup to determine whether the target is ahead,
+  # behind, or diverged from the backup, then applies that logic per-file so
+  # git-tracked files are never silently regressed to an older backup version.
   if [ $NEEDS_MANUAL_4B -eq 1 ] && [ "$SKIPPED_COUNT" -gt 0 ]; then
-    echo "  See: $SKIPPED_LOG"
-    echo "  Follow Phase 4b in skills/full-backup-and-migrate/SKILL.md to merge manually."
+    echo ""
+    echo "[4b/6] Phase 4b — git-ancestry safety check for skipped+divergent files ..."
+    REVIEW_4B_LOG=/tmp/${RESTORE_NAME}_review_4b.txt
+    : > "$REVIEW_4B_LOG"
+    AUTO_KEPT_4B=0
+    AUTO_APPLIED_4B=0
+    NEEDS_HUMAN_4B=0
+    ANCESTRY="unknown"
+
+    GIT_HEAD_FILE="$RESTORE_DIR/git_head.txt"
+    if [ -f "$GIT_HEAD_FILE" ]; then
+      BACKUP_GIT_HEAD=$(tr -d '[:space:]' < "$GIT_HEAD_FILE")
+      TARGET_HEAD=$(git -C /agent rev-parse HEAD 2>/dev/null || echo "")
+      echo "  Backup git HEAD : ${BACKUP_GIT_HEAD:-n/a}"
+      echo "  Target git HEAD : ${TARGET_HEAD:-n/a}"
+
+      if [ -n "$BACKUP_GIT_HEAD" ] && [ -n "$TARGET_HEAD" ]; then
+        # Verify backup HEAD is known to the target repo before calling merge-base
+        if git -C /agent cat-file -e "${BACKUP_GIT_HEAD}^{commit}" 2>/dev/null; then
+          MERGE_BASE_4B=$(git -C /agent merge-base "$TARGET_HEAD" "$BACKUP_GIT_HEAD" 2>/dev/null || echo "")
+          if [ "$MERGE_BASE_4B" = "$BACKUP_GIT_HEAD" ]; then
+            ANCESTRY="target_ahead"   # backup is an ancestor → target is newer
+          elif [ "$MERGE_BASE_4B" = "$TARGET_HEAD" ]; then
+            ANCESTRY="backup_ahead"   # target is an ancestor → backup is newer
+          else
+            ANCESTRY="diverged"
+          fi
+        else
+          echo "  Backup HEAD not reachable in target repo — cannot determine ancestry."
+        fi
+      fi
+    else
+      echo "  No git_head.txt in backup — cannot determine ancestry."
+    fi
+    echo "  Ancestry: $ANCESTRY"
+
+    while IFS= read -r dst_file; do
+      rel="${dst_file#/agent/}"
+      src_file="$RESTORE_DIR/agent/$rel"
+      [ -f "$src_file" ] || continue
+      diff -q "$src_file" "$dst_file" > /dev/null 2>&1 && continue  # identical, skip
+
+      IS_TRACKED=0
+      git -C /agent ls-files --error-unmatch -- "$rel" >/dev/null 2>&1 && IS_TRACKED=1
+
+      case "$ANCESTRY" in
+        target_ahead)
+          if [ $IS_TRACKED -eq 1 ]; then
+            # Target has newer commits — keep target, do not apply older backup content
+            printf 'KEPT_TARGET  (target ahead of backup): %s\n' "$rel" >> "$REVIEW_4B_LOG"
+            AUTO_KEPT_4B=$((AUTO_KEPT_4B + 1))
+          else
+            # Untracked file, ancestry known but can't confirm recency → manual review
+            printf 'REVIEW_NEEDED (untracked, target_ahead): %s\n' "$rel" >> "$REVIEW_4B_LOG"
+            NEEDS_HUMAN_4B=$((NEEDS_HUMAN_4B + 1))
+          fi
+          ;;
+        backup_ahead)
+          # Backup has newer commits — apply backup version to bring target forward
+          if cp "$src_file" "$dst_file" 2>/dev/null; then
+            printf 'APPLIED_BACKUP (backup ahead of target): %s\n' "$rel" >> "$REVIEW_4B_LOG"
+            AUTO_APPLIED_4B=$((AUTO_APPLIED_4B + 1))
+          else
+            printf 'REVIEW_NEEDED (cp failed): %s\n' "$rel" >> "$REVIEW_4B_LOG"
+            NEEDS_HUMAN_4B=$((NEEDS_HUMAN_4B + 1))
+          fi
+          ;;
+        *)
+          # diverged or unknown — keep target (safer default), flag for manual review
+          printf 'REVIEW_NEEDED (%s): %s\n' "$ANCESTRY" "$rel" >> "$REVIEW_4B_LOG"
+          NEEDS_HUMAN_4B=$((NEEDS_HUMAN_4B + 1))
+          ;;
+      esac
+    done < "$SKIPPED_LOG"
+
+    echo "  Kept target (target ahead):    $AUTO_KEPT_4B file(s)"
+    echo "  Applied backup (backup ahead): $AUTO_APPLIED_4B file(s)"
+    if [ $NEEDS_HUMAN_4B -gt 0 ]; then
+      echo "  Needs manual review: $NEEDS_HUMAN_4B file(s) — see $REVIEW_4B_LOG"
+      echo "  Follow Phase 4b in skills/full-backup-and-migrate/SKILL.md to resolve."
+    fi
   fi
 fi
 
@@ -426,8 +510,15 @@ fi
 
 echo ""
 echo "[6/6] Starting auto-start services ..."
-python3 /agent/scripts/service_manager.py auto-start || true
-python3 /agent/scripts/service_manager.py health || true
+# Always sync the venv before starting services. The venv is not included in
+# the backup, so a restored container may be missing packages (e.g. psutil)
+# even when pyproject.toml/uv.lock are unchanged from Phase 2b.
+echo "  Running uv sync ..."
+if ! (cd /agent && uv sync --quiet); then
+  echo "  WARNING: uv sync failed — services may fail to start if deps are missing"
+fi
+uv run python /agent/scripts/service_manager.py auto-start || true
+uv run python /agent/scripts/service_manager.py health || true
 
 # Only clean up + relocate the backup zip if everything succeeded. Keeping
 # RESTORE_DIR around on failure lets the agent inspect or re-run --tail-only.

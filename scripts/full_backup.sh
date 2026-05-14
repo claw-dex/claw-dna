@@ -122,6 +122,17 @@ else
   echo "  WARNING: git bundle failed — restore will fall back to manual diff review for modified files"
 fi
 
+# Git HEAD SHA — lightweight reference for restore ancestry checks.
+# Lets the restore determine whether the target's git is ahead or behind
+# the backup even when the full bundle is absent.
+echo "  → git_head.txt  (backup git HEAD SHA)"
+if git -C /agent rev-parse HEAD > "$STAGING/git_head.txt" 2>/dev/null; then
+  echo "  Git HEAD: $(cat "$STAGING/git_head.txt")"
+else
+  echo "  WARNING: could not capture git HEAD SHA — restore ancestry checks will be skipped"
+  rm -f "$STAGING/git_head.txt"
+fi
+
 # home_agent — selective: credentials + configs + .claude (minus heavy workspace)
 echo "  → home_agent.zip  (selective paths from /home/agent/)"
 HOME_PARTS=()
@@ -158,6 +169,7 @@ echo ""
 echo "[3/4] Moving individual zips to $BACKUP_DIR ..."
 mv "$STAGING"/*.zip "$BACKUP_DIR/"
 mv "$STAGING/caddy_config.json" "$BACKUP_DIR/" 2>/dev/null || true
+mv "$STAGING/git_head.txt" "$BACKUP_DIR/" 2>/dev/null || true
 rmdir "$STAGING"
 
 echo "[3/4] Creating final archive: $FINAL_ZIP"
@@ -166,6 +178,7 @@ ARCHIVE_PARTS=(memory.zip messages.zip web.zip workspace.zip app.zip prompts.zip
 [ -f root_files.zip ] && ARCHIVE_PARTS+=(root_files.zip)
 [ -f git.zip ] && ARCHIVE_PARTS+=(git.zip)
 [ -f caddy_config.json ] && ARCHIVE_PARTS+=(caddy_config.json)
+[ -f git_head.txt ] && ARCHIVE_PARTS+=(git_head.txt)
 zip "$FINAL_ZIP" "${ARCHIVE_PARTS[@]}"
 
 echo "[3/4] Removing individual zip files ..."
@@ -182,7 +195,8 @@ rm -f \
   "$BACKUP_DIR/home_agent.zip" \
   "$BACKUP_DIR/root_files.zip" \
   "$BACKUP_DIR/caddy_config.json" \
-  "$BACKUP_DIR/git.zip"
+  "$BACKUP_DIR/git.zip" \
+  "$BACKUP_DIR/git_head.txt"
 
 # ── Phase 4: Done ─────────────────────────────────────────────────────────────
 SIZE=$(du -sh "$FINAL_ZIP" | cut -f1)
