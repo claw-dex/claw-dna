@@ -25,14 +25,6 @@ else
   echo "  long_term_memory.mv2 already absent, skipping."
 fi
 
-echo "[1/4] Moving /agent/memory/backups to /tmp ..."
-if [ -d /agent/memory/backups ]; then
-  mv /agent/memory/backups /tmp/agent_memory_backups_${TIMESTAMP}
-  echo "  Moved to: /tmp/agent_memory_backups_${TIMESTAMP}"
-else
-  echo "  /agent/memory/backups not found, skipping."
-fi
-
 # ── Phase 2: Individual zip archives ─────────────────────────────────────────
 echo ""
 echo "[2/4] Creating individual zip archives in $STAGING ..."
@@ -212,11 +204,6 @@ echo ""
 echo "[4/4] Backup complete."
 echo "  Archive : $FINAL_ZIP"
 echo "  Size    : $SIZE"
-echo ""
-if [ -d "/tmp/agent_memory_backups_${TIMESTAMP}" ]; then
-  echo "  Memory snapshots at : /tmp/agent_memory_backups_${TIMESTAMP}"
-  echo "  To restore          : mv /tmp/agent_memory_backups_${TIMESTAMP} /agent/memory/backups"
-fi
 echo ""
 echo "  To rebuild long_term_memory.mv2 after restore:"
 echo "    cd /agent && uv run python scripts/memory_ingest.py"

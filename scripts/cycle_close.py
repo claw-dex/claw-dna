@@ -556,7 +556,7 @@ def check_stale_counts():
 
 # ── Auto-backup ──────────────────────────────────────────────────────────────
 
-# Files to backup (mirrors BACKUP_FILES + OPTIONAL_FILES in memory_backup.py)
+# Files included in each cycle-close memory snapshot.
 _BACKUP_FILES = [
     "state.json",
     "cycles.json",
@@ -572,15 +572,12 @@ _BACKUP_OPTIONAL = []
 def _auto_backup_if_stale(dry_run: bool = False) -> None:
     """Create a memory backup if the last one is >1h old.
 
-    Inlined to avoid subprocess overhead (~100ms for uv run python memory_backup.py).
-    Mirrors the core logic of memory_backup.py: create a timestamped snapshot dir,
-    copy critical files, prune if >20 backups exist.
-
-    cycle_start.py shows ⚠ STALE when the last backup is >1h old. Running this
-    at cycle-close time keeps that warning quiet and protects against data loss.
+    Creates a timestamped snapshot dir, copies critical files, prunes if >20
+    backups exist. cycle_start.py shows ⚠ STALE when the last backup is >1h
+    old; running this at cycle-close keeps that warning quiet.
     """
-    backup_root = MEMORY / "backups"
-    backup_root.mkdir(exist_ok=True)
+    backup_root = Path("/agent/backup/memory")
+    backup_root.mkdir(parents=True, exist_ok=True)
 
     # Find the most recent backup by listing dirs (format: YYYYMMDDTHHMMSSZ)
     existing = sorted(

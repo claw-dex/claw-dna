@@ -79,28 +79,6 @@ _SCRIPT_ARGS: dict[str, list] = {
         {"flag": "--quiet", "help": "Only print summary line"},
         {"flag": "--json", "help": "Machine-readable JSON output"},
     ],
-    "memory_backup.py": [
-        {"flag": "--list", "help": "List all backups"},
-        {"flag": "--check", "help": "Show age of most recent backup"},
-        {"flag": "--dry-run", "help": "Preview what restore would do"},
-        {"flag": "--json", "help": "Output as JSON"},
-        {"flag": "--quiet", "help": "Suppress output"},
-        {
-            "flag": "--restore",
-            "help": "Restore a backup (timestamp or 'latest')",
-            "placeholder": "latest",
-        },
-        {
-            "flag": "--prune",
-            "help": "Keep only N most recent backups",
-            "placeholder": "5",
-        },
-        {
-            "flag": "--label",
-            "help": "Label for the backup",
-            "placeholder": "pre-deploy",
-        },
-    ],
     "journal_archive.py": [
         {"flag": "--dry-run", "help": "Preview without modifying files"},
         {"flag": "--list", "help": "Show entry counts and file sizes"},

@@ -198,6 +198,18 @@ if [ $TAIL_ONLY -eq 0 ]; then
   copy_tree "$RESTORE_DIR/agent/web/."       /agent/web/
   copy_tree "$RESTORE_DIR/home/agent/."      /home/agent/
 
+  # Clear stale `.session` files carried over from the source agent. Sessions
+  # are bound to the source environment (PIDs, tokens, sockets, transient
+  # auth) — none of that exists in the target container, so any reuse would
+  # silently attach to dead state. Removing them forces a clean re-init on
+  # first use in the new environment.
+  echo "  Clearing stale .session files from /agent/memory/ and /agent/messages/ ..."
+  SESSION_CLEARED=0
+  while IFS= read -r -d '' f; do
+    rm -f "$f" && SESSION_CLEARED=$((SESSION_CLEARED + 1))
+  done < <(find /agent/memory /agent/messages -type f -name "*.session" -print0 2>/dev/null)
+  echo "  Cleared $SESSION_CLEARED .session file(s)."
+
   # Repo-root agent-modifiable files (per-file guards — older backups omit some).
   if [ -f "$RESTORE_DIR/root_files.zip" ] || [ -e "$RESTORE_DIR/agent/server.py" ] \
      || [ -d "$RESTORE_DIR/agent/.streamlit" ]; then

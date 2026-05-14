@@ -84,13 +84,6 @@
     "enabled": true
   },
   {
-    "id": "memory_backup",
-    "name": "Memory Backup",
-    "description": "Timestamped snapshots of critical memory files; supports restore and pruning (keeps max 20)",
-    "category": "memory",
-    "enabled": true
-  },
-  {
     "id": "journal_archival",
     "name": "Journal Archival",
     "description": "Archives old journal entries (>20 cycles) to keep active journal lean for fast loading",

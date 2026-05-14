@@ -85,7 +85,7 @@ RG_EXCLUDES = [
     # high-volume per-cycle log directories — too noisy for general search
     "!**/memory/transcripts/**",
     "!**/memory/logs/**",
-    "!**/memory/backups/**",
+    "!**/agent/backup/**",
 ]
 
 # Directories that .gitignore excludes but searches MUST always cover.

@@ -46,7 +46,6 @@ Agent-specific instructions loaded by the AI coding agent at session start.
 │   ├── cycle_start.py
 │   ├── cycle_close.py
 │   ├── cycle_report.py
-│   ├── memory_backup.py
 │   ├── memory_ingest.py
 │   ├── memory_repair.py
 │   ├── memory_stats.py

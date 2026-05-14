@@ -1059,7 +1059,7 @@ def print_full(
             )
 
     # ── Backup Status ─────────────────────────────────────────────
-    backup_root = MEMORY / "backups"
+    backup_root = Path("/agent/backup/memory")
     if backup_root.exists():
         backup_dirs = sorted(
             [d for d in backup_root.iterdir() if d.is_dir()],
@@ -1082,13 +1082,13 @@ def print_full(
                     f"\n[BACKUP]  {icon}  latest={latest_name}  ({age_str})  total={len(backup_dirs)}"
                 )
                 if stale:
-                    print(f"  → Run: python3 /agent/scripts/memory_backup.py")
+                    print(f"  → cycle_close.py will auto-create a fresh snapshot")
             except Exception:
                 print(f"\n[BACKUP]  {len(backup_dirs)} backups (latest: {latest_name})")
         else:
-            print(f"\n[BACKUP]  no backups — run memory_backup.py")
+            print(f"\n[BACKUP]  no backups yet — cycle_close.py creates them")
     else:
-        print(f"\n[BACKUP]  no backups dir — run memory_backup.py")
+        print(f"\n[BACKUP]  no backups dir — cycle_close.py creates them")
 
     # ── Short-Term Memory (Recent Journal) ────────────────────────
     # Full content of every active journal entry (no truncation). Timestamps are

@@ -59,8 +59,6 @@ Before creating any zip, the script deletes:
 - `*.tmp` files in `/agent/memory/`
 - `.*.mv2.rebuild.*` hidden rebuild artifacts
 
-The `/agent/memory/backups/` directory is moved to `/tmp/agent_memory_backups_<timestamp>/` (not deleted) so it can be manually restored if the backup fails.
-
 ### What gets excluded from zips
 
 - `*.lock` files (except `uv.lock`, which is captured intentionally inside `root_files.zip`)
@@ -115,14 +113,6 @@ After the backup completes, tell the user:
 
 Substitute the real timestamp, size, and host names. If the user's environment uses a different transport (cloud storage, browser download, etc.), adapt the wording but keep the three-step shape: download → upload → invoke skill on target.
 
-### Optional aftercare (source side)
-
-To restore the incremental memory snapshots that were moved aside:
-
-```bash
-mv /tmp/agent_memory_backups_<timestamp> /agent/memory/backups
-```
-
 ---
 
 ## Recovery (target agent)
@@ -162,7 +152,7 @@ The script runs these phases (mirrors the previous doc):
 |-------|--------------|------------------|
 | 0 | Stops services from `/agent/memory/services.json` | — |
 | 1 | Unzips outer + inner zips into `/tmp/<restore_name>/` | — |
-| 2 | Full-override copy of `memory/`, `messages/`, `workspace/`, `web/`, `home/agent/`, plus per-file restore of repo-root files (`server.py`, `AGENTS.md`, `pyproject.toml`, `uv.lock`, `.streamlit/`) | — |
+| 2 | Full-override copy of `memory/`, `messages/`, `workspace/`, `web/`, `home/agent/`, plus per-file restore of repo-root files (`server.py`, `AGENTS.md`, `pyproject.toml`, `uv.lock`, `.streamlit/`). Then deletes any `*.session` files under `/agent/memory/` and `/agent/messages/` — sessions are bound to the source environment (PIDs, tokens, sockets) and would attach to dead state if reused; removal forces a clean re-init in the target. | — |
 | 2b | `cd /agent && uv sync` (always — the venv is not in the backup, so it must be reconciled to the restored `pyproject.toml`/`uv.lock` before services restart) | — |
 | 3 | Selective copy of `app/`, `prompts/`, `scripts/`, `skills/`, `services/` (skips files that already exist on target); skipped paths logged to `/tmp/<restore_name>_skipped.txt` | — |
 | 3b | **Prefer-current** copy of `test/`: existing test files are silently kept (so Phase 4a never patches them either); only new test files from the backup are seeded. Protects core test cases from being regressed by an older backup. | — |

@@ -48,7 +48,7 @@ uv run python scripts/cycle_close.py \
 - updates `state.json` (`cycle_number`, `agent_status` → `idle`, `last_cycle_summary`; clears `current_goal`)
 - appends the `journal.json` entry (cycle_number, timestamp, cycle_status, cycle_type, cycle_category, cycle_goal, actions, summary)
 - archives `outbox.json` and clears it
-- runs `memory_backup.py` if the last backup is >1h old
+- creates a memory snapshot if the last backup is >1h old
 - runs the stale-count check (tabs / tests / scripts vs AGENTS.md and prompts)
 
 `--cycle` is auto-detected from the in-progress entry; `--dry-run` previews.

@@ -367,7 +367,6 @@ CRITICAL_SCRIPTS = [
     "cycle_start.py",
     "cycle_close.py",
     "memory_repair.py",
-    "memory_backup.py",
     "self_test.py",
     "journal_archive.py",
     "memory_stats.py",

@@ -17,7 +17,6 @@ _SCRIPT_CATEGORIES = {
     "cycle_report.py": "Cycle Management",
     "memory_stats.py": "Memory",
     "memory_repair.py": "Memory",
-    "memory_backup.py": "Memory",
     "memory_ask.py": "Memory",
     "memory_recall.py": "Memory",
     "memory_ingest.py": "Memory",
