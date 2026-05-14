@@ -34,7 +34,7 @@ If unsure which side you are on, check whether `/agent/backup/agent_full_backup_
 
 | Directory | Notes |
 |-----------|-------|
-| `/agent/memory/` | All JSON memory files; excludes `long_term_memory.mv2` (rebuilt via `memory_ingest`) |
+| `/agent/memory/` | All JSON memory files; excludes `long_term_memory.mv2` (auto-rebuilt by `cycle_close.py` on the next cycle close, in a detached background process, from the restored JSON files) |
 | `/agent/messages/` | inbox/outbox queues and history |
 | `/agent/web/` | Static files |
 | `/agent/workspace/` | Working files and cached data |
@@ -43,7 +43,10 @@ If unsure which side you are on, check whether `/agent/backup/agent_full_backup_
 | `/agent/scripts/` | Automation scripts |
 | `/agent/skills/` | Skill definitions |
 | `/agent/services/` | Background service files |
+| `/agent/` root files (selective) | `server.py`, `AGENTS.md`, `pyproject.toml`, `uv.lock`, `.streamlit/`, `test/` — packaged as `root_files.zip`. Forbidden-to-modify root files (constitution.md, system.md, agent.sh, heartbeat.sh, bootstrap.sh, Caddyfile, app/commands_tab.py, scripts/app_check.py) are omitted; they come back from bootstrap. |
 | `/home/agent/` (selective) | `.keepass/`, `.ssh/`, `.config/`, `.claude/` (excluding the `-agent` workspace), and root dotfiles |
+| `git.zip` (optional) | Git history bundle of `/agent/.git` — used in Phase 4 to apply only the delta for files that already exist in the target repo. Absent if `git bundle` failed. |
+| `caddy_config.json` (optional) | Live Caddy admin-API config snapshot from `localhost:2019/config/`. Used in Phase 4.5 to restore agent-driven Caddy routes (the static `Caddyfile` is read-only). Absent if the admin API was unreachable when the backup ran. |
 
 ### What gets cleaned before zipping
 
@@ -52,14 +55,14 @@ Before creating any zip, the script deletes:
 - `*.backup` files in `/agent/memory/`
 - `*.tmp` files in `/agent/memory/`
 - `.*.mv2.rebuild.*` hidden rebuild artifacts
-- `long_term_memory.mv2` (874 MB — rebuild with `memory_ingest` after restore)
 
 The `/agent/memory/backups/` directory is moved to `/tmp/agent_memory_backups_<timestamp>/` (not deleted) so it can be manually restored if the backup fails.
 
 ### What gets excluded from zips
 
-- `*.lock` files
+- `*.lock` files (except `uv.lock`, which is captured intentionally inside `root_files.zip`)
 - `__pycache__/` directories
+- `.pytest_cache/` directories (from `test/`)
 - `.git/` directories — **except in `/agent/workspace/`, `/agent/web/`, and `/home/agent/`**, where nested `.git/` dirs of cloned repos are preserved. (Stripping them turns the clone into a plain dir tree; subsequent `git` commands then walk up to `/agent/.git` and silently attach to the wrong repo.)
 
 ### Output
@@ -75,7 +78,9 @@ The `/agent/memory/backups/` directory is moved to `/tmp/agent_memory_backups_<t
   ├── scripts.zip
   ├── skills.zip
   ├── services.zip
-  └── home_agent.zip
+  ├── home_agent.zip
+  ├── root_files.zip
+  └── caddy_config.json   (loose, optional)
 ```
 
 ### Usage
@@ -208,9 +213,29 @@ cp -rf "$RESTORE_DIR/agent/messages/."  /agent/messages/
 cp -rf "$RESTORE_DIR/agent/workspace/." /agent/workspace/
 cp -rf "$RESTORE_DIR/agent/web/."       /agent/web/
 cp -rf "$RESTORE_DIR/home/agent/."      /home/agent/
+
+# Repo-root agent-modifiable files (optional — `root_files.zip` is absent
+# in backups produced before this artifact was introduced). Copied
+# individually (NOT as `cp -rf agent/. /agent/`) so forbidden bootstrap
+# files at /agent/ (constitution.md, system.md, agent.sh, etc.) are not
+# touched. Each path is independently guarded so a partial backup still
+# restores whatever it does contain.
+if [ -f "$RESTORE_DIR/root_files.zip" ] || [ -e "$RESTORE_DIR/agent/server.py" ] \
+   || [ -d "$RESTORE_DIR/agent/.streamlit" ] || [ -d "$RESTORE_DIR/agent/test" ]; then
+  for p in server.py AGENTS.md pyproject.toml uv.lock; do
+    [ -f "$RESTORE_DIR/agent/$p" ] && cp -f "$RESTORE_DIR/agent/$p" "/agent/$p"
+  done
+  [ -d "$RESTORE_DIR/agent/.streamlit" ] && cp -rf "$RESTORE_DIR/agent/.streamlit/." /agent/.streamlit/
+  [ -d "$RESTORE_DIR/agent/test" ]       && cp -rf "$RESTORE_DIR/agent/test/."       /agent/test/
+  echo "Restored repo-root agent-modifiable files."
+else
+  echo "No root_files.zip in this backup — skipping repo-root file restore (older backup format)."
+fi
 ```
 
 > **Note:** `cp -rf <src>/. <dst>/` copies directory *contents* (not the directory itself) into the target, overriding any matching files.
+
+> **Dependency sync:** if `pyproject.toml` or `uv.lock` changed, run `cd /agent && uv sync` **before** Phase 5's `self_test.py` so the venv matches the restored manifest.
 
 ---
 
@@ -250,19 +275,78 @@ After this step, review `$SKIPPED_LOG` to see which files were skipped.
 
 ---
 
-### Phase 4 — Merge skipped files (diff and selective apply)
+### Phase 4 — Merge skipped files (git-bundle delta apply)
 
-For each skipped file, compare it against the backup version and selectively incorporate new changes from the backup without breaking the current file.
+Skipped files are ones that already exist in the target repo. The goal is to apply only the changes the backup introduces *after* the common ancestor — not re-apply changes already present in the target's git history, and not overwrite local-only work.
+
+#### 4a — Attempt git-bundle-based merge (preferred)
+
+If `git.zip` is present in the backup, use the git history to compute and apply the exact delta:
+
+```bash
+BUNDLE_ZIP="$RESTORE_DIR/git.zip"
+BACKUP_REPO=/tmp/${RESTORE_NAME}_git
+
+if [ -f "$BUNDLE_ZIP" ]; then
+  # Extract bundle and clone into a temp repo
+  unzip -j "$BUNDLE_ZIP" git_history.bundle -d /tmp/
+  git clone /tmp/git_history.bundle "$BACKUP_REPO"
+  rm /tmp/git_history.bundle
+
+  # Add backup repo as a remote and fetch its refs into the current repo
+  git -C /agent remote add _backup "$BACKUP_REPO" 2>/dev/null || true
+  git -C /agent fetch _backup --quiet
+
+  BACKUP_HEAD=$(git -C "$BACKUP_REPO" rev-parse HEAD)
+  MERGE_BASE=$(git -C /agent merge-base HEAD "$BACKUP_HEAD" 2>/dev/null || echo "")
+
+  if [ -n "$MERGE_BASE" ]; then
+    echo "Merge base: $MERGE_BASE"
+    echo "Applying delta ($MERGE_BASE → $BACKUP_HEAD) for skipped files only..."
+
+    # Build a pathspec from the skipped files so we only patch those
+    PATHSPECS=()
+    while IFS= read -r dst_file; do
+      rel="${dst_file#/agent/}"
+      src_file="$RESTORE_DIR/agent/$rel"
+      [ -f "$src_file" ] || continue
+      diff -q "$src_file" "$dst_file" > /dev/null 2>&1 && continue  # identical, skip
+      PATHSPECS+=("$rel")
+    done < "$SKIPPED_LOG"
+
+    if [ ${#PATHSPECS[@]} -gt 0 ]; then
+      git -C /agent diff "$MERGE_BASE" "$BACKUP_HEAD" -- "${PATHSPECS[@]}" \
+        | git -C /agent apply --3way --ignore-whitespace 2>&1 || {
+          echo "WARNING: some hunks failed to apply cleanly — check 'git status' for conflicts"
+        }
+    else
+      echo "All skipped files are identical to backup — nothing to apply."
+    fi
+  else
+    echo "No common ancestor found — falling back to manual diff review (4b)"
+  fi
+
+  # Cleanup
+  git -C /agent remote remove _backup 2>/dev/null || true
+  rm -rf "$BACKUP_REPO"
+else
+  echo "No git.zip in backup — falling back to manual diff review (4b)"
+fi
+```
+
+After this step, run `git status` and `git diff` to review what was applied. Resolve any conflicts marked by `git apply --3way` before proceeding.
+
+#### 4b — Fallback: manual diff review
+
+Use this only when `git.zip` is absent (older backup) or the merge-base could not be found.
 
 ```bash
 while IFS= read -r dst_file; do
   rel="${dst_file#/agent/}"
-  # Find the corresponding backup source
   src_file="$RESTORE_DIR/agent/$rel"
 
   [ -f "$src_file" ] || continue
 
-  # Skip if files are identical
   if diff -q "$src_file" "$dst_file" > /dev/null 2>&1; then
     echo "IDENTICAL (skip): $dst_file"
     continue
@@ -274,14 +358,43 @@ while IFS= read -r dst_file; do
 done < "$SKIPPED_LOG"
 ```
 
-Review each diff output and decide per file:
+Review each diff and decide per file:
 
 - **Identical** → already skipped automatically
-- **Backup has new additions** → manually apply them (e.g. new functions, new config keys added after the backup was taken)
+- **Backup has new additions** → manually apply (e.g. new functions, new config keys)
 - **Current is ahead** → keep current; backup is stale for this file
 - **Both changed differently** → merge manually, keeping functional correctness of the current file
 
-> For code files (`.py`, `.sh`, `.md`), prefer reading the diff and applying only clearly new/additive changes. Never blindly overwrite a current file that has been actively modified since the backup.
+---
+
+### Phase 4.5 — Restore Caddy live config
+
+The static `/agent/Caddyfile` is read-only per the constitution; the agent reconfigures Caddy at runtime via the admin API on port 2019. Reapply the captured live config so routes/handlers the source agent added are present on the target. **Optional** — `caddy_config.json` is absent in backups produced before this artifact was introduced, and may also be absent if the source's admin API was unreachable at backup time; the whole phase no-ops in that case and Caddy keeps the bootstrap config.
+
+Caddy is started by the process manager (PID 1) at container boot, so the admin API should already be listening by the time recovery reaches this phase. If the POST fails, fix Caddy (`ps`, container logs) and re-run the snippet.
+
+```bash
+CADDY_JSON="$RESTORE_DIR/caddy_config.json"
+if [ -f "$CADDY_JSON" ]; then
+  if curl -fsS -X POST http://localhost:2019/load \
+       -H 'Content-Type: application/json' \
+       --data-binary "@$CADDY_JSON"; then
+    echo "Caddy live config restored from backup."
+  else
+    echo "WARNING: failed to POST caddy_config.json to :2019/load — restore manually."
+  fi
+else
+  echo "No caddy_config.json in backup — Caddy keeps its current (bootstrap) config."
+fi
+```
+
+Verify the reload took effect:
+
+```bash
+curl -fsS http://localhost:2019/config/ | diff - "$CADDY_JSON" >/dev/null \
+  && echo "Caddy config matches backup." \
+  || echo "Caddy config differs from backup — inspect manually."
+```
 
 ---
 
@@ -304,10 +417,11 @@ if [ "$(dirname "$BACKUP_ZIP")" != "/agent/backup" ]; then
 fi
 ```
 
-Run the portal self-test to confirm nothing is broken:
+Run the portal self-test to confirm nothing is broken (run `uv sync` first if `pyproject.toml`/`uv.lock` were restored in Phase 2):
 
 ```bash
 uv run python scripts/self_test.py
+curl -fsS http://localhost:8080/app/ -o /dev/null && echo "Gateway OK"
 ```
 
 Start the background services that were stopped in Phase 0. This reads the **restored** `/agent/memory/services.json` and brings up every entry with `auto_start: true`:
@@ -317,12 +431,12 @@ python3 /agent/scripts/service_manager.py auto-start
 python3 /agent/scripts/service_manager.py health
 ```
 
-Run this **before** the memory rebuild so any service that depends on the live agent (webhook receiver, schedulers, bridges) is back online while the index rebuilds.
+### Semantic memory index — auto-rebuilt by `cycle_close.py`
 
-Rebuild the semantic memory index (the backup intentionally omits `long_term_memory.mv2`):
+The backup intentionally omits `long_term_memory.mv2`. Do **not** run `memory_ingest.py --build` by hand — `cycle_close.py` detects the missing `.mv2` on the next cycle close and rebuilds it from the restored JSON files (`journal.json`, `journal_archive.json`, `messages/inbox_history.json`) in a detached background subprocess (see `scripts/cycle_close.py:_flush_memvid_buffer` and `_dispatch_memvid_flush_bg`). The cycle that triggers the rebuild does not need to wait for it; durability follows ~5–10s later, and progress is logged to `/agent/memory/.memvid_flush.log`.
 
 ```bash
 uv run python scripts/memory_ingest.py --build
 ```
 
-Once the self-test passes, services are healthy, and memory ingest completes, the migration is done — the target agent now holds the source agent's knowledge, memory, capabilities, and workspace.
+Otherwise, once the self-test passes and services are healthy, the migration is done — the target agent now holds the source agent's knowledge, memory, capabilities, and workspace. The `.mv2` will appear after the next cycle close.

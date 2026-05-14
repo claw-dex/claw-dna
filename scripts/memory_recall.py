@@ -218,7 +218,7 @@ def _ask_normalized(mv2: Path, query: str, k: int, since=None, until=None):
         # mode="hybrid" + query_embedding_model=EMBED_MODEL forces semantic
         # search using the in-mv2 fastembed vectors. The Python wrapper's
         # mode="auto" silently falls back to lex when no OPENAI_API_KEY is set,
-        # which would ignore the bge-base vectors built during ingestion.
+        # which would ignore the in-mv2 vectors built during ingestion.
         result = mem.ask(
             query,
             k=k,

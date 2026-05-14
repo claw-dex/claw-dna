@@ -72,6 +72,56 @@ zip_dir          scripts   /agent/scripts
 zip_dir          skills    /agent/skills
 zip_dir          services  /agent/services
 
+# Repo-root agent-modifiable files (constitution permits: /agent/*.py,
+# AGENTS.md, pyproject.toml, .streamlit/config.toml). Forbidden-to-modify
+# items (constitution.md, system.md, agent.sh, heartbeat.sh, bootstrap.sh,
+# Caddyfile, app/commands_tab.py, scripts/app_check.py) are intentionally
+# omitted — they come back from bootstrap on the target.
+echo "  → root_files.zip  (repo-root agent-modifiable files)"
+ROOT_PARTS=()
+for p in \
+  /agent/server.py \
+  /agent/AGENTS.md \
+  /agent/pyproject.toml \
+  /agent/uv.lock \
+  /agent/.streamlit \
+  /agent/test
+do
+  [ -e "$p" ] && ROOT_PARTS+=("$p")
+done
+# No `--exclude "*.lock"` here — uv.lock is intentionally included.
+if [ ${#ROOT_PARTS[@]} -gt 0 ]; then
+  zip -r "$STAGING/root_files.zip" \
+    "${ROOT_PARTS[@]}" \
+    --exclude "*/__pycache__/*" \
+    --exclude "*/.pytest_cache/*" \
+    --exclude "*/.git/*"
+else
+  echo "  WARNING: none of the expected root files exist — skipping root_files.zip"
+fi
+
+# Caddy live admin-API config. The static Caddyfile is read-only per
+# constitution; agent-driven changes go through :2019, so capture that
+# state here. Loose JSON (not zipped) so restore can `curl --data-binary @`.
+echo "  → caddy_config.json  (live Caddy admin-API config dump)"
+if curl -fsS http://localhost:2019/config/ -o "$STAGING/caddy_config.json"; then
+  echo "  Caddy config captured ($(wc -c <"$STAGING/caddy_config.json") bytes)"
+else
+  echo "  WARNING: Caddy admin API not reachable at :2019 — skipping caddy_config.json"
+  rm -f "$STAGING/caddy_config.json"
+fi
+
+# Git history bundle — used during restore to resolve modified files only.
+# New files are copied directly; this bundle lets the target find the merge-base
+# and apply only the delta for files that already exist in the target repo.
+echo "  → git.zip  (git history bundle from /agent/.git)"
+if git -C /agent bundle create "$STAGING/git_history.bundle" --all 2>/dev/null; then
+  (cd "$STAGING" && zip git.zip git_history.bundle && rm git_history.bundle)
+  echo "  Git bundle created successfully."
+else
+  echo "  WARNING: git bundle failed — restore will fall back to manual diff review for modified files"
+fi
+
 # home_agent — selective: credentials + configs + .claude (minus heavy workspace)
 echo "  → home_agent.zip  (selective paths from /home/agent/)"
 HOME_PARTS=()
@@ -107,13 +157,16 @@ zip -r "$STAGING/home_agent.zip" \
 echo ""
 echo "[3/4] Moving individual zips to $BACKUP_DIR ..."
 mv "$STAGING"/*.zip "$BACKUP_DIR/"
+mv "$STAGING/caddy_config.json" "$BACKUP_DIR/" 2>/dev/null || true
 rmdir "$STAGING"
 
 echo "[3/4] Creating final archive: $FINAL_ZIP"
 cd "$BACKUP_DIR"
-zip "$FINAL_ZIP" \
-  memory.zip messages.zip web.zip workspace.zip app.zip \
-  prompts.zip scripts.zip skills.zip services.zip home_agent.zip
+ARCHIVE_PARTS=(memory.zip messages.zip web.zip workspace.zip app.zip prompts.zip scripts.zip skills.zip services.zip home_agent.zip)
+[ -f root_files.zip ] && ARCHIVE_PARTS+=(root_files.zip)
+[ -f git.zip ] && ARCHIVE_PARTS+=(git.zip)
+[ -f caddy_config.json ] && ARCHIVE_PARTS+=(caddy_config.json)
+zip "$FINAL_ZIP" "${ARCHIVE_PARTS[@]}"
 
 echo "[3/4] Removing individual zip files ..."
 rm -f \
@@ -126,7 +179,10 @@ rm -f \
   "$BACKUP_DIR/scripts.zip" \
   "$BACKUP_DIR/skills.zip" \
   "$BACKUP_DIR/services.zip" \
-  "$BACKUP_DIR/home_agent.zip"
+  "$BACKUP_DIR/home_agent.zip" \
+  "$BACKUP_DIR/root_files.zip" \
+  "$BACKUP_DIR/caddy_config.json" \
+  "$BACKUP_DIR/git.zip"
 
 # ── Phase 4: Done ─────────────────────────────────────────────────────────────
 SIZE=$(du -sh "$FINAL_ZIP" | cut -f1)

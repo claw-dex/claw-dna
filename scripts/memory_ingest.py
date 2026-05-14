@@ -5,7 +5,7 @@ memory_ingest.py — Ingest agent memory into long-term semantic store (memvid S
 Parses journal.json, journal_archive.json, and messages/inbox_history.json
 (sibling of the memory dir), chunks them into semantically meaningful pieces,
 and ingests into a .mv2 index via the `memvid_sdk` Python package (hybrid
-lexical + semantic search with bge-base embeddings). cycles.json is no longer
+lexical + semantic search with bge-small embeddings). cycles.json is no longer
 ingested — cycle metadata is redundant with journal entries.
 
 Usage:
@@ -33,6 +33,7 @@ Optional:
 Exit codes: 0 = success, 1 = error
 """
 
+import itertools
 import json
 import os
 import sys
@@ -62,7 +63,7 @@ DEFAULT_MV2 = MEMORY / "long_term_memory.mv2"
 # Requires the SDK to be built with `-F fastembed` (see seed/install_memvid.sh).
 # Set to None to disable embedding and use lex-only indexing.
 ENABLE_EMBEDDING = True
-EMBED_MODEL = "bge-base"  # BAAI/bge-base-en-v1.5 via fastembed
+EMBED_MODEL = "bge-small"  # BAAI/bge-small-en-v1.5 via fastembed — ~3x faster than bge-base with modest recall trade-off
 
 # Rebuild commits in batches of this size. Each put_many call commits at the
 # FFI boundary, so smaller batches mean more frequent flushes and bounded
@@ -461,8 +462,12 @@ def transform_inbox(messages: list) -> list:
     return [c for c in (transform_inbox_entry(m) for m in messages) if c is not None]
 
 
-def gather_all_chunks(memory_dir: Path) -> list:
-    """Load all memory files and produce a combined list of chunks.
+def iter_all_chunks(memory_dir: Path):
+    """Yield ingest chunks one at a time, freeing each source JSON before
+    moving to the next file. Used by :func:`build` so peak memory during a
+    rebuild is bounded by max(individual JSON file size) + one batch worth
+    of transformed chunks, instead of holding every source list + every
+    transformed list + the request list all at once.
 
       1. journal.json         — current window (richest, most recent)
       2. journal_archive.json — historical journal (rich, ordered newest-first)
@@ -476,19 +481,25 @@ def gather_all_chunks(memory_dir: Path) -> list:
     richer semantic content. Goals (goal.json, goal_history.json) are also
     excluded from long-term memory.
     """
-    all_chunks = []
-
     # 1. Current journal window — most recent, richest semantic content
     journal = load_json(memory_dir / "journal.json")
     if isinstance(journal, list):
-        all_chunks.extend(transform_journal(journal))
+        for entry in journal:
+            ch = transform_journal_entry(entry)
+            if ch is not None:
+                yield ch
+    journal = None  # drop the source list before loading the next file
 
     # 2. Journal archive — historical entries, newest-first ordering preserved
     archive = load_json(memory_dir / "journal_archive.json")
     if archive is None:
         archive = load_json(memory_dir / "journal-archive.json")
     if isinstance(archive, list):
-        all_chunks.extend(transform_journal(archive))
+        for entry in archive:
+            ch = transform_journal_entry(entry)
+            if ch is not None:
+                yield ch
+    archive = None
 
     # 3. Inbox history — archived messages live in the sibling messages/ dir.
     #    Each message was also live-ingested at arrival; rebuild reconstructs
@@ -497,9 +508,22 @@ def gather_all_chunks(memory_dir: Path) -> list:
         Path(memory_dir).resolve().parent / "messages" / "inbox_history.json"
     )
     if isinstance(inbox_history, list):
-        all_chunks.extend(transform_inbox(inbox_history))
+        for entry in inbox_history:
+            ch = transform_inbox_entry(entry)
+            if ch is not None:
+                yield ch
+    inbox_history = None
 
-    return all_chunks
+
+def gather_all_chunks(memory_dir: Path) -> list:
+    """Materialize all chunks into a single list.
+
+    Kept for tests and callers that need a list. The streaming
+    :func:`iter_all_chunks` is preferred for the rebuild path because it
+    avoids holding every source JSON + every transformed chunk in memory
+    simultaneously.
+    """
+    return list(iter_all_chunks(memory_dir))
 
 
 # ---------------------------------------------------------------------------
@@ -534,48 +558,65 @@ def _cleanup_staging(staging: Path, err: BaseException, quiet: bool) -> None:
 
 
 def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
-    """Full rebuild: parse all memory files and ingest into .mv2."""
+    """Full rebuild: stream chunks from memory files and ingest into .mv2.
+
+    Uses :func:`iter_all_chunks` as a generator so peak memory is bounded by
+    one source JSON file + one BUILD_BATCH_SIZE batch of transformed chunks,
+    rather than materializing every source list + every transformed chunk +
+    the full request list simultaneously.
+    """
     if not dry_run:
         _require_sdk()
     mem_dir = Path(memory_dir)
     mv2_file = Path(mv2_path)
 
-    chunks = gather_all_chunks(mem_dir)
-    if not quiet and not json_mode:
-        print(f"[INGEST] Parsed {len(chunks)} chunks from memory files")
-
-    if not chunks:
-        print("ERROR: No chunks to ingest. Check memory files.", file=sys.stderr)
-        sys.exit(1)
-
     if dry_run:
+        # Stream-print as the generator yields. No full chunk list is ever
+        # materialized — dry-run has the same memory profile as the real
+        # build.
+        count = 0
         if json_mode:
-            print(
-                json.dumps(
-                    {
-                        "mode": "dry_run",
-                        "total_chunks": len(chunks),
-                        "chunks": [
-                            {
-                                "title": c["title"],
-                                "label": c["label"],
-                                "tags": c["tags"],
-                                "text_len": len(c["text"]),
-                            }
-                            for c in chunks
-                        ],
-                    },
-                    indent=2,
+            print('{\n  "mode": "dry_run",\n  "chunks": [')
+            first = True
+            for ch in iter_all_chunks(mem_dir):
+                count += 1
+                prefix = "" if first else ",\n"
+                first = False
+                sys.stdout.write(
+                    prefix
+                    + json.dumps(
+                        {
+                            "title": ch["title"],
+                            "label": ch["label"],
+                            "tags": ch["tags"],
+                            "text_len": len(ch["text"]),
+                        }
+                    )
                 )
-            )
+            print(f'\n  ],\n  "total_chunks": {count}\n}}')
         else:
-            print(f"\n[DRY RUN] Would ingest {len(chunks)} chunks:")
-            for i, ch in enumerate(chunks):
+            print("\n[DRY RUN] Streaming chunks:")
+            for i, ch in enumerate(iter_all_chunks(mem_dir), start=1):
+                count = i
                 print(
-                    f"  {i+1:3d}. [{ch['label']}] {ch['title'][:70]} "
+                    f"  {i:3d}. [{ch['label']}] {ch['title'][:70]} "
                     f"({len(ch['text'])} chars, {len(ch['tags'])} tags)"
                 )
+            print(f"[DRY RUN] Total: {count} chunks")
+        if count == 0:
+            print("ERROR: No chunks to ingest. Check memory files.", file=sys.stderr)
+            sys.exit(1)
         return
+
+    # Real build. Peek the first chunk to detect "no chunks to ingest" before
+    # we touch the staging file — keeping the original error path intact.
+    chunk_iter = iter_all_chunks(mem_dir)
+    try:
+        first = next(chunk_iter)
+    except StopIteration:
+        print("ERROR: No chunks to ingest. Check memory files.", file=sys.stderr)
+        sys.exit(1)
+    chunk_iter = itertools.chain([first], chunk_iter)
 
     # Build into a staging file so the canonical .mv2 stays openable by other
     # processes (live inbox ingest, recall, append-*) for the full duration
@@ -588,27 +629,12 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
     # Stale staging file from a previously crashed/killed rebuild — drop it.
     staging.unlink(missing_ok=True)
 
+    ok = 0
     try:
         mem = memvid_sdk.create(str(staging), enable_vec=True, enable_lex=True)
         if not quiet:
             print(f"[INGEST] Building into staging file {staging}")
 
-        # Batch into chunks of BUILD_BATCH_SIZE so the SDK commits incrementally
-        # rather than buffering the full rebuild in one transaction. Each
-        # put_many call commits at the FFI boundary; this keeps memory bounded
-        # and means a mid-rebuild crash leaves a partial-but-flushed staging
-        # index (still discarded by _cleanup_staging) instead of losing all
-        # progress in an in-flight transaction.
-        requests = [
-            {
-                "title": ch["title"],
-                "label": ch["label"],
-                "text": ch["text"],
-                "tags": list(ch.get("tags") or []),
-                "metadata": dict(ch.get("metadata") or {}),
-            }
-            for ch in chunks
-        ]
         opts: dict = {
             "enable_embedding": ENABLE_EMBEDDING,
             # Rebuilds always compress: staging starts at 0 bytes, so a
@@ -619,22 +645,40 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
         if EMBED_MODEL is not None:
             opts["embedding_model"] = EMBED_MODEL
 
-        ok = 0
-        total = len(requests)
-        # put_many is all-or-nothing per call at the FFI boundary: it returns
-        # a frame_id per request or raises. Let failures propagate — swapping
-        # an empty/partial staging index over a healthy canonical would be
-        # worse than aborting the rebuild and leaving canonical untouched.
-        for start in range(0, total, BUILD_BATCH_SIZE):
-            batch = requests[start : start + BUILD_BATCH_SIZE]
-            frame_ids = mem.put_many(batch, opts=opts)
+        # Stream the generator in BUILD_BATCH_SIZE slices. Only one batch
+        # of request dicts exists at a time; it's dropped before the next
+        # batch is pulled from the generator. put_many is all-or-nothing
+        # per call at the FFI boundary: it returns a frame_id per request
+        # or raises. Let failures propagate — swapping an empty/partial
+        # staging index over a healthy canonical would be worse than
+        # aborting the rebuild and leaving canonical untouched.
+        batch_n = 0
+        while True:
+            batch_chunks = list(itertools.islice(chunk_iter, BUILD_BATCH_SIZE))
+            if not batch_chunks:
+                break
+            batch_n += 1
+            requests = [
+                {
+                    "title": ch["title"],
+                    "label": ch["label"],
+                    "text": ch["text"],
+                    "tags": list(ch.get("tags") or []),
+                    "metadata": dict(ch.get("metadata") or {}),
+                }
+                for ch in batch_chunks
+            ]
+            # Drop the chunk-dict references now that we've copied them into
+            # request dicts — the SDK call won't need them again.
+            batch_chunks = None
+            frame_ids = mem.put_many(requests, opts=opts)
             ok += len(frame_ids)
+            requests = None
             if not quiet and not json_mode:
                 print(
-                    f"[INGEST] Committed batch {start // BUILD_BATCH_SIZE + 1} "
-                    f"({ok}/{total} chunks)"
+                    f"[INGEST] Committed batch {batch_n} "
+                    f"(running total: {ok} chunks)"
                 )
-        fail = total - ok
 
         # Terminal finalize before swap. seal() forces a final commit +
         # index flush so the staging .mv2 is fully searchable on close.
@@ -670,18 +714,18 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
                 {
                     "mode": "build",
                     "mv2": str(mv2_file),
-                    "total_chunks": len(chunks),
+                    "total_chunks": ok,
                     "ingested": ok,
-                    "failed": fail,
+                    "failed": 0,
                     "size_kb": round(size_kb, 1),
                 },
                 indent=2,
             )
         )
     elif not quiet:
-        print(f"[INGEST] Done — {ok} ingested, {fail} failed ({size_kb:.1f} KB)")
-        print(f"[INGEST] Query with:")
-        print(f'  uv run python scripts/memory_recall.py "your question here"')
+        print(f"[INGEST] Done — {ok} ingested ({size_kb:.1f} KB)")
+        print("[INGEST] Query with:")
+        print('  uv run python scripts/memory_recall.py "your question here"')
 
 
 # ---------------------------------------------------------------------------
@@ -799,10 +843,13 @@ def append_many(mv2_path, chunks: list, *, quiet: bool = True) -> tuple:
 
     Returns ``(ok, fail)`` counts.
     """
-    _require_sdk()
     mv2 = Path(mv2_path)
+    # Short-circuit before _require_sdk so callers (and tests) can invoke
+    # this with empty input on runtimes without memvid_sdk installed —
+    # there's nothing to do and no reason to fail.
     if not mv2.exists() or not chunks:
         return (0, 0)
+    _require_sdk()
     mem = _open_or_create(mv2)
     requests = [
         {
