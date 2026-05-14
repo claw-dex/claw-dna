@@ -139,6 +139,29 @@ Also confirm:
 
 - The target directories (`/agent/`, `/home/agent/`) exist and you have write access.
 
+### Phase 0 — Stop all running services
+
+Before overwriting `/agent/memory/` (which contains `services.json` and the live PID/state of every background service), stop every service currently registered in `/agent/memory/services.json`. Leaving services running while the recovery copies over their state files causes stale PIDs, port conflicts, and partially-written memory files.
+
+```bash
+# Stop every service listed in services.json (skips ones already stopped)
+for name in $(python3 -c "import json; print(' '.join(json.load(open('/agent/memory/services.json'))))" 2>/dev/null); do
+  echo "Stopping $name ..."
+  python3 /agent/scripts/service_manager.py stop "$name" || true
+done
+
+# Verify nothing is still running
+python3 /agent/scripts/service_manager.py list
+```
+
+If `/agent/memory/services.json` does not yet exist on the target (fresh container), there is nothing to stop — skip this phase.
+
+After recovery completes (end of Phase 5), services with `auto_start: true` will come back up via:
+
+```bash
+python3 /agent/scripts/service_manager.py auto-start
+```
+
 ### Phase 1 — Unzip the backup
 
 Set `BACKUP_ZIP` to the path you located above. Examples:
@@ -287,10 +310,19 @@ Run the portal self-test to confirm nothing is broken:
 uv run python scripts/self_test.py
 ```
 
+Start the background services that were stopped in Phase 0. This reads the **restored** `/agent/memory/services.json` and brings up every entry with `auto_start: true`:
+
+```bash
+python3 /agent/scripts/service_manager.py auto-start
+python3 /agent/scripts/service_manager.py health
+```
+
+Run this **before** the memory rebuild so any service that depends on the live agent (webhook receiver, schedulers, bridges) is back online while the index rebuilds.
+
 Rebuild the semantic memory index (the backup intentionally omits `long_term_memory.mv2`):
 
 ```bash
 uv run python scripts/memory_ingest.py --build
 ```
 
-Once the self-test passes and memory ingest completes, the migration is done — the target agent now holds the source agent's knowledge, memory, capabilities, and workspace.
+Once the self-test passes, services are healthy, and memory ingest completes, the migration is done — the target agent now holds the source agent's knowledge, memory, capabilities, and workspace.

@@ -64,6 +64,11 @@ DEFAULT_MV2 = MEMORY / "long_term_memory.mv2"
 ENABLE_EMBEDDING = True
 EMBED_MODEL = "bge-base"  # BAAI/bge-base-en-v1.5 via fastembed
 
+# Rebuild commits in batches of this size. Each put_many call commits at the
+# FFI boundary, so smaller batches mean more frequent flushes and bounded
+# in-flight memory; larger batches mean fewer FFI crossings.
+BUILD_BATCH_SIZE = 100
+
 # Enable vector compression only once the .mv2 grows past this size.
 # Below the threshold, uncompressed vectors (~270 KB/doc) give the best
 # search quality; above it, compression (~20 KB/doc, 16x savings) keeps
@@ -588,9 +593,12 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
         if not quiet:
             print(f"[INGEST] Building into staging file {staging}")
 
-        # Single Rust-side batch: ~100x faster than a Python put-loop. The
-        # SDK commits once at the end of put_many; we still call seal()
-        # afterward to force a final flush before this process exits.
+        # Batch into chunks of BUILD_BATCH_SIZE so the SDK commits incrementally
+        # rather than buffering the full rebuild in one transaction. Each
+        # put_many call commits at the FFI boundary; this keeps memory bounded
+        # and means a mid-rebuild crash leaves a partial-but-flushed staging
+        # index (still discarded by _cleanup_staging) instead of losing all
+        # progress in an in-flight transaction.
         requests = [
             {
                 "title": ch["title"],
@@ -610,13 +618,23 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
         }
         if EMBED_MODEL is not None:
             opts["embedding_model"] = EMBED_MODEL
-        # put_many is all-or-nothing at the FFI boundary: it returns a
-        # frame_id per request or raises. Let failures propagate — swapping
+
+        ok = 0
+        total = len(requests)
+        # put_many is all-or-nothing per call at the FFI boundary: it returns
+        # a frame_id per request or raises. Let failures propagate — swapping
         # an empty/partial staging index over a healthy canonical would be
         # worse than aborting the rebuild and leaving canonical untouched.
-        frame_ids = mem.put_many(requests, opts=opts)
-        ok = len(frame_ids)
-        fail = len(requests) - ok
+        for start in range(0, total, BUILD_BATCH_SIZE):
+            batch = requests[start : start + BUILD_BATCH_SIZE]
+            frame_ids = mem.put_many(batch, opts=opts)
+            ok += len(frame_ids)
+            if not quiet and not json_mode:
+                print(
+                    f"[INGEST] Committed batch {start // BUILD_BATCH_SIZE + 1} "
+                    f"({ok}/{total} chunks)"
+                )
+        fail = total - ok
 
         # Terminal finalize before swap. seal() forces a final commit +
         # index flush so the staging .mv2 is fully searchable on close.
