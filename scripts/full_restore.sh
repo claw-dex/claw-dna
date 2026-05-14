@@ -80,10 +80,7 @@ cleanup_git() {
 trap cleanup_git EXIT
 
 if [ $TAIL_ONLY -eq 0 ]; then
-  # Snapshot pyproject/uv.lock so Phase 2b can detect changes after the override.
-  PRE_SNAPSHOT=$(mktemp -d -t restore_pre_XXXXXX)
-  [ -f /agent/pyproject.toml ] && cp /agent/pyproject.toml "$PRE_SNAPSHOT/pyproject.toml"
-  [ -f /agent/uv.lock ]        && cp /agent/uv.lock        "$PRE_SNAPSHOT/uv.lock"
+  : # Phase 2b runs `uv sync` unconditionally — no pre-snapshot needed.
 else
   echo "--tail-only set: skipping Phases 0-4a (assumes restore already ran once)."
   if [ ! -d "$RESTORE_DIR" ]; then
@@ -172,30 +169,15 @@ if [ $TAIL_ONLY -eq 0 ]; then
     echo "  No root_files.zip in this backup — skipping repo-root file restore."
   fi
 
-  # ── Phase 2b: uv sync if pyproject/uv.lock changed ──────────────────────────
+  # ── Phase 2b: uv sync (always runs) ─────────────────────────────────────────
+  # Always sync — the venv must match the restored pyproject.toml/uv.lock
+  # before services restart, regardless of whether the manifest "looks"
+  # changed. Cheap when in-sync, mandatory when not.
   echo ""
-  echo "[2b/6] Checking pyproject.toml / uv.lock for changes ..."
-  NEEDS_SYNC=0
-  for f in pyproject.toml uv.lock; do
-    if [ -f "/agent/$f" ] && [ -f "$PRE_SNAPSHOT/$f" ]; then
-      if ! cmp -s "/agent/$f" "$PRE_SNAPSHOT/$f"; then
-        echo "  $f changed."
-        NEEDS_SYNC=1
-      fi
-    elif [ -f "/agent/$f" ] && [ ! -f "$PRE_SNAPSHOT/$f" ]; then
-      echo "  $f appeared (was missing pre-restore)."
-      NEEDS_SYNC=1
-    fi
-  done
-  if [ $NEEDS_SYNC -eq 1 ]; then
-    echo "  Running: cd /agent && uv sync"
-    if ! (cd /agent && uv sync); then
-      echo "  WARNING: uv sync failed — re-run manually before relying on the venv."
-    fi
-  else
-    echo "  No dependency manifest changes — skipping uv sync."
+  echo "[2b/6] Running uv sync ..."
+  if ! (cd /agent && uv sync); then
+    echo "  WARNING: uv sync failed — re-run manually before relying on the venv."
   fi
-  rm -rf "$PRE_SNAPSHOT"
 
   # ── Phase 3: Selective copy (no override) ───────────────────────────────────
   echo ""
@@ -510,13 +492,8 @@ fi
 
 echo ""
 echo "[6/6] Starting auto-start services ..."
-# Always sync the venv before starting services. The venv is not included in
-# the backup, so a restored container may be missing packages (e.g. psutil)
-# even when pyproject.toml/uv.lock are unchanged from Phase 2b.
-echo "  Running uv sync ..."
-if ! (cd /agent && uv sync --quiet); then
-  echo "  WARNING: uv sync failed — services may fail to start if deps are missing"
-fi
+# Venv was already synced by Phase 2b (which always runs in non-tail mode).
+# In --tail-only mode the venv is assumed correct from a prior full run.
 uv run python /agent/scripts/service_manager.py auto-start || true
 uv run python /agent/scripts/service_manager.py health || true
 
