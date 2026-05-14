@@ -5,7 +5,8 @@ description: Full container backup and cross-container migration for the agent. 
 
 # full-backup-and-migrate
 
-**Path:** `scripts/full_backup.sh`
+**Backup script:** `scripts/full_backup.sh`
+**Restore script:** `scripts/full_restore.sh`
 
 Use this skill to migrate an agent from one container/runtime to another. The procedure has three roles:
 
@@ -79,7 +80,7 @@ The `/agent/memory/backups/` directory is moved to `/tmp/agent_memory_backups_<t
   ├── skills.zip
   ├── services.zip
   ├── home_agent.zip
-  ├── root_files.zip
+  ├── root_files.zip      (loose, optional)
   └── caddy_config.json   (loose, optional)
 ```
 
@@ -122,225 +123,71 @@ mv /tmp/agent_memory_backups_<timestamp> /agent/memory/backups
 
 ## Recovery (target agent)
 
-Full recovery from an uploaded backup zip. The procedure has five phases. Before starting, locate the backup zip:
+The deterministic phases of recovery are implemented in **`scripts/full_restore.sh`**. The agent runs the script; the script runs phases 0 → 5 in order. The agent only steps in for the few cases that genuinely need judgment (ambiguous backup zip, git merge conflicts, manual diff review when no `git.zip` is present, self-test failure).
 
-1. The user typically uploads to one of these two locations — check **both**:
+### Step 1 — Locate the backup zip
 
-   ```bash
-   ls -lh /agent/backup/agent_full_backup_*.zip   2>/dev/null
-   ls -lh /agent/workspace/agent_full_backup_*.zip 2>/dev/null
-   ```
-
-2. If multiple zips are found across both directories, ask the user which one to restore.
-3. If **no** match is found in either location, ask the user to give the exact filename (or path) of the uploaded backup, then locate it with:
-
-   ```bash
-   find /agent /home/agent /tmp -maxdepth 5 -name "<filename>" 2>/dev/null
-   ```
-
-   (Substitute the name the user provides. Use `-iname` if the case is uncertain.)
-
-Also confirm:
-
-- The target directories (`/agent/`, `/home/agent/`) exist and you have write access.
-
-### Phase 0 — Stop all running services
-
-Before overwriting `/agent/memory/` (which contains `services.json` and the live PID/state of every background service), stop every service currently registered in `/agent/memory/services.json`. Leaving services running while the recovery copies over their state files causes stale PIDs, port conflicts, and partially-written memory files.
+The script does NOT auto-detect — you must pass the exact path. Find it under the standard upload locations first:
 
 ```bash
-# Stop every service listed in services.json (skips ones already stopped)
-for name in $(python3 -c "import json; print(' '.join(json.load(open('/agent/memory/services.json'))))" 2>/dev/null); do
-  echo "Stopping $name ..."
-  python3 /agent/scripts/service_manager.py stop "$name" || true
-done
-
-# Verify nothing is still running
-python3 /agent/scripts/service_manager.py list
+ls -1t /agent/backup/agent_full_backup_*.zip   2>/dev/null
+ls -1t /agent/workspace/agent_full_backup_*.zip 2>/dev/null
 ```
 
-If `/agent/memory/services.json` does not yet exist on the target (fresh container), there is nothing to stop — skip this phase.
+Decide based on what you see:
 
-After recovery completes (end of Phase 5), services with `auto_start: true` will come back up via:
+- **Exactly one zip** across both directories → use it.
+- **More than one zip** → **ask the user which one to restore** before continuing. Do not guess from filename timestamps; the user may have uploaded a fresh one alongside an older one and the right choice depends on intent.
+- **None** → ask the user where they uploaded it, then locate it:
+
+  ```bash
+  find /agent /home/agent /tmp -maxdepth 5 -name "agent_full_backup_*.zip" 2>/dev/null
+  ```
+
+### Step 2 — Run the restore script
 
 ```bash
-python3 /agent/scripts/service_manager.py auto-start
+bash /agent/scripts/full_restore.sh /path/to/agent_full_backup_<TIMESTAMP>.zip
 ```
 
-### Phase 1 — Unzip the backup
+The path is required (no auto-detect — see Step 1).
 
-Set `BACKUP_ZIP` to the path you located above. Examples:
+The script runs these phases (mirrors the previous doc):
 
-```bash
-# Common case — uploaded to /agent/backup/
-BACKUP_ZIP=/agent/backup/agent_full_backup_20260513T025937Z.zip
+| Phase | What it does | Manual fallback? |
+|-------|--------------|------------------|
+| 0 | Stops services from `/agent/memory/services.json` | — |
+| 1 | Unzips outer + inner zips into `/tmp/<restore_name>/` | — |
+| 2 | Full-override copy of `memory/`, `messages/`, `workspace/`, `web/`, `home/agent/`, plus per-file restore of repo-root files (`server.py`, `AGENTS.md`, `pyproject.toml`, `uv.lock`, `.streamlit/`, `test/`) | — |
+| 2b | `cd /agent && uv sync` if `pyproject.toml`/`uv.lock` changed | — |
+| 3 | Selective copy of `app/`, `prompts/`, `scripts/`, `skills/`, `services/` (skips files that already exist on target); skipped paths logged to `/tmp/<restore_name>_skipped.txt` | — |
+| 4a | Git-bundle delta apply for *tracked, modified* files only — **per-file, no commits**. For each file in Phase 3's skipped list that (a) differs from target and (b) is tracked in `/agent`'s git repo, the script generates a single-file patch from the bundle and tries `git apply --3way`. Files that apply cleanly are left as **uncommitted working-tree changes**. Files that fail or leave conflict markers are reverted to HEAD (`git checkout -- <file>`) and listed in `/tmp/<restore_name>_needs_merge.txt`. Untracked-but-divergent files go to `/tmp/<restore_name>_untracked.txt`. The script never aborts on conflict — it skips and moves on. | When the run finishes, **resolve files in `_needs_merge.txt` manually** (use the bundle, the backup tree, or `git diff` against the listed paths). For files in `_untracked.txt`, use the **Phase 4b** diff loop below. If `git.zip` is missing or no merge-base exists, the whole 4a path is skipped and **Phase 4b** is the only option. |
+| 4.5 | POSTs `caddy_config.json` to `localhost:2019/load` to restore live Caddy routes (no-op if the file is absent) | If the POST fails: investigate Caddy with `ps`, container logs; re-run the snippet by hand. |
+| 5 | Removes `/tmp/<restore_name>/`, moves backup zip into `/agent/backup/` if uploaded elsewhere, runs `uv run python scripts/self_test.py`, gateway probe, then `service_manager.py auto-start` + `health` | If `self_test.py` fails: read the output, fix the issue, then re-run the script with `--skip-self-test` once you've verified by hand. |
 
-# Or, uploaded to the workspace dir
-# BACKUP_ZIP=/agent/workspace/agent_full_backup_20260513T061915Z.zip
-RESTORE_NAME=$(basename "$BACKUP_ZIP" .zip)
-RESTORE_DIR=/tmp/${RESTORE_NAME}
+Script flags:
 
-mkdir -p "$RESTORE_DIR"
+- `--skip-self-test` — skip the Phase 5 `self_test.py` + gateway probe.
+- `--tail-only` — skip Phases 0–4a, run only Phase 4.5 + 5. Use after manually resolving Phase 4a conflicts so the already-restored `/agent/memory` and `/agent/workspace` are not overwritten a second time.
+- `-h`, `--help` — usage.
 
-# Unzip the outer archive
-unzip "$BACKUP_ZIP" -d "$RESTORE_DIR"
+**Resilience contract:** the script never aborts on a single-file failure. Bad inner zips, failed copies, conflict-on-apply, and unreachable Caddy admin all log a warning and continue. Only a self-test failure causes a non-zero exit, and even then services and Phase 4.5 still run. **On a self-test failure** the script leaves `/tmp/<restore_name>/` and the backup zip in place so you can re-run with `--tail-only` after fixing. On success it removes `/tmp/<restore_name>/` and moves the zip into `/agent/backup/`.
 
-# Unzip each inner zip in the same directory
-for z in "$RESTORE_DIR"/*.zip; do
-  unzip "$z" -d "$RESTORE_DIR"
-done
-```
+### Step 3 — Handle conflicts or 4b fallback if the script reports them
 
-After this step, `$RESTORE_DIR` contains both the inner `.zip` files and the fully extracted directory tree (e.g. `agent/memory/`, `agent/scripts/`, `home/agent/`, etc.).
+The script prints either:
 
----
+- `Phase 4a conflicts (skipped, reverted to HEAD): N file(s) — see /tmp/<restore_name>_needs_merge.txt` → review each path in that log, reconcile against the backup tree (still at `/tmp/<restore_name>/agent/<rel>` if Phase 5 self-test failed; otherwise re-extract the backup zip), edit in `/agent/<rel>`, and leave the result as uncommitted working-tree changes. No need to re-run the script for this — Phases 0–4 already happened and Phase 4.5/5 succeeded. Only re-run `--tail-only` if the self-test was failing because of these unresolved files.
+- `No git.zip in backup — fall back to manual diff review (Phase 4b).` → follow Phase 4b below.
 
-### Phase 2 — Full override copy (critical runtime data)
+#### Phase 4b — Manual diff review (fallback)
 
-The following directories are fully overridden with backup content — existing files are replaced unconditionally:
-
-| Backup path (inside `$RESTORE_DIR`) | Target on disk |
-|--------------------------------------|----------------|
-| `agent/memory/` | `/agent/memory/` |
-| `agent/messages/` | `/agent/messages/` |
-| `agent/workspace/` | `/agent/workspace/` |
-| `agent/web/` | `/agent/web/` |
-| `home/agent/` | `/home/agent/` |
+Use only when the script reported missing `git.zip` or no merge-base. The script left `/tmp/<restore_name>/` in place if it exited at Phase 4a, but cleared it if it reached Phase 5; in the cleared case, re-unzip the backup to a temp dir first.
 
 ```bash
-cp -rf "$RESTORE_DIR/agent/memory/."    /agent/memory/
-cp -rf "$RESTORE_DIR/agent/messages/."  /agent/messages/
-cp -rf "$RESTORE_DIR/agent/workspace/." /agent/workspace/
-cp -rf "$RESTORE_DIR/agent/web/."       /agent/web/
-cp -rf "$RESTORE_DIR/home/agent/."      /home/agent/
+RESTORE_DIR=/tmp/<restore_name>           # whatever the script printed
+SKIPPED_LOG=/tmp/<restore_name>_skipped.txt
 
-# Repo-root agent-modifiable files (optional — `root_files.zip` is absent
-# in backups produced before this artifact was introduced). Copied
-# individually (NOT as `cp -rf agent/. /agent/`) so forbidden bootstrap
-# files at /agent/ (constitution.md, system.md, agent.sh, etc.) are not
-# touched. Each path is independently guarded so a partial backup still
-# restores whatever it does contain.
-if [ -f "$RESTORE_DIR/root_files.zip" ] || [ -e "$RESTORE_DIR/agent/server.py" ] \
-   || [ -d "$RESTORE_DIR/agent/.streamlit" ] || [ -d "$RESTORE_DIR/agent/test" ]; then
-  for p in server.py AGENTS.md pyproject.toml uv.lock; do
-    [ -f "$RESTORE_DIR/agent/$p" ] && cp -f "$RESTORE_DIR/agent/$p" "/agent/$p"
-  done
-  [ -d "$RESTORE_DIR/agent/.streamlit" ] && cp -rf "$RESTORE_DIR/agent/.streamlit/." /agent/.streamlit/
-  [ -d "$RESTORE_DIR/agent/test" ]       && cp -rf "$RESTORE_DIR/agent/test/."       /agent/test/
-  echo "Restored repo-root agent-modifiable files."
-else
-  echo "No root_files.zip in this backup — skipping repo-root file restore (older backup format)."
-fi
-```
-
-> **Note:** `cp -rf <src>/. <dst>/` copies directory *contents* (not the directory itself) into the target, overriding any matching files.
-
-> **Dependency sync:** if `pyproject.toml` or `uv.lock` changed, run `cd /agent && uv sync` **before** Phase 5's `self_test.py` so the venv matches the restored manifest.
-
----
-
-### Phase 3 — Selective copy (code directories, no override)
-
-The remaining directories — `app`, `prompts`, `scripts`, `skills`, `services` — contain code that may have evolved on the target since the backup was taken. Copy only files that do **not** already exist in the target, and track every skipped file.
-
-```bash
-SKIPPED_LOG=/tmp/${RESTORE_NAME}_skipped.txt
-> "$SKIPPED_LOG"   # reset log
-
-selective_copy() {
-  local src_root=$1
-  local dst_root=$2
-
-  find "$src_root" -type f | while read -r src_file; do
-    rel="${src_file#$src_root/}"
-    dst_file="$dst_root/$rel"
-
-    if [ -e "$dst_file" ]; then
-      echo "$dst_file" >> "$SKIPPED_LOG"
-    else
-      mkdir -p "$(dirname "$dst_file")"
-      cp "$src_file" "$dst_file"
-    fi
-  done
-}
-
-selective_copy "$RESTORE_DIR/agent/app"      /agent/app
-selective_copy "$RESTORE_DIR/agent/prompts"  /agent/prompts
-selective_copy "$RESTORE_DIR/agent/scripts"  /agent/scripts
-selective_copy "$RESTORE_DIR/agent/skills"   /agent/skills
-selective_copy "$RESTORE_DIR/agent/services" /agent/services
-```
-
-After this step, review `$SKIPPED_LOG` to see which files were skipped.
-
----
-
-### Phase 4 — Merge skipped files (git-bundle delta apply)
-
-Skipped files are ones that already exist in the target repo. The goal is to apply only the changes the backup introduces *after* the common ancestor — not re-apply changes already present in the target's git history, and not overwrite local-only work.
-
-#### 4a — Attempt git-bundle-based merge (preferred)
-
-If `git.zip` is present in the backup, use the git history to compute and apply the exact delta:
-
-```bash
-BUNDLE_ZIP="$RESTORE_DIR/git.zip"
-BACKUP_REPO=/tmp/${RESTORE_NAME}_git
-
-if [ -f "$BUNDLE_ZIP" ]; then
-  # Extract bundle and clone into a temp repo
-  unzip -j "$BUNDLE_ZIP" git_history.bundle -d /tmp/
-  git clone /tmp/git_history.bundle "$BACKUP_REPO"
-  rm /tmp/git_history.bundle
-
-  # Add backup repo as a remote and fetch its refs into the current repo
-  git -C /agent remote add _backup "$BACKUP_REPO" 2>/dev/null || true
-  git -C /agent fetch _backup --quiet
-
-  BACKUP_HEAD=$(git -C "$BACKUP_REPO" rev-parse HEAD)
-  MERGE_BASE=$(git -C /agent merge-base HEAD "$BACKUP_HEAD" 2>/dev/null || echo "")
-
-  if [ -n "$MERGE_BASE" ]; then
-    echo "Merge base: $MERGE_BASE"
-    echo "Applying delta ($MERGE_BASE → $BACKUP_HEAD) for skipped files only..."
-
-    # Build a pathspec from the skipped files so we only patch those
-    PATHSPECS=()
-    while IFS= read -r dst_file; do
-      rel="${dst_file#/agent/}"
-      src_file="$RESTORE_DIR/agent/$rel"
-      [ -f "$src_file" ] || continue
-      diff -q "$src_file" "$dst_file" > /dev/null 2>&1 && continue  # identical, skip
-      PATHSPECS+=("$rel")
-    done < "$SKIPPED_LOG"
-
-    if [ ${#PATHSPECS[@]} -gt 0 ]; then
-      git -C /agent diff "$MERGE_BASE" "$BACKUP_HEAD" -- "${PATHSPECS[@]}" \
-        | git -C /agent apply --3way --ignore-whitespace 2>&1 || {
-          echo "WARNING: some hunks failed to apply cleanly — check 'git status' for conflicts"
-        }
-    else
-      echo "All skipped files are identical to backup — nothing to apply."
-    fi
-  else
-    echo "No common ancestor found — falling back to manual diff review (4b)"
-  fi
-
-  # Cleanup
-  git -C /agent remote remove _backup 2>/dev/null || true
-  rm -rf "$BACKUP_REPO"
-else
-  echo "No git.zip in backup — falling back to manual diff review (4b)"
-fi
-```
-
-After this step, run `git status` and `git diff` to review what was applied. Resolve any conflicts marked by `git apply --3way` before proceeding.
-
-#### 4b — Fallback: manual diff review
-
-Use this only when `git.zip` is absent (older backup) or the merge-base could not be found.
-
-```bash
 while IFS= read -r dst_file; do
   rel="${dst_file#/agent/}"
   src_file="$RESTORE_DIR/agent/$rel"
@@ -358,78 +205,20 @@ while IFS= read -r dst_file; do
 done < "$SKIPPED_LOG"
 ```
 
-Review each diff and decide per file:
+Decide per file:
 
 - **Identical** → already skipped automatically
 - **Backup has new additions** → manually apply (e.g. new functions, new config keys)
 - **Current is ahead** → keep current; backup is stale for this file
 - **Both changed differently** → merge manually, keeping functional correctness of the current file
 
----
+### Step 4 — Self-test failure troubleshooting
 
-### Phase 4.5 — Restore Caddy live config
+If the script exits with `Restore finished WITH WARNINGS (self_test rc=…)`:
 
-The static `/agent/Caddyfile` is read-only per the constitution; the agent reconfigures Caddy at runtime via the admin API on port 2019. Reapply the captured live config so routes/handlers the source agent added are present on the target. **Optional** — `caddy_config.json` is absent in backups produced before this artifact was introduced, and may also be absent if the source's admin API was unreachable at backup time; the whole phase no-ops in that case and Caddy keeps the bootstrap config.
-
-Caddy is started by the process manager (PID 1) at container boot, so the admin API should already be listening by the time recovery reaches this phase. If the POST fails, fix Caddy (`ps`, container logs) and re-run the snippet.
-
-```bash
-CADDY_JSON="$RESTORE_DIR/caddy_config.json"
-if [ -f "$CADDY_JSON" ]; then
-  if curl -fsS -X POST http://localhost:2019/load \
-       -H 'Content-Type: application/json' \
-       --data-binary "@$CADDY_JSON"; then
-    echo "Caddy live config restored from backup."
-  else
-    echo "WARNING: failed to POST caddy_config.json to :2019/load — restore manually."
-  fi
-else
-  echo "No caddy_config.json in backup — Caddy keeps its current (bootstrap) config."
-fi
-```
-
-Verify the reload took effect:
-
-```bash
-curl -fsS http://localhost:2019/config/ | diff - "$CADDY_JSON" >/dev/null \
-  && echo "Caddy config matches backup." \
-  || echo "Caddy config differs from backup — inspect manually."
-```
-
----
-
-### Phase 5 — Cleanup and verification
-
-Remove the temp restore directory after confirming the system is healthy:
-
-```bash
-rm -rf "$RESTORE_DIR"
-echo "Cleanup complete: $RESTORE_DIR removed"
-```
-
-If `$BACKUP_ZIP` was located outside `/agent/backup/` (e.g. uploaded to `/agent/workspace/`), move it into `/agent/backup/` now so future restores find it in the canonical location:
-
-```bash
-if [ "$(dirname "$BACKUP_ZIP")" != "/agent/backup" ]; then
-  mkdir -p /agent/backup
-  mv "$BACKUP_ZIP" /agent/backup/
-  echo "Moved backup zip to: /agent/backup/$(basename "$BACKUP_ZIP")"
-fi
-```
-
-Run the portal self-test to confirm nothing is broken (run `uv sync` first if `pyproject.toml`/`uv.lock` were restored in Phase 2):
-
-```bash
-uv run python scripts/self_test.py
-curl -fsS http://localhost:8080/app/ -o /dev/null && echo "Gateway OK"
-```
-
-Start the background services that were stopped in Phase 0. This reads the **restored** `/agent/memory/services.json` and brings up every entry with `auto_start: true`:
-
-```bash
-python3 /agent/scripts/service_manager.py auto-start
-python3 /agent/scripts/service_manager.py health
-```
+1. Re-run `cd /agent && uv run python scripts/self_test.py` and read the failure.
+2. Common causes: missing dep (run `uv sync`), missing env var, a service still down (`service_manager.py health`), a config file in `/agent/memory/` that didn't restore cleanly.
+3. After fixing, re-run `bash /agent/scripts/full_restore.sh --tail-only [PATH_TO_ZIP]` to re-verify and bring services up. Add `--skip-self-test` if you've already verified by hand.
 
 ### Semantic memory index — auto-rebuilt by `cycle_close.py`
 
@@ -439,4 +228,4 @@ The backup intentionally omits `long_term_memory.mv2`. Do **not** run `memory_in
 uv run python scripts/memory_ingest.py --build
 ```
 
-Otherwise, once the self-test passes and services are healthy, the migration is done — the target agent now holds the source agent's knowledge, memory, capabilities, and workspace. The `.mv2` will appear after the next cycle close.
+(Only run this manually if you need the index *immediately* and can't wait for the next cycle close.)
