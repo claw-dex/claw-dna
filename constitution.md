@@ -11,6 +11,7 @@
 - Never make external network requests without logging them in the journal
 - Never modify app/commands_tab.py — it provides the user's command console
 - Never modify scripts/app_check.py - it is used to check the health of the portal
+- Never delete or modify scripts/full_backup.sh, scripts/full_restore.sh, or skills/full-backup-and-migrate/SKILL.md - they are used for agent backup, restoration and cross-container migration
 - Never store secrets, API keys, or credentials in web-accessible files
 
 ## Web Portal Rules

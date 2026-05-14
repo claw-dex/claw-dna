@@ -70,6 +70,57 @@ RESTORE_DIR=/tmp/${RESTORE_NAME}
 SKIPPED_LOG=/tmp/${RESTORE_NAME}_skipped.txt
 BACKUP_REPO=/tmp/${RESTORE_NAME}_git
 
+# Files this script must NEVER overwrite — replacing them mid-restore with
+# a stale or incompatible backup version would break the in-flight restore,
+# the next bootstrap, or the agent's safety contract. Paths are repo-relative
+# (no leading /agent/). Excluded from Phase 3 (selective copy) and Phase 4a
+# (git-bundle patch).
+#
+# Sources:
+#   * Backup/restore tooling itself.
+#   * Memory CLI scripts the running agent relies on (a stale copy can break
+#     /agent/memory access mid-restore or in the very next cycle).
+#   * Every "Hard Rule" file from constitution.md (NEVER delete/modify list).
+PROTECTED_PATHS=(
+  # Migration tooling
+  "scripts/full_backup.sh"
+  "scripts/full_restore.sh"
+  "skills/full-backup-and-migrate/SKILL.md"
+  # Memory CLI scripts the agent depends on at runtime
+  "scripts/memory_ingest.py"
+  "scripts/memory_ask.py"
+  "scripts/memory_recall.py"
+  # Constitution Hard-Rule "NEVER delete/modify" files
+  "constitution.md"
+  "system.md"
+  "agent.sh"
+  "heartbeat.sh"
+  "bootstrap.sh"
+  "Caddyfile"
+  "app/commands_tab.py"
+  "scripts/app_check.py"
+  # (Directory prefixes use a trailing slash — the matcher below treats them
+  # as "everything under this dir". `test/` is intentionally NOT here: it has
+  # its own prefer-current restore in Phase 3 so new test files can seed onto
+  # a fresh container while existing ones are kept.)
+)
+# Match an entry exactly (no trailing slash) or as a directory prefix
+# (trailing slash). Path arg is repo-relative.
+is_protected() {
+  local rel=$1
+  local p
+  for p in "${PROTECTED_PATHS[@]}"; do
+    if [[ "$p" == */ ]]; then
+      case "$rel/" in
+        "$p"*) return 0 ;;
+      esac
+    else
+      [ "$rel" = "$p" ] && return 0
+    fi
+  done
+  return 1
+}
+
 # Always clean up the temp git clone + the _backup remote so a re-run after a
 # crash mid-Phase-4a doesn't trip on stale state. RESTORE_DIR is intentionally
 # NOT cleaned here — it's needed for --tail-only re-runs and Phase 4b.
@@ -149,7 +200,7 @@ if [ $TAIL_ONLY -eq 0 ]; then
 
   # Repo-root agent-modifiable files (per-file guards — older backups omit some).
   if [ -f "$RESTORE_DIR/root_files.zip" ] || [ -e "$RESTORE_DIR/agent/server.py" ] \
-     || [ -d "$RESTORE_DIR/agent/.streamlit" ] || [ -d "$RESTORE_DIR/agent/test" ]; then
+     || [ -d "$RESTORE_DIR/agent/.streamlit" ]; then
     for p in server.py AGENTS.md pyproject.toml uv.lock; do
       if [ -f "$RESTORE_DIR/agent/$p" ]; then
         cp -f "$RESTORE_DIR/agent/$p" "/agent/$p" \
@@ -159,10 +210,6 @@ if [ $TAIL_ONLY -eq 0 ]; then
     if [ -d "$RESTORE_DIR/agent/.streamlit" ]; then
       cp -rf "$RESTORE_DIR/agent/.streamlit/." /agent/.streamlit/ \
         || echo "  WARNING: failed to restore /agent/.streamlit — continuing."
-    fi
-    if [ -d "$RESTORE_DIR/agent/test" ]; then
-      cp -rf "$RESTORE_DIR/agent/test/." /agent/test/ \
-        || echo "  WARNING: failed to restore /agent/test — continuing."
     fi
     echo "  Restored repo-root agent-modifiable files."
   else
@@ -190,7 +237,7 @@ if [ $TAIL_ONLY -eq 0 ]; then
   selective_copy() {
     local src_root=$1
     local dst_root=$2
-    local src_file rel dst_file
+    local src_file rel dst_file repo_rel
 
     if [ ! -d "$src_root" ]; then
       echo "  WARNING: $src_root missing in backup — skipping."
@@ -200,6 +247,13 @@ if [ $TAIL_ONLY -eq 0 ]; then
     while IFS= read -r -d '' src_file; do
       rel="${src_file#$src_root/}"
       dst_file="$dst_root/$rel"
+      # Repo-relative path (e.g. scripts/full_restore.sh) for protection check.
+      repo_rel="${dst_file#/agent/}"
+
+      if is_protected "$repo_rel"; then
+        echo "  PROTECTED: $repo_rel — skipping (never overwrite)"
+        continue
+      fi
 
       if [ -e "$dst_file" ]; then
         printf '%s\n' "$dst_file" >> "$SKIPPED_LOG"
@@ -220,6 +274,45 @@ if [ $TAIL_ONLY -eq 0 ]; then
 
   SKIPPED_COUNT=$(wc -l < "$SKIPPED_LOG" | tr -d ' ')
   echo "  Skipped (already exist): $SKIPPED_COUNT files — log: $SKIPPED_LOG"
+
+  # ── Phase 3b: prefer-current copy for /agent/test ───────────────────────────
+  # Test files use "always prefer the current target version" semantics:
+  # existing files are silently kept (NOT added to SKIPPED_LOG, so Phase 4a
+  # never patches them), and only NEW files from the backup are seeded.
+  # This protects core test cases on the target from being regressed by an
+  # older backup while still allowing a fresh container to receive tests.
+  echo ""
+  echo "[3b/6] Prefer-current copy for /agent/test (only new files seeded) ..."
+  prefer_current_copy() {
+    local src_root=$1
+    local dst_root=$2
+    local src_file rel dst_file kept=0 added=0
+
+    if [ ! -d "$src_root" ]; then
+      echo "  WARNING: $src_root missing in backup — skipping."
+      return 0
+    fi
+
+    while IFS= read -r -d '' src_file; do
+      rel="${src_file#$src_root/}"
+      dst_file="$dst_root/$rel"
+
+      if [ -e "$dst_file" ]; then
+        kept=$((kept + 1))
+      else
+        mkdir -p "$(dirname "$dst_file")" \
+          || { echo "  WARNING: mkdir for $dst_file failed — skipping."; continue; }
+        if cp "$src_file" "$dst_file"; then
+          added=$((added + 1))
+        else
+          echo "  WARNING: cp $src_file → $dst_file failed — skipping."
+        fi
+      fi
+    done < <(find "$src_root" -type f -print0)
+
+    echo "  Kept current: $kept, Added new: $added"
+  }
+  prefer_current_copy "$RESTORE_DIR/agent/test" /agent/test
 
   # ── Phase 4a: git-bundle delta apply (per-file, no commits) ─────────────────
   echo ""
@@ -273,11 +366,16 @@ if [ $TAIL_ONLY -eq 0 ]; then
 
       # Filter SKIPPED_LOG to tracked + divergent files. Untracked files are
       # logged for manual review (no git history to 3-way merge against).
+      # Protected paths are never patched.
       PATHSPECS=()
       while IFS= read -r dst_file; do
         rel="${dst_file#/agent/}"
         src_file="$RESTORE_DIR/agent/$rel"
         [ -f "$src_file" ] || continue
+        if is_protected "$rel"; then
+          echo "  PROTECTED: $rel — skipping (never overwrite)"
+          continue
+        fi
         diff -q "$src_file" "$dst_file" > /dev/null 2>&1 && continue
         if ! git -C /agent ls-files --error-unmatch -- "$rel" >/dev/null 2>&1; then
           printf '%s\n' "$dst_file" >> "$UNTRACKED_LOG"

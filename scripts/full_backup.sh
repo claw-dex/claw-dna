@@ -44,7 +44,11 @@ zip_dir() {
   zip -r "$STAGING/${name}.zip" "$src" \
     --exclude "*.lock" \
     --exclude "*/__pycache__/*" \
-    --exclude "*/.git/*"
+    --exclude "*/.pytest_cache/*" \
+    --exclude "*/.git/*" \
+    --exclude "/agent/scripts/full_backup.sh" \
+    --exclude "/agent/scripts/full_restore.sh" \
+    --exclude "/agent/skills/full-backup-and-migrate/*"
 }
 
 # /agent/workspace/, /agent/web/, and /home/agent/ can contain cloned repos
@@ -71,6 +75,10 @@ zip_dir          prompts   /agent/prompts
 zip_dir          scripts   /agent/scripts
 zip_dir          skills    /agent/skills
 zip_dir          services  /agent/services
+# Tests get their own archive. Restore uses "prefer-current" semantics for
+# this tree (existing test files on the target are kept), so the test.zip
+# only seeds new test files on a fresh container.
+zip_dir          test      /agent/test
 
 # Repo-root agent-modifiable files (constitution permits: /agent/*.py,
 # AGENTS.md, pyproject.toml, .streamlit/config.toml). Forbidden-to-modify
@@ -84,8 +92,7 @@ for p in \
   /agent/AGENTS.md \
   /agent/pyproject.toml \
   /agent/uv.lock \
-  /agent/.streamlit \
-  /agent/test
+  /agent/.streamlit
 do
   [ -e "$p" ] && ROOT_PARTS+=("$p")
 done
@@ -94,7 +101,6 @@ if [ ${#ROOT_PARTS[@]} -gt 0 ]; then
   zip -r "$STAGING/root_files.zip" \
     "${ROOT_PARTS[@]}" \
     --exclude "*/__pycache__/*" \
-    --exclude "*/.pytest_cache/*" \
     --exclude "*/.git/*"
 else
   echo "  WARNING: none of the expected root files exist — skipping root_files.zip"
@@ -175,6 +181,7 @@ rmdir "$STAGING"
 echo "[3/4] Creating final archive: $FINAL_ZIP"
 cd "$BACKUP_DIR"
 ARCHIVE_PARTS=(memory.zip messages.zip web.zip workspace.zip app.zip prompts.zip scripts.zip skills.zip services.zip home_agent.zip)
+[ -f test.zip ] && ARCHIVE_PARTS+=(test.zip)
 [ -f root_files.zip ] && ARCHIVE_PARTS+=(root_files.zip)
 [ -f git.zip ] && ARCHIVE_PARTS+=(git.zip)
 [ -f caddy_config.json ] && ARCHIVE_PARTS+=(caddy_config.json)
@@ -193,6 +200,7 @@ rm -f \
   "$BACKUP_DIR/skills.zip" \
   "$BACKUP_DIR/services.zip" \
   "$BACKUP_DIR/home_agent.zip" \
+  "$BACKUP_DIR/test.zip" \
   "$BACKUP_DIR/root_files.zip" \
   "$BACKUP_DIR/caddy_config.json" \
   "$BACKUP_DIR/git.zip" \
