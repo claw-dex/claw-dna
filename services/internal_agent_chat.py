@@ -77,7 +77,6 @@ from shared import (
     write_to_outbox,
 )
 
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -95,32 +94,40 @@ if TYPE_CHECKING:
     )
 
 
-_SDK_IMPORT_CACHE: "SimpleNamespace | None" = None
+_SDK_IMPORT_CACHE: tuple | None = None
 
 
-def _import_claude_sdk() -> "SimpleNamespace":
+def _import_claude_sdk():
     """Lazy-load claude_agent_sdk (~550 ms import) on first real SDK call.
 
-    Returns a SimpleNamespace exposing the SDK symbols by attribute. Using
-    attribute access (sdk.ClaudeSDKClient) instead of positional unpacking
-    keeps call sites self-documenting and prevents silent breakage when the
-    set of exports changes. Depends on `from __future__ import annotations`
-    at the top of this module for the SDK-typed annotations to remain
-    string-form and not require the SDK at import time.
+    Result is cached in a module-level variable so repeated calls within the
+    same process pay no import overhead after the first invocation.
     """
     global _SDK_IMPORT_CACHE
     if _SDK_IMPORT_CACHE is not None:
         return _SDK_IMPORT_CACHE
-    import claude_agent_sdk as _m
+    from claude_agent_sdk import (
+        AssistantMessage,
+        ClaudeAgentOptions,
+        ClaudeSDKClient,
+        ResultMessage,
+        TextBlock,
+        ThinkingBlock,
+        ToolUseBlock,
+        create_sdk_mcp_server,
+        tool,
+    )
 
-    _SDK_IMPORT_CACHE = SimpleNamespace(
-        AssistantMessage=_m.AssistantMessage,
-        ClaudeAgentOptions=_m.ClaudeAgentOptions,
-        ClaudeSDKClient=_m.ClaudeSDKClient,
-        ResultMessage=_m.ResultMessage,
-        TextBlock=_m.TextBlock,
-        create_sdk_mcp_server=_m.create_sdk_mcp_server,
-        tool=_m.tool,
+    _SDK_IMPORT_CACHE = (
+        AssistantMessage,
+        ClaudeAgentOptions,
+        ClaudeSDKClient,
+        ResultMessage,
+        TextBlock,
+        ThinkingBlock,
+        ToolUseBlock,
+        create_sdk_mcp_server,
+        tool,
     )
     return _SDK_IMPORT_CACHE
 
@@ -860,10 +867,10 @@ def _build_send_reply_server(session_name: str, cfg: dict):
     when each is appropriate. The handler closes over `session_name` so
     self-talk and message_id lookups resolve against the right agent.
     """
-    sdk = _import_claude_sdk()
+    _, _, _, _, _, _, _, create_sdk_mcp_server, tool = _import_claude_sdk()
     description = _build_tool_description(cfg)
     handler = _build_send_reply_handler(session_name, cfg)
-    decorated = sdk.tool(
+    decorated = tool(
         SEND_REPLY_TOOL,
         description,
         {
@@ -874,7 +881,7 @@ def _build_send_reply_server(session_name: str, cfg: dict):
             "priority": int,
         },
     )(handler)
-    return sdk.create_sdk_mcp_server(ROUTING_MCP_SERVER, tools=[decorated])
+    return create_sdk_mcp_server(ROUTING_MCP_SERVER, tools=[decorated])
 
 
 # ---------------------------------------------------------------------------
@@ -1001,7 +1008,7 @@ class InternalAgentSession:
         #   3. an optional `model` override (haiku/sonnet/opus, or a full
         #      model id) — passed through to the SDK, which handles alias
         #      → id resolution. Absent or blank → SDK default.
-        sdk = _import_claude_sdk()
+        _, ClaudeAgentOptions, ClaudeSDKClient, _, _, _, _, _, _ = _import_claude_sdk()
         custom = self.cfg.get("system_prompt") or ""
         if not isinstance(custom, str):
             custom = ""
@@ -1012,7 +1019,7 @@ class InternalAgentSession:
             else None
         )
         routing_server = _build_send_reply_server(self.name, self.cfg)
-        return sdk.ClaudeAgentOptions(
+        return ClaudeAgentOptions(
             system_prompt=_build_system_prompt(self._chat_history, custom),
             model=model,
             permission_mode="bypassPermissions",
@@ -1044,8 +1051,8 @@ class InternalAgentSession:
 
     async def _connect_sdk(self) -> None:
         options = self._build_options()
-        sdk = _import_claude_sdk()
-        self._sdk = sdk.ClaudeSDKClient(options)
+        _, _, ClaudeSDKClient, _, _, _, _, _, _ = _import_claude_sdk()
+        self._sdk = ClaudeSDKClient(options)
         await self._sdk.connect()
         log.info("[%s] connected (resume=%s)", self.name, self._session_id or "<new>")
 
@@ -1323,10 +1330,9 @@ class InternalAgentSession:
         the assistant text accumulated so far — even on error, it carries
         any partial output up to the failure point.
         """
-        _sdk_mod = _import_claude_sdk()
-        AssistantMessage = _sdk_mod.AssistantMessage
-        ResultMessage = _sdk_mod.ResultMessage
-        TextBlock = _sdk_mod.TextBlock
+        AssistantMessage, _, _, ResultMessage, TextBlock, _, _, _, _ = (
+            _import_claude_sdk()
+        )
 
         chunk_q: queue.Queue = queue.Queue()
         done = asyncio.Event()
@@ -1857,6 +1863,11 @@ class Fleet:
         # Schema: {name: {"count": int, "next_try": float (unix timestamp)}}
         self._start_failures: dict = {}
 
+    def _session_start_backoff_s(self, name: str) -> float:
+        """Compute the backoff delay (seconds) for the *next* retry of `name`."""
+        count = self._start_failures.get(name, {}).get("count", 0)
+        return min(START_BACKOFF_BASE_S * (2**count), START_BACKOFF_MAX_S)
+
     def reconcile(self) -> None:
         agents = _load_agents()
         wanted = _internal_agents(agents)
@@ -1887,13 +1898,13 @@ class Fleet:
 
             # Honour exponential backoff after previous start failures.
             failure_rec = self._start_failures.get(name)
-            now = time.time()
-            if failure_rec and now < failure_rec["next_try"]:
+            if failure_rec and time.time() < failure_rec["next_try"]:
+                remaining = failure_rec["next_try"] - time.time()
                 log.debug(
                     "Skipping start for %s — backing off (%.0fs remaining, "
                     "failure #%d)",
                     name,
-                    failure_rec["next_try"] - now,
+                    remaining,
                     failure_rec["count"],
                 )
                 continue
@@ -1907,15 +1918,13 @@ class Fleet:
                 self._start_failures.pop(name, None)
             except Exception as exc:
                 # Record the failure and compute the next retry window.
-                prev = self._start_failures.get(name, {"count": 0})
-                new_count = prev["count"] + 1
-                delay = min(
-                    START_BACKOFF_BASE_S * (2 ** (new_count - 1)),
-                    START_BACKOFF_MAX_S,
-                )
+                # `_session_start_backoff_s` reads the *current* failure count,
+                # so call it before bumping the counter.
+                delay = self._session_start_backoff_s(name)
+                new_count = self._start_failures.get(name, {}).get("count", 0) + 1
                 self._start_failures[name] = {
                     "count": new_count,
-                    "next_try": now + delay,
+                    "next_try": time.time() + delay,
                 }
                 log.error(
                     "Failed to start %s (attempt #%d, retrying in %.0fs): %s",

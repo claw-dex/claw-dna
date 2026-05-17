@@ -7,7 +7,7 @@ gained, cycle throughput, goal success rate, and category balance.
 
 Usage:
     uv run python scripts/milestone_report.py              # auto-detect current cycle
-    uv run python scripts/milestone_report.py --cycle 50  # report for cycle 50
+    uv run python scripts/milestone_report.py --cycle 101  # report for cycle 101
     uv run python scripts/milestone_report.py --save      # write to workspace/
     uv run python scripts/milestone_report.py --json      # machine-readable output
     uv run python scripts/milestone_report.py --list      # show all milestone cycles

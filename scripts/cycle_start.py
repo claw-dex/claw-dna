@@ -214,6 +214,72 @@ def _auto_archive_journal_inlined(
     return journal, 0, len(existing_list)  # rollback on failure
 
 
+def _auto_archive_cycles_inlined(
+    cycles: list,
+    min_keep: int = 100,
+    min_cycle_age: int = 100,
+) -> tuple:
+    """Archive old cycle records in-process (no subprocess).
+
+    Archives only entries that satisfy BOTH conditions:
+      - cycle_number is more than min_cycle_age cycles in the past
+        (relative to the newest cycle), AND
+      - cycle_status != "in_progress" (never orphan a live cycle).
+    Always keeps at least min_keep entries in the active cycles list.
+
+    Returns (cycles_reloaded, n_archived, archived_total) tuple.
+    """
+    CYCLES_PATH = MEMORY / "cycles.json"
+    ARCHIVE_PATH = MEMORY / "cycles_archive.json"
+    entries = sorted(cycles, key=lambda e: e.get("cycle_number", 0))
+    total = len(entries)
+    if total <= min_keep:
+        existing = load_json(ARCHIVE_PATH)
+        existing_list = existing if isinstance(existing, list) else []
+        return cycles, 0, len(existing_list)
+
+    current_cycle = max((e.get("cycle_number", 0) or 0) for e in entries)
+
+    def _is_archivable(e: dict) -> bool:
+        if e.get("cycle_status") == "in_progress":
+            return False
+        cyc = e.get("cycle_number", 0) or 0
+        return current_cycle - cyc > min_cycle_age
+
+    # Walk oldest-first, archiving while we'd still leave at least min_keep behind.
+    archivable_limit = total - min_keep
+    archive_cycles = set()
+    for i, e in enumerate(entries):
+        if i >= archivable_limit:
+            break
+        if _is_archivable(e):
+            archive_cycles.add(e.get("cycle_number"))
+
+    if not archive_cycles:
+        existing = load_json(ARCHIVE_PATH)
+        existing_list = existing if isinstance(existing, list) else []
+        return cycles, 0, len(existing_list)
+
+    to_archive = [e for e in entries if e.get("cycle_number") in archive_cycles]
+    to_keep = [e for e in entries if e.get("cycle_number") not in archive_cycles]
+    # Merge with existing archive (deduplicate by cycle number).
+    from scripts.memory_repair import migrate_cycles_list
+
+    existing = load_json(ARCHIVE_PATH)
+    existing_list = existing if isinstance(existing, list) else []
+    migrate_cycles_list(existing_list)
+    existing_cycles = {e.get("cycle_number") for e in existing_list}
+    new_entries = [
+        e for e in to_archive if e.get("cycle_number") not in existing_cycles
+    ]
+    merged = sorted(existing_list + new_entries, key=lambda e: e.get("cycle_number", 0))
+    ok_archive = _write_safe(ARCHIVE_PATH, merged)
+    ok_cycles = _write_safe(CYCLES_PATH, to_keep)
+    if ok_archive and ok_cycles:
+        return to_keep, len(new_entries), len(merged)
+    return cycles, 0, len(existing_list)  # rollback on failure
+
+
 # ── Orphaned Cycle Recovery ─────────────────────────────────────────────────────
 
 
@@ -1056,6 +1122,27 @@ def print_full(
         except Exception as e:
             print(
                 f"  ⚠  journal.json has {len(journal)} entries — auto-archive error: {e}"
+            )
+
+    # ── Cycles Auto-Archive ─────────────────────────────────────────
+    # Archive cycle records >100 cycles in the past, keeping at least 100
+    # in cycles.json. Live (in_progress) cycles are never archived.
+    AUTO_ARCHIVE_CYCLES_THRESHOLD = 100
+    if len(cycles) > AUTO_ARCHIVE_CYCLES_THRESHOLD:
+        try:
+            cycles_reloaded, n_archived, archived_after = _auto_archive_cycles_inlined(
+                cycles
+            )
+            if n_archived > 0:
+                print(
+                    f"  ✓  auto-archived {n_archived} old cycles → {len(cycles_reloaded)} active / {archived_after} archived"
+                )
+            # Use the post-archive list for downstream rendering so the
+            # briefing reflects the same data that's now on disk.
+            cycles = cycles_reloaded
+        except Exception as e:
+            print(
+                f"  ⚠  cycles.json has {len(cycles)} entries — auto-archive error: {e}"
             )
 
     # ── Backup Status ─────────────────────────────────────────────

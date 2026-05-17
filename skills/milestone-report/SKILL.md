@@ -1,13 +1,13 @@
 ---
 name: milestone-report
-description: Generate a narrative milestone summary at significant cycle numbers (every 25 cycles). Reports scripts added, capabilities gained, cycle throughput, goal success rate, and category balance. Use when the agent reaches a milestone cycle, to produce a progress report to save to the workspace (--save), or to list all previous milestones (--list). Example: --cycle 100 --save to generate and persist the cycle-100 report.
+description: Generate a narrative milestone summary at significant cycle numbers (every 100 cycles). Reports scripts added, capabilities gained, cycle throughput, goal success rate, and category balance. Use when the agent reaches a milestone cycle, to produce a progress report to save to the workspace (--save), or to list all previous milestones (--list). Example: --cycle 101 --save to generate and persist the cycle-101 report.
 ---
 
 # milestone-report
 
 **Path:** `scripts/milestone_report.py`
 
-Generates a narrative progress report covering scripts added, capabilities gained, throughput, goal success rate, and category balance. Designed for milestone cycles (every 25 cycles).
+Generates a narrative progress report covering scripts added, capabilities gained, throughput, goal success rate, and category balance. Designed for milestone cycles (every 100 cycles).
 
 ## Arguments
 
@@ -25,11 +25,11 @@ Generates a narrative progress report covering scripts added, capabilities gaine
 # Generate report for current cycle
 uv run python scripts/milestone_report.py
 
-# Generate the cycle-100 milestone report
-uv run python scripts/milestone_report.py --cycle 100
+# Generate the cycle-101 milestone report
+uv run python scripts/milestone_report.py --cycle 101
 
 # Generate and save it to workspace/
-uv run python scripts/milestone_report.py --cycle 100 --save
+uv run python scripts/milestone_report.py --cycle 101 --save
 
 # List all past milestones
 uv run python scripts/milestone_report.py --list

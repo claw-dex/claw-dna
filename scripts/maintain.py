@@ -30,12 +30,16 @@ WORKSPACE_DIR = Path("/agent/workspace")
 SCRIPTS_DIR = Path("/agent/scripts")
 JOURNAL_PATH = MEMORY_DIR / "journal.json"
 JOURNAL_ARCHIVE = MEMORY_DIR / "journal_archive.json"
+CYCLES_PATH = MEMORY_DIR / "cycles.json"
+CYCLES_ARCHIVE = MEMORY_DIR / "cycles_archive.json"
 LOGS_DIR = MEMORY_DIR / "logs"
 
 # Thresholds
 JOURNAL_KEEP_ENTRIES = 20
+CYCLES_KEEP_ENTRIES = 100
 LOG_KEEP_CYCLES = 50
 JOURNAL_SIZE_WARN_KB = 30
+CYCLES_SIZE_WARN_KB = 100
 MEMORY_SIZE_WARN_KB = 100
 HEARTBEAT_STALE_MINUTES = 15
 
@@ -165,6 +169,56 @@ def check_journal_size():
         results.append({"status": "ok", "msg": "size within limits"})
 
     return {"name": "journal_size", "results": results}
+
+
+def check_cycles_size():
+    """Check if cycles.json needs archival."""
+    if not CYCLES_PATH.exists():
+        return {
+            "name": "cycles_size",
+            "results": [{"status": "error", "msg": "cycles.json missing"}],
+        }
+
+    try:
+        content = CYCLES_PATH.read_text()
+        data = json.loads(content)
+    except (json.JSONDecodeError, OSError) as e:
+        return {
+            "name": "cycles_size",
+            "results": [{"status": "error", "msg": f"invalid JSON: {e}"}],
+        }
+
+    if not isinstance(data, list):
+        return {
+            "name": "cycles_size",
+            "results": [{"status": "error", "msg": "cycles.json is not a list"}],
+        }
+
+    size_kb = len(content.encode()) / 1024
+    entry_count = len(data)
+
+    results = []
+    results.append({"status": "info", "msg": f"{size_kb:.1f}KB, {entry_count} entries"})
+
+    if entry_count > CYCLES_KEEP_ENTRIES + 20:
+        results.append(
+            {
+                "status": "action",
+                "msg": f"{entry_count - CYCLES_KEEP_ENTRIES} entries can be archived (keeping {CYCLES_KEEP_ENTRIES})",
+                "fix": "cycles_archive",
+            }
+        )
+    elif size_kb > CYCLES_SIZE_WARN_KB:
+        results.append(
+            {
+                "status": "warning",
+                "msg": f"cycles.json is {size_kb:.0f}KB (threshold: {CYCLES_SIZE_WARN_KB}KB)",
+            }
+        )
+    else:
+        results.append({"status": "ok", "msg": "size within limits"})
+
+    return {"name": "cycles_size", "results": results}
 
 
 def check_log_files():
@@ -337,6 +391,15 @@ def apply_fix(fix_name):
         except Exception as e:
             return f"journal_archive failed: {e}"
 
+    elif fix_name == "cycles_archive":
+        try:
+            from scripts.cycles_archive import cmd_archive as cycles_cmd_archive
+
+            cycles_cmd_archive(keep=CYCLES_KEEP_ENTRIES)
+            return "archived"
+        except Exception as e:
+            return f"cycles_archive failed: {e}"
+
     elif fix_name == "log_cleanup":
         script = SCRIPTS_DIR / "log_cleanup.sh"
         if script.exists():
@@ -416,6 +479,7 @@ def main():
     checks = [
         ("memory_integrity", check_memory_integrity),
         ("journal_size", check_journal_size),
+        ("cycles_size", check_cycles_size),
         ("log_files", check_log_files),
         ("cycle_prompt_logs", check_cycle_prompt_logs),
         ("stale_processes", check_stale_processes),
@@ -427,7 +491,7 @@ def main():
         if not checks:
             print(f"Unknown check: {specific}")
             print(
-                f"Available: memory_integrity, journal_size, log_files, cycle_prompt_logs, stale_processes, disk_usage"
+                f"Available: memory_integrity, journal_size, cycles_size, log_files, cycle_prompt_logs, stale_processes, disk_usage"
             )
             sys.exit(1)
 

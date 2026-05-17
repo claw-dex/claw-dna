@@ -1757,3 +1757,297 @@ def test_audit_log_is_global_and_carries_agent_field(patch_iac_paths):
     assert [e["agent"] for e in _read_audit_log(iac, "beta")] == ["beta"]
     # Helper without filter returns both.
     assert len(_read_audit_log(iac)) == 2
+
+
+# ---------------------------------------------------------------------------
+# _import_claude_sdk — tuple shape & positional order
+#
+# Regression coverage for a real bug: a stale call site did
+# `sdk = _import_claude_sdk(); sdk.AssistantMessage`, treating the return
+# value like a module/namespace. `_import_claude_sdk` actually returns a
+# 9-tuple, so every site must unpack positionally. If the export list or
+# order ever changes, these tests fail loudly instead of silently binding
+# the wrong symbol at every call site.
+# ---------------------------------------------------------------------------
+
+
+def _install_fake_claude_sdk(monkeypatch):
+    """Register a stub ``claude_agent_sdk`` module in sys.modules and clear
+    the lazy cache so the next ``_import_claude_sdk()`` picks up the stub.
+    """
+    import sys
+    import types
+
+    import internal_agent_chat as iac
+
+    fake = types.ModuleType("claude_agent_sdk")
+    for sym in (
+        "AssistantMessage",
+        "ClaudeAgentOptions",
+        "ClaudeSDKClient",
+        "ResultMessage",
+        "TextBlock",
+        "ThinkingBlock",
+        "ToolUseBlock",
+        "create_sdk_mcp_server",
+        "tool",
+    ):
+        # Use distinct sentinel objects so positional-order tests can
+        # assert identity rather than just non-None.
+        setattr(fake, sym, type(sym, (), {"_stub_name": sym}))
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake)
+    monkeypatch.setattr(iac, "_SDK_IMPORT_CACHE", None)
+    return fake
+
+
+def test_import_claude_sdk_returns_nine_tuple_in_fixed_order(monkeypatch):
+    """The lazy cache must yield exactly these symbols in this order;
+    every call site in internal_agent_chat.py depends on it.
+    """
+    fake = _install_fake_claude_sdk(monkeypatch)
+    import internal_agent_chat as iac
+
+    result = iac._import_claude_sdk()
+    assert isinstance(result, tuple)
+    assert len(result) == 9
+    assert result == (
+        fake.AssistantMessage,
+        fake.ClaudeAgentOptions,
+        fake.ClaudeSDKClient,
+        fake.ResultMessage,
+        fake.TextBlock,
+        fake.ThinkingBlock,
+        fake.ToolUseBlock,
+        fake.create_sdk_mcp_server,
+        fake.tool,
+    )
+
+
+def test_import_claude_sdk_caches_result(monkeypatch):
+    """Second call returns the *same* tuple object — the SDK import is
+    paid for only once per process.
+    """
+    _install_fake_claude_sdk(monkeypatch)
+    import internal_agent_chat as iac
+
+    first = iac._import_claude_sdk()
+    second = iac._import_claude_sdk()
+    assert first is second
+
+
+def test_invoke_sdk_once_unpack_matches_import_order(monkeypatch):
+    """Regression: ``_invoke_sdk_once`` reaches into positions 0/3/4 of
+    the SDK tuple for AssistantMessage / ResultMessage / TextBlock. If
+    those positions ever drift the chat loop silently breaks. This pins
+    the contract by reading the actual unpack the source code performs.
+    """
+    fake = _install_fake_claude_sdk(monkeypatch)
+    import internal_agent_chat as iac
+
+    (
+        assistant_msg,
+        _,
+        _,
+        result_msg,
+        text_block,
+        _,
+        _,
+        _,
+        _,
+    ) = iac._import_claude_sdk()
+    assert assistant_msg is fake.AssistantMessage
+    assert result_msg is fake.ResultMessage
+    assert text_block is fake.TextBlock
+
+
+# ---------------------------------------------------------------------------
+# Fleet._session_start_backoff_s — exponential growth with cap
+# ---------------------------------------------------------------------------
+
+
+def test_session_start_backoff_base_when_no_history(patch_iac_paths):
+    iac = patch_iac_paths
+    fleet = iac.Fleet()
+    # No prior failure → 2**0 = 1× base.
+    assert fleet._session_start_backoff_s("nobody") == iac.START_BACKOFF_BASE_S
+
+
+def test_session_start_backoff_doubles_with_count(patch_iac_paths):
+    iac = patch_iac_paths
+    fleet = iac.Fleet()
+    fleet._start_failures["x"] = {"count": 3, "next_try": 0.0}
+    # 2**3 = 8× base, well below the cap.
+    assert fleet._session_start_backoff_s("x") == iac.START_BACKOFF_BASE_S * 8
+
+
+def test_session_start_backoff_clamps_at_cap(patch_iac_paths):
+    iac = patch_iac_paths
+    fleet = iac.Fleet()
+    fleet._start_failures["x"] = {"count": 999, "next_try": 0.0}
+    assert fleet._session_start_backoff_s("x") == iac.START_BACKOFF_MAX_S
+
+
+# ---------------------------------------------------------------------------
+# Fleet.reconcile — start-failure backoff bookkeeping
+# ---------------------------------------------------------------------------
+
+
+def _install_failing_session(monkeypatch, iac, *, fail_exc=None):
+    """Replace ``InternalAgentSession`` with a stub whose ``start()`` raises.
+    Returns a list that is appended to on every constructor call so tests
+    can assert how many starts were attempted.
+    """
+    calls: list = []
+    exc = fail_exc or RuntimeError("boom")
+
+    class _BoomSession:
+        def __init__(self, name, cfg):
+            self.name = name
+            self.cfg = cfg
+            calls.append(name)
+
+        def start(self):
+            raise exc
+
+        def stop(self):
+            pass
+
+        def is_alive(self):
+            return False
+
+    monkeypatch.setattr(iac, "InternalAgentSession", _BoomSession)
+    return calls
+
+
+def _capture_surface_error(monkeypatch, iac):
+    captured: list = []
+    monkeypatch.setattr(
+        iac,
+        "surface_error",
+        lambda comp, exc, context="": captured.append((comp, str(exc), context)),
+    )
+    return captured
+
+
+def test_reconcile_records_first_start_failure_and_surfaces_once(
+    patch_iac_paths, monkeypatch
+):
+    iac = patch_iac_paths
+    _install_failing_session(monkeypatch, iac)
+    surfaced = _capture_surface_error(monkeypatch, iac)
+    _seed_agents(iac, [{"type": "internal", "name": "a", "status": "online"}])
+    # Prevent mark_internal_agents_online from poking real disk paths.
+    monkeypatch.setattr(iac, "mark_internal_agents_online", lambda names: None)
+
+    fleet = iac.Fleet()
+    fleet.reconcile()
+
+    assert "a" in fleet._start_failures
+    rec = fleet._start_failures["a"]
+    assert rec["count"] == 1
+    assert rec["next_try"] > 0
+    # First failure surfaces; later sweeps must not (covered below).
+    assert len(surfaced) == 1
+    assert surfaced[0][2] == "start:a"
+
+
+def test_reconcile_subsequent_failures_do_not_spam_surface_error(
+    patch_iac_paths, monkeypatch
+):
+    """Regression: a persistently-failing agent must surface_error exactly
+    once, not on every sweep tick.
+    """
+    iac = patch_iac_paths
+    _install_failing_session(monkeypatch, iac)
+    surfaced = _capture_surface_error(monkeypatch, iac)
+    monkeypatch.setattr(iac, "mark_internal_agents_online", lambda names: None)
+    _seed_agents(iac, [{"type": "internal", "name": "a", "status": "online"}])
+
+    fleet = iac.Fleet()
+    fleet.reconcile()  # records first failure → surfaces
+    # Fast-forward the next_try window so reconcile actually retries.
+    fleet._start_failures["a"]["next_try"] = 0.0
+    fleet.reconcile()  # retries, fails again → must NOT surface
+    fleet._start_failures["a"]["next_try"] = 0.0
+    fleet.reconcile()
+
+    assert fleet._start_failures["a"]["count"] == 3
+    assert len(surfaced) == 1  # still just the first failure
+
+
+def test_reconcile_honours_backoff_window(patch_iac_paths, monkeypatch):
+    """Within the backoff window we must skip the agent entirely — no new
+    construction attempts, no new failure entries.
+    """
+    iac = patch_iac_paths
+    calls = _install_failing_session(monkeypatch, iac)
+    _capture_surface_error(monkeypatch, iac)
+    monkeypatch.setattr(iac, "mark_internal_agents_online", lambda names: None)
+    _seed_agents(iac, [{"type": "internal", "name": "a", "status": "online"}])
+
+    fleet = iac.Fleet()
+    fleet.reconcile()  # 1 construction attempt
+    assert len(calls) == 1
+    # next_try is in the future → second reconcile must short-circuit.
+    fleet.reconcile()
+    assert len(calls) == 1
+    # Count unchanged: we skipped, we didn't fail again.
+    assert fleet._start_failures["a"]["count"] == 1
+
+
+def test_reconcile_cleans_backoff_when_agent_removed_after_only_failures(
+    patch_iac_paths, monkeypatch
+):
+    """Regression: an agent that only ever failed to start (never landed
+    in ``_sessions``) and was then removed from agents.json must have its
+    backoff entry cleaned up. Otherwise the dict leaks forever.
+    """
+    iac = patch_iac_paths
+    _install_failing_session(monkeypatch, iac)
+    _capture_surface_error(monkeypatch, iac)
+    monkeypatch.setattr(iac, "mark_internal_agents_online", lambda names: None)
+    _seed_agents(iac, [{"type": "internal", "name": "a", "status": "online"}])
+
+    fleet = iac.Fleet()
+    fleet.reconcile()
+    assert "a" in fleet._start_failures
+    assert "a" not in fleet._sessions  # never landed in sessions
+
+    # Remove the agent from agents.json and reconcile again.
+    _seed_agents(iac, [])
+    fleet.reconcile()
+
+    assert "a" not in fleet._start_failures
+
+
+def test_reconcile_clears_backoff_on_successful_start(patch_iac_paths, monkeypatch):
+    """Once a previously-failing agent finally starts, its backoff entry
+    must be removed so a future failure starts from count=1 again.
+    """
+    iac = patch_iac_paths
+
+    class _OkSession:
+        def __init__(self, name, cfg):
+            self.name = name
+            self.cfg = cfg
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def is_alive(self):
+            return True
+
+    monkeypatch.setattr(iac, "InternalAgentSession", _OkSession)
+    monkeypatch.setattr(iac, "mark_internal_agents_online", lambda names: None)
+    _seed_agents(iac, [{"type": "internal", "name": "a", "status": "online"}])
+
+    fleet = iac.Fleet()
+    # Pre-seed a stale failure entry with an already-elapsed next_try.
+    fleet._start_failures["a"] = {"count": 2, "next_try": 0.0}
+    fleet.reconcile()
+
+    assert "a" in fleet._sessions
+    assert "a" not in fleet._start_failures

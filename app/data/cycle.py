@@ -11,20 +11,40 @@ import re
 import time
 from datetime import datetime, timezone
 
-from app.data._cache import _mfile_cache, _mmfile_cache, _register_cache
+from app.data._cache import _mmfile_cache, _register_cache
 from app.data._helpers import _read_json_safe
 from app.shared import MEMORY_DIR, LOGS_DIR, HISTORY_PATH
 
 
-@_mfile_cache(lambda: f"{MEMORY_DIR}/cycles.json", list)
-def load_cycles(data):
-    """Load cycles from cycles.json — mtime-cached."""
+@_mmfile_cache(
+    [
+        lambda: f"{MEMORY_DIR}/cycles.json",
+        lambda: f"{MEMORY_DIR}/cycles_archive.json",
+    ]
+)
+def load_cycles():
+    """Load cycles from cycles.json + cycles_archive.json — mtime-cached.
+
+    Merges active + archive, dedup by cycle_number (active takes precedence),
+    sorted by cycle_number ascending so downstream slicing (`[-30:]`, `[-10:]`)
+    keeps yielding the most recent entries.
+    """
     from scripts.memory_repair import migrate_cycles_list
 
-    if isinstance(data, list):
-        migrate_cycles_list(data)
-        return data
-    return []
+    active = _read_json_safe(f"{MEMORY_DIR}/cycles.json", [])
+    if not isinstance(active, list):
+        active = []
+    migrate_cycles_list(active)
+    archived = _read_json_safe(f"{MEMORY_DIR}/cycles_archive.json", [])
+    if not isinstance(archived, list):
+        archived = []
+    migrate_cycles_list(archived)
+    active_cycles = {e.get("cycle_number") for e in active}
+    merged = active + [
+        e for e in archived if e.get("cycle_number") not in active_cycles
+    ]
+    merged.sort(key=lambda e: e.get("cycle_number", 0))
+    return merged
 
 
 @_mmfile_cache([lambda: f"{MEMORY_DIR}/cycles.json"])
