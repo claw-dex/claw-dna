@@ -1,7 +1,7 @@
-"""Message loaders — inbox, inbox_history, outbox, outbox_history, history."""
+"""Message loaders — inbox, inbox_history, outbox, outbox_history."""
 
 from app.data._cache import _mfile_cache
-from app.shared import MESSAGES_DIR, HISTORY_PATH
+from app.shared import MESSAGES_DIR
 
 
 @_mfile_cache(lambda: f"{MESSAGES_DIR}/inbox.json", list)
@@ -32,10 +32,4 @@ def load_outbox_history(data):
     /agent/messages/ — outbox_history was previously under /agent/memory/
     but that placement was an outlier vs. the other messaging artifacts.
     """
-    return data
-
-
-@_mfile_cache(lambda: HISTORY_PATH, list)
-def load_history(data):
-    """Load command_history.json — mtime-cached, invalidates at user interaction rate."""
     return data

@@ -7,7 +7,7 @@ catching syntax errors, missing imports, and runtime exceptions that the
 
 Two checks are performed:
   1. server.py renders without exceptions.
-  2. commands_tab "Queue Command For Next Cycle" form accepts a submission
+  2. commands_tab form accepts a submission
      without exceptions, and the submitted content actually lands in
      messages/inbox.json. The check runs entirely against a tmp sandbox
      (app.shared paths are monkey-patched), so no cleanup is needed —
@@ -97,8 +97,8 @@ def _patch_agent_paths(sandbox: Path) -> None:
     shared.LOGS_DIR = f"{base}/memory/logs"
     shared.MESSAGES_DIR = f"{base}/messages"
     shared.SCRIPTS_DIR = f"{base}/scripts"
-    shared.HISTORY_PATH = f"{base}/memory/command_history.json"
     shared.GOALS_PATH = f"{base}/memory/goal.json"
+    shared.PORTAL_AUDIT_LOG_PATH = f"{base}/memory/logs/portal_commands.log"
     shared.ERROR_LOG_PATH = f"{base}/memory/server_errors.json"
     shared.PORTAL_CONFIG_PATH = f"{base}/memory/portal_config.json"
     # Redirect the unified chat-layout root so app.chat reads/writes
@@ -133,7 +133,6 @@ def _patch_agent_paths(sandbox: Path) -> None:
         f"{shared.MEMORY_DIR}/state.json": dict(shared.STATE_DEFAULTS),
         f"{shared.MEMORY_DIR}/cycles.json": [],
         shared.GOALS_PATH: [],
-        shared.HISTORY_PATH: [],
         shared.ERROR_LOG_PATH: [],
         f"{shared.MESSAGES_DIR}/inbox.json": [],
         f"{shared.MESSAGES_DIR}/outbox.json": [],

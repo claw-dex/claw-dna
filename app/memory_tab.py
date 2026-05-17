@@ -65,7 +65,7 @@ def render():
         load_goals,
         load_logs,
         load_log_detail,
-        load_history,
+        load_inbox_history,
         load_cycles,
         load_memory_files,
         read_memory_file,
@@ -80,12 +80,14 @@ def render():
     inbox_history_path = f"{MESSAGES_DIR}/inbox_history.json"
     outbox_history_path = f"{MESSAGES_DIR}/outbox_history.json"
     cycles_path = f"{MEMORY_DIR}/cycles.json"
+    cycles_archive_path = f"{MEMORY_DIR}/cycles_archive.json"
 
     journal_n = _json_count(journal_path)
     archive_n = _json_count(journal_archive_path)
     inbox_n = _json_count(inbox_history_path)
     outbox_n = _json_count(outbox_history_path)
     cycles_n = _json_count(cycles_path)
+    cycles_archive_n = _json_count(cycles_archive_path)
 
     st.subheader("Memory Overview")
     o1, o2, o3, o4, o5 = st.columns(5)
@@ -102,8 +104,8 @@ def render():
         st.metric("Outbox History", f"{outbox_n}")
         st.caption(_file_size(outbox_history_path))
     with o5:
-        st.metric("Cycles", f"{cycles_n}")
-        st.caption(_file_size(cycles_path))
+        st.metric("Cycles", f"{cycles_n + cycles_archive_n}")
+        st.caption(f"{cycles_n} active · {cycles_archive_n} archived")
 
     st.divider()
 
@@ -244,22 +246,28 @@ def render():
 
         st.divider()
 
-        # Command history
+        # Command history — sourced from inbox_history.json (archived inbox
+        # captures portal submissions plus Telegram / agent-forwarded inputs).
         st.subheader("Command History")
-        history = load_history() or []
+        history = load_inbox_history() or []
 
         if not history:
             st.caption("No command history yet.")
         else:
             type_icons = {"goal": "🎯", "message": "💬", "bash": "💻"}
             for cmd in reversed(history[-30:]):
+                if not isinstance(cmd, dict):
+                    continue
                 cmd_type = cmd.get("type", "?")
                 icon = type_icons.get(cmd_type, "•")
-                content = (cmd.get("content") or "")[:80]
-                cmd_result = cmd.get("result", "")
+                raw = cmd.get("content") or ""
+                if not isinstance(raw, str):
+                    raw = str(raw)
+                content = raw[:80]
+                source = cmd.get("source") or cmd.get("channel") or ""
                 ts = str(cmd.get("timestamp", ""))[:19].replace("T", " ")
                 st.markdown(f"{icon} **[{cmd_type}]** {content}")
-                st.caption(f"{cmd_result} | {ts}")
+                st.caption(f"{source} | {ts}" if source else ts)
 
         st.divider()
 

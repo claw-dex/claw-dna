@@ -180,7 +180,7 @@ locally-executed goals.
 
 ### Message Type (Inbox/Outbox)
 
-**Location:** `/agent/messages/inbox.json`, `/agent/messages/outbox.json`, `/agent/memory/command_history.json`
+**Location:** `/agent/messages/inbox.json`, `/agent/messages/outbox.json`, `/agent/messages/inbox_history.json`
 
 **Field:** `type`
 
@@ -509,7 +509,7 @@ Inbox items with `source: "internal_agent"` are stamped by `services/internal_ag
 | `status` | Bash Log | `running`, `exited`, `completed`, `failed` | `logs/bash-*.json` |
 | `status` | Dream Remark | `light_sleep_dreaming`, `deep_sleep` | `dream/remark.json` |
 | `cycle_type` | Cycle | `goal`, `evolve`, `self-heal`, `dream` | `cycles.json`, `journal.json` |
-| `type` | Inbox | `goal`, `message`, `bash` | `inbox.json`, `command_history.json` |
+| `type` | Inbox | `goal`, `message`, `bash` | `inbox.json`, `inbox_history.json` |
 | `type` | Outbox | `response`, `needs_human`, `error`, `info` | `outbox.json`, `messages/external/<name>/outbox.json` |
 | `type` | Forwarded Inbox (from external agent) | `agent_response`, `agent_needs_human`, `agent_error`, `agent_info` | `inbox.json` (with `source: "external_agent"`) |
 | `type` | Forwarded Inbox (from internal agent) | `agent_response`, `agent_needs_human`, `agent_error`, `agent_info` | `inbox.json` (with `source: "internal_agent"`) |

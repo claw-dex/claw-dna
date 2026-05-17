@@ -184,6 +184,9 @@ def _hit_to_dict(hit, rank: int) -> dict:
         else (lambda k, d=None: getattr(hit, k, d))
     )
     snippet = _clean_snippet(_g("snippet") or "")
+    metadata = _g("metadata") or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
     return {
         "rank": rank,
         "score": _g("score", 0.0),
@@ -191,6 +194,7 @@ def _hit_to_dict(hit, rank: int) -> dict:
         "snippet": snippet,
         "tags": list(_g("tags", []) or []),
         "frame_id": _g("frame_id"),
+        "metadata": dict(metadata),
     }
 
 

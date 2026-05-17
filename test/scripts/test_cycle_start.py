@@ -26,7 +26,9 @@ import cycle_start as cs
 def patched(monkeypatch, agent_root):
     monkeypatch.setattr(cs, "MEMORY", agent_root / "memory")
     monkeypatch.setattr(cs, "MESSAGES", agent_root / "messages")
-    monkeypatch.setattr(cs, "MV2_PATH", agent_root / "memory" / "long_term_memory.mv2")
+    monkeypatch.setattr(
+        cs, "LONG_TERM_MEMORY_MV2_PATH", agent_root / "memory" / "long_term_memory.mv2"
+    )
     monkeypatch.setattr(cs, "SCRIPTS", agent_root / "scripts")
     monkeypatch.setattr(cs, "DREAM_DIR", agent_root / "memory" / "dream")
     return agent_root

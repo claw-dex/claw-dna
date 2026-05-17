@@ -563,7 +563,6 @@ _BACKUP_FILES = [
     "goal.json",
     "journal.json",
     "server_errors.json",
-    "command_history.json",
     "bootstrap.json",
 ]
 _BACKUP_OPTIONAL = []

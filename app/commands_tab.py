@@ -39,7 +39,6 @@ def render():
         load_inbox_history,
         load_outbox,
         load_outbox_history,
-        load_history,
         queue_to_inbox,
         update_goal_status,
         archive_goals,
@@ -49,7 +48,7 @@ def render():
     )
 
     # ── Command form ──────────────────────────────────────────
-    st.subheader("Queue Command For Next Cycle")
+    st.subheader("Queue Command to Agent Inbox for Next Cycle")
     with st.form("command_form", clear_on_submit=True):
         cmd_type = st.selectbox("Type", ["goal", "message"])
         content = st.text_area(
@@ -92,29 +91,12 @@ def render():
             key="cmd_hist_limit",
             label_visibility="collapsed",
         )
-    cmd_history = load_history() or []
     inbox_hist = load_inbox_history() or []
     outbox_hist = load_outbox_history() or []
 
-    # Merge user commands and agent responses into a unified timeline.
-    # command_history.json tracks portal-queued commands; inbox_history.json
-    # is the archived inbox from cycle_close and captures items from all
-    # sources (portal, Telegram, etc). Dedupe by (timestamp, content) so
-    # portal-queued items aren't shown twice.
+    # inbox_history.json is the archived inbox from cycle_close and captures
+    # items from all sources (portal, Telegram, internal/external agents).
     events = []
-    seen_user_keys = set()
-    for cmd in cmd_history:
-        ts = cmd.get("timestamp", "")
-        content = cmd.get("content", "")
-        seen_user_keys.add((ts, content))
-        events.append(
-            {
-                "ts": ts,
-                "role": "user",
-                "type": cmd.get("type", "?"),
-                "content": content,
-            }
-        )
     for item in inbox_hist:
         ts = item.get("timestamp", "")
         raw_content = item.get("content", "")
@@ -129,8 +111,6 @@ def render():
                 content = json.dumps(raw_content, default=str)
             except Exception:
                 content = str(raw_content)
-        if (ts, content) in seen_user_keys:
-            continue
         events.append(
             {
                 "ts": ts,

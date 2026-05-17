@@ -154,7 +154,9 @@ CLAUDE_SYSTEM_PROMPT_MD = Path("/home/agent/claude-system-prompt.md")
 
 # --- Config ---
 SWEEP_SECONDS = 10
-TURN_TIMEOUT_SECONDS = 600  # safety cap on a single turn
+TURN_TIMEOUT_SECONDS = (
+    900  # safety cap on a single turn (15 min, aligned with heartbeat)
+)
 INBOX_HISTORY_MAX = 500
 
 # --- Session-start backoff ---

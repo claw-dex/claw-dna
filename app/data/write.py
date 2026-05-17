@@ -17,12 +17,22 @@ from app.shared import (
     MESSAGES_DIR,
     SCRIPTS_DIR,
     GOALS_PATH,
+    PORTAL_AUDIT_LOG_PATH,
     PORTAL_CONFIG_PATH,
     SCHEDULED_TASKS_PATH,
     _write_json_atomic,
-    _append_history,
     AtomicJSON,
 )
+
+
+def _append_portal_audit(entry: dict) -> None:
+    """Append one JSON line to the portal audit log. Best-effort; never raises."""
+    try:
+        os.makedirs(os.path.dirname(PORTAL_AUDIT_LOG_PATH), exist_ok=True)
+        with open(PORTAL_AUDIT_LOG_PATH, "a") as f:
+            f.write(json.dumps(entry, default=str) + "\n")
+    except OSError:
+        pass
 
 
 def save_portal_config(key: str, value):
@@ -33,7 +43,7 @@ def save_portal_config(key: str, value):
 
 
 def queue_to_inbox(content, cmd_type, timestamp, priority=3):
-    """Append a command to inbox.json and record in history.
+    """Append a command to inbox.json and write an audit-log line.
 
     Uses AtomicJSON for exclusive file locking to prevent race conditions
     when both the Streamlit UI and a heartbeat cycle access inbox.json.
@@ -49,12 +59,12 @@ def queue_to_inbox(content, cmd_type, timestamp, priority=3):
     }
     with AtomicJSON(inbox_path, default=[]) as inbox:
         inbox.append(body)
-    _append_history(
+    _append_portal_audit(
         {
-            "type": cmd_type,
-            "content": content,
             "timestamp": timestamp,
-            "result": "queued",
+            "type": cmd_type,
+            "priority": body["priority"],
+            "content": content,
         }
     )
     _cache_clear_all()

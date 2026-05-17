@@ -155,29 +155,6 @@ def summarize_server_errors(data) -> dict:
     }
 
 
-def summarize_command_history(data) -> dict:
-    items = data if isinstance(data, list) else []
-    by_type = Counter(c.get("type", "unknown") for c in items if isinstance(c, dict))
-    by_result = Counter(
-        c.get("result", "unknown") for c in items if isinstance(c, dict)
-    )
-    recent = []
-    for c in items[-3:]:
-        if not isinstance(c, dict):
-            continue
-        ctype = c.get("type", "?")
-        result = c.get("result", "?")
-        content = c.get("content") or c.get("command") or c.get("cmd") or ""
-        content = content.replace("\n", " ")[:80]
-        recent.append(f"[{ctype}/{result}] {content}")
-    return {
-        "total": len(items),
-        "by_type": dict(by_type),
-        "by_result": dict(by_result),
-        "recent": recent,
-    }
-
-
 def summarize_inbox(inbox_path: Path) -> dict:
     data = load_json(inbox_path)
     if data is None:
@@ -243,7 +220,6 @@ def main():
     capabilities = capabilities_raw if isinstance(capabilities_raw, list) else []
     notes_raw = load_json(MEMORY / "notes.json")
     server_errors_raw = load_json(MEMORY / "server_errors.json")
-    command_history_raw = load_json(MEMORY / "command_history.json")
 
     # Summarize
     s = summarize_state(state)
@@ -252,7 +228,6 @@ def main():
     f = summarize_failures(failures_raw)
     n = summarize_notes(notes_raw)
     se = summarize_server_errors(server_errors_raw)
-    ch = summarize_command_history(command_history_raw)
     portal = check_portal_health()
 
     if json_mode:
@@ -268,7 +243,6 @@ def main():
                     "failures": f,
                     "notes": n,
                     "server_errors": se,
-                    "command_history": ch,
                     "portal": portal,
                     "capabilities_count": len(capabilities),
                 },
@@ -375,11 +349,6 @@ def main():
         print(f"\n[SERVER ERRORS]  {se['total']} total")
         for r in se["recent"]:
             print(f"  - {r}")
-
-    # Command history
-    print(f"\n[COMMAND HISTORY]  {ch['total']} entries")
-    for r in ch["recent"]:
-        print(f"  - {r}")
 
     # Evolve recommendation
     cats = c.get("evolve_by_category", {})

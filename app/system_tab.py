@@ -356,7 +356,6 @@ _MEMORY_FILE_LABELS = {
     "outbox.json": ("Outbox", "Pending messages for the user"),
     "server_errors.json": ("Tab Errors", "Portal tab crash errors"),
     "bootstrap.json": ("Bootstrap Config", "First-cycle initialization data (stable)"),
-    "command_history.json": ("Command History", "Agent Console command history"),
     "link_cache.json": ("Link Cache", "URL health check cache (link-checker.py)"),
 }
 
@@ -369,7 +368,6 @@ _MEMORY_AGE_CRIT_HOURS = 72  # critical if not updated in this many hours
 _MEMORY_AGE_EXEMPT = {
     "bootstrap.json",
     "link_cache.json",
-    "command_history.json",
 }
 
 

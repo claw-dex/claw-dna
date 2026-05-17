@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 from app.data._cache import _mmfile_cache, _register_cache
 from app.data._helpers import _read_json_safe
-from app.shared import MEMORY_DIR, LOGS_DIR, HISTORY_PATH
+from app.shared import MEMORY_DIR, LOGS_DIR, MESSAGES_DIR
 
 
 @_mmfile_cache(
@@ -269,30 +269,39 @@ def load_balance():
     return result
 
 
-@_mmfile_cache([lambda: HISTORY_PATH, lambda: f"{MEMORY_DIR}/cycles.json"])
+@_mmfile_cache(
+    [lambda: f"{MESSAGES_DIR}/inbox_history.json", lambda: f"{MEMORY_DIR}/cycles.json"]
+)
 def load_activity():
-    """Merge command history + cycle events into a unified activity feed (newest 50).
+    """Merge inbox history + cycle events into a unified activity feed (newest 50).
 
-    Uses @_mmfile_cache keyed on command_history.json + cycles.json mtimes. Previously
-    used hand-rolled _ACTIVITY_CACHE; now auto-registered in _MFILE_CACHES for auto-clear.
-    TTL=5s caused full re-merge every 5s — ~0 re-merges between cycle boundaries now.
+    Sourced from inbox_history.json (archived inbox items from cycle_close) so
+    portal-queued commands, Telegram inputs, and any other inbox producers all
+    show up in the feed.
     """
-    from app.data.message import load_history
+    from app.data.message import load_inbox_history
 
     events = []
     type_map = {"goal": "goal", "message": "message", "bash": "bash_cmd"}
-    history = load_history()
-    for h in history:
+    for h in load_inbox_history():
+        if not isinstance(h, dict):
+            continue
         ts = h.get("timestamp")
         if not ts:
             continue
         etype = type_map.get(h.get("type"), "bash_cmd")
+        content = h.get("content") or ""
+        if not isinstance(content, str):
+            try:
+                content = json.dumps(content, default=str)
+            except Exception:
+                content = str(content)
         events.append(
             {
                 "time": ts,
                 "type": etype,
-                "summary": (h.get("content") or "")[:120],
-                "detail": h.get("result", ""),
+                "summary": content[:120],
+                "detail": h.get("source") or h.get("channel") or "",
             }
         )
     cycles = load_cycles()

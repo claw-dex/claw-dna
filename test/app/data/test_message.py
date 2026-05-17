@@ -34,9 +34,6 @@ def patched_paths(tmp_path, monkeypatch):
     mem.mkdir()
     msgs.mkdir()
     monkeypatch.setattr("app.data.message.MESSAGES_DIR", str(msgs))
-    monkeypatch.setattr(
-        "app.data.message.HISTORY_PATH", str(mem / "command_history.json")
-    )
     return {"memory": mem, "messages": msgs}
 
 
@@ -100,17 +97,6 @@ def test_load_outbox_history(patched_paths):
     p = patched_paths["messages"] / "outbox_history.json"
     p.write_text(json.dumps([{"sent": True}]))
     assert message.load_outbox_history() == [{"sent": True}]
-
-
-def test_load_history_reads_file(patched_paths):
-    p = patched_paths["memory"] / "command_history.json"
-    p.write_text(json.dumps([{"type": "bash", "content": "ls"}]))
-    out = message.load_history()
-    assert out == [{"type": "bash", "content": "ls"}]
-
-
-def test_load_history_missing_file_default(patched_paths):
-    assert message.load_history() == []
 
 
 def test_loaders_cache_between_calls(patched_paths):

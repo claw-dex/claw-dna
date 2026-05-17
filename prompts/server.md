@@ -144,7 +144,7 @@ Defined in `app/shared.py`:
 | `MESSAGES_DIR`         | `/agent/messages`                    | Inbox/outbox message queues      |
 | `SCRIPTS_DIR`          | `/agent/scripts`                     | Utility scripts (.py, .sh)       |
 | `GOALS_PATH`           | `/agent/memory/goal.json`            | Persistent goal tracker          |
-| `HISTORY_PATH`         | `/agent/memory/command_history.json` | Command history (last 50)        |
+| `PORTAL_AUDIT_LOG_PATH`| `/agent/memory/logs/portal_commands.log` | Append-only JSONL audit log of portal form submissions |
 | `ERROR_LOG_PATH`       | `/agent/memory/server_errors.json`   | Server error log (last 20)       |
 | `CHAT_HISTORY_PATH`    | `/agent/memory/chat/main/chat_history.json` | Portal chat history (max 200) — internal agents use the same `/agent/memory/chat/<name>/` layout |
 | `PORTAL_CONFIG_PATH`   | `/agent/memory/portal_config.json`   | Portal settings (timezone, etc.) |
@@ -183,7 +183,6 @@ Most data loading uses **mtime-based caching** (re-reads only when the source fi
 | `load_inbox()` | `message.py` | `inbox.json` |
 | `load_outbox()` | `message.py` | `outbox.json` |
 | `load_outbox_history()` | `message.py` | `outbox_history.json` |
-| `load_history()` | `message.py` | `command_history.json` |
 | `load_journal(limit, offset)` | `journal.py` | `journal.json` + `journal_archive.json` (both mtimes) |
 | `load_errors()` | `system.py` | `server_errors.json` |
 | `load_validate()` | `system.py` | 6 memory files + 30s heartbeat bucket |
@@ -211,7 +210,7 @@ Most data loading uses **mtime-based caching** (re-reads only when the source fi
 |----------|--------|-----------|
 | `load_cycle_velocity()` | `cycle.py` | `cycles.json` mtime |
 | `load_goal_stats()` | `goal.py` | `goal.json` + `cycles.json` mtimes |
-| `load_activity()` | `cycle.py` | `command_history.json` + `cycles.json` mtimes |
+| `load_activity()` | `cycle.py` | `inbox_history.json` + `cycles.json` mtimes |
 | `load_balance()` | `cycle.py` | `cycles.json` + `journal.json` + `evolution_weights.json` mtimes (hand-rolled `_register_cache`) |
 
 #### Write Actions (`app/data/write.py`)
@@ -221,7 +220,7 @@ All write functions call `_cache_clear_all()` after mutation.
 | Function | Purpose |
 |----------|---------|
 | `save_portal_config(key, value)` | Update a single key in `portal_config.json` (AtomicJSON) |
-| `queue_to_inbox(content, cmd_type, timestamp, priority)` | Append to `inbox.json` + history (AtomicJSON, priority 1-5) |
+| `queue_to_inbox(content, cmd_type, timestamp, priority)` | Append to `inbox.json` + JSONL audit-log line to `logs/portal_commands.log` (AtomicJSON, priority 1-5) |
 | `run_script(script_name, args)` | Execute whitelisted script (30s timeout, 20KB stdout cap) |
 | `write_first_goal(content, timestamp)` | Write first goal to `goal.json` on bootstrap (no-op if exists) |
 | `trigger_bootstrap_heartbeat()` | Fire `heartbeat.sh` in background for bootstrap cycle |
@@ -262,7 +261,6 @@ All JSON mutations use `_write_json_atomic()` from `app/shared.py` — writes to
 | `state.json` | `{cycle_number: 0, agent_status: "idle", current_goal: null, last_cycle_summary: null, last_heartbeat: null, last_cycle_run: null, services: {}}` |
 | `cycles.json` | `[]` |
 | `goal.json` | `[]` |
-| `command_history.json` | `[]` |
 | `server_errors.json` | `[]` |
 | `inbox.json` | `[]` |
 | `outbox.json` | `[]` |

@@ -312,7 +312,6 @@ def test_data_loaders():
         ("load_services", dict, "services"),
         ("load_activity", list, "activity"),
         ("load_outbox_history", list, "outbox_history"),
-        ("load_history", list, "history"),
         ("load_suggest", list, "suggest"),
         ("load_validate", dict, "validate"),
         ("load_logs", list, "logs"),

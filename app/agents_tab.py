@@ -406,7 +406,7 @@ def _render_actions(agent: dict) -> None:
     name = agent.get("name") or ""
     atype = agent.get("type")
 
-    # Mirror the "Queue Command For Next Cycle" form in
+    # Mirror the form in
     # ``app/commands_tab.py`` — both forms write an envelope to an
     # ``inbox.json`` (main agent vs. internal/external agent) so they
     # should look and behave identically.

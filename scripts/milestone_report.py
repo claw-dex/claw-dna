@@ -97,10 +97,6 @@ def _load_notes():
     return _load_json(MEMORY_DIR / "notes.json", [])
 
 
-def _load_command_history():
-    return _load_json(MEMORY_DIR / "command_history.json", [])
-
-
 def _load_server_errors():
     return _load_json(MEMORY_DIR / "server_errors.json", [])
 
@@ -187,7 +183,6 @@ def build_report(
     caps,
     journal_entries,
     notes=None,
-    command_history=None,
     server_errors=None,
 ):
     """Build milestone report data for a given target cycle number."""
@@ -297,9 +292,6 @@ def build_report(
         "commands_count": len(commands),
         "core_capabilities_count": len(core_caps),
         "notes": _summarize_notes(notes or []),
-        "command_history_total": (
-            len(command_history or []) if isinstance(command_history, list) else 0
-        ),
         "server_errors_total": (
             len(server_errors or []) if isinstance(server_errors, list) else 0
         ),
@@ -342,7 +334,6 @@ def render_markdown(report):
         f"| Slash commands | {report['commands_count']} |",
         f"| Core capabilities | {report['core_capabilities_count']} |",
         f"| Notes (pinned) | {report['notes']['total']} ({report['notes']['pinned']}) |",
-        f"| Command history entries | {report['command_history_total']} |",
         f"| Server errors logged | {report['server_errors_total']} |",
         f"",
         f"## Goal Performance",
@@ -445,7 +436,6 @@ def main():
     caps = _load_capabilities()
     journal_entries = _load_journal()
     notes = _load_notes()
-    command_history = _load_command_history()
     server_errors = _load_server_errors()
 
     current_cycle = state.get("cycle_number") or len(all_cycles)
@@ -468,7 +458,6 @@ def main():
         caps,
         journal_entries,
         notes=notes,
-        command_history=command_history,
         server_errors=server_errors,
     )
 

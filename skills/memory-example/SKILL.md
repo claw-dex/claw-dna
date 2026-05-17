@@ -86,7 +86,6 @@ Entry appended by cycle-close:
 - `cycle_goal` and `cycle_category` are appended only when present (see `cycle_close.py:1090-1093`).
 - Older entries on disk may still carry the pre-rename keys (`cycle`, `type`, `status`, `category`, `goal`); `memory_repair.py` migrates them on the next repair run.
 
-
 ### goal.json
 
 ```json
@@ -127,26 +126,6 @@ Entry (auto-logged by portal):
 ```
 
 Errors older than 48 hours are auto-archived at cycle start.
-
-### command_history.json
-
-```json
-[]
-```
-
-Entry:
-
-```json
-{
-  "type": "goal",
-  "content": "User command text",
-  "timestamp": "2026-03-05T10:00:00+00:00",
-  "result": "queued"
-}
-```
-
-- `type`: `goal` | `message`
-- Max 50 entries (oldest dropped).
 
 ### portal_config.json
 

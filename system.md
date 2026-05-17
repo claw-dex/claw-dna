@@ -16,16 +16,43 @@ All memory files are located in `/agent/memory` directory.
 Operational data (for portal/scripts):
 
 - State:    /agent/memory/state.json
-- Journal:  /agent/memory/journal.json
-- Goals:    /agent/memory/goal.json
-- Cycles:   /agent/memory/cycles.json
+- Journal:  /agent/memory/journal.json  (archive: /agent/memory/journal_archive.json)
+- Goals:    /agent/memory/goal.json     (history: /agent/memory/goal_history.json)
+- Cycles:   /agent/memory/cycles.json   (archive: /agent/memory/cycles_archive.json)
 - Capabilities: /agent/memory/capabilities.json
 - Failures: /agent/memory/failures.json
 
+### Reading `*_archive.json` / `*_history.json` Files (MANDATORY)
+
+These files store all historical data and can grow very large. You MUST NOT load them whole with `Read` or `cat` — always use `jq` to stream a bounded slice:
+
+- **Paginate, 100 entries at a time** (newest first):
+
+  ```bash
+  jq '.[-100:] | reverse' /agent/memory/goal_history.json
+  jq '.[-200:-100] | reverse' /agent/memory/journal_archive.json   # next page
+  ```
+
+- **Count entries** before deciding how to slice:
+
+  ```bash
+  jq 'length' /agent/messages/outbox_history.json
+  ```
+
+- **Look up a specific entry by `cycle_number`** (exact match or range):
+
+  ```bash
+  jq '.[] | select(.cycle_number == 42)' /agent/memory/cycles_archive.json
+  jq '.[] | select(.cycle_number >= 30 and .cycle_number <= 40)' /agent/messages/inbox_history.json
+  ```
+
+Note: only `cycles_archive.json`, `journal_archive.json` and `inbox_history.json` have `cycle_number` field.
+You may use same strategy to filter by other fields as well.
+
 ## Communication with User
 
-- Inbox:    /agent/messages/inbox.json
-- Outbox:   /agent/messages/outbox.json
+- Inbox:    /agent/messages/inbox.json   (history: /agent/messages/inbox_history.json)
+- Outbox:   /agent/messages/outbox.json  (history: /agent/messages/outbox_history.json)
 - A Chat Interface: v1/app/chat.py (served via Streamlit app portal)
 
 ## Container Info
@@ -46,6 +73,11 @@ Operational data (for portal/scripts):
 - Workspace:     /agent/workspace/
 - Available ports: 8080 (Caddy gateway), 8081 (Streamlit), 8082 (webhook_receiver), 8083–8090 (free for your services)
 - Running as: user "agent" (non-root, passwordless sudo available)
+
+## Script & Skill
+
+When you created a new script in `scripts/`, you MUST also create a corresponding skill in `skills/<script-name>/SKILL.md` with frontmatter (`name`, `description`) and body content (path, arguments, examples)
+Never save one-off scripts in the `scripts/` directory - they won't be tracked, documented, or reusable.
 
 ## Browser Access (MANDATORY)
 
@@ -87,10 +119,24 @@ Any file you place in these directories is immediately accessible to the user. D
 
 **Direct file links** — any file on the filesystem can be linked directly by path. For example, if you create `/agent/workspace/report.md`, the user can access it at `{Public URL}/_/agent/workspace/report.md`. Use this technique to share generated reports, text files, documents, downloads, or any artifact with the user. For HTML or other web assets, prefer to use the `/agent/web/` directory to share.
 
+## Credential Management (KeePass)
+
+The agent has a built-in KeePass credential store for managing secrets, API keys,
+passwords, and other sensitive data.
+
+- **Database**: `/home/agent/.keepass/credentials.kdbx` (no password, no keyfile)
+- **Portal UI**: Credentials tab in the Streamlit portal (search, add, edit, delete)
+- **CLI**: Use the `keepass` skill for all flags and examples
+
+### Security Notes
+
+- The KeePass database has no password — the Docker container is the security boundary
+- Passwords are returned in plaintext by `get` and `--json` — do not log the output publicly
+- The database path (`/home/agent/.keepass/`) is excluded from Caddy file-server - not browsable
+
 ## Queuing Commands (inbox.json)
 
-See `prompts/server.md` for the full portal architecture. To queue a command
-for the next heartbeat, write directly to `/agent/messages/inbox.json`:
+To queue a command for the next heartbeat, write directly to `/agent/messages/inbox.json`:
 
 Schema: `{"type": "<string>", "content": "<string>", "timestamp": "<ISO 8601>"}`
 

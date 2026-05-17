@@ -16,8 +16,8 @@ MEMORY_DIR = f"{AGENT_DIR}/memory"
 LOGS_DIR = f"{MEMORY_DIR}/logs"
 MESSAGES_DIR = f"{AGENT_DIR}/messages"
 SCRIPTS_DIR = f"{AGENT_DIR}/scripts"
-HISTORY_PATH = f"{MEMORY_DIR}/command_history.json"
 GOALS_PATH = f"{MEMORY_DIR}/goal.json"
+PORTAL_AUDIT_LOG_PATH = f"{LOGS_DIR}/portal_commands.log"
 ERROR_LOG_PATH = f"{MEMORY_DIR}/server_errors.json"
 # Portal chat now uses the unified per-surface layout under
 # /agent/memory/chat/main/ (history, archive, main.session). See
@@ -65,9 +65,6 @@ def _badge(text, color):
         f'<span style="background:{_html.escape(str(color))};color:#fff;padding:1px 8px;'
         f'border-radius:10px;font-size:11px;font-weight:600">{_html.escape(str(text))}</span>'
     )
-
-
-MAX_HISTORY = 50  # keep last 50 commands
 
 
 def parse_dt(s):
@@ -140,7 +137,6 @@ _CRITICAL_FILES = {
     f"{MEMORY_DIR}/state.json": dict(STATE_DEFAULTS),
     f"{MEMORY_DIR}/cycles.json": [],
     GOALS_PATH: [],
-    HISTORY_PATH: [],
     ERROR_LOG_PATH: [],
     f"{MESSAGES_DIR}/inbox.json": [],
     f"{MESSAGES_DIR}/outbox.json": [],
@@ -265,19 +261,6 @@ def _safe_int(value, default=0):
         return int(value)
     except (ValueError, TypeError):
         return default
-
-
-def _append_history(entry):
-    """Append a command entry to the history file, keeping last MAX_HISTORY."""
-    try:
-        with open(HISTORY_PATH) as f:
-            history = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        history = []
-    history.append(entry)
-    if len(history) > MAX_HISTORY:
-        history = history[-MAX_HISTORY:]
-    _write_json_atomic(HISTORY_PATH, history)
 
 
 def _truncate_history(history, max_content=500):

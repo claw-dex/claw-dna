@@ -28,7 +28,7 @@ HEARTBEAT_DIR = Path("/agent/memory/heartbeats")
 ALLOWED_PORTS = range(8082, 8091)  # 8082-8090
 # How long (seconds) before a service heartbeat is considered stale.
 # Services should write heartbeats at least this often.
-HEARTBEAT_STALE_THRESHOLD = 600  # 10 minutes
+HEARTBEAT_STALE_THRESHOLD = 900  # 15 minutes
 
 
 _LOCK_PATH = str(SERVICES_FILE) + ".lock"

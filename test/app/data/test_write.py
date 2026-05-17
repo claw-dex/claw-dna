@@ -35,10 +35,10 @@ def paths(tmp_path, monkeypatch):
         "app.data.write.SCHEDULED_TASKS_PATH",
         str(mem / "scheduled_tasks.json"),
     )
-    # The shared module's helpers (_write_json_atomic, AtomicJSON, _append_history)
-    # use module-global HISTORY_PATH from app.shared. Patch that too so writes
-    # don't leak to /agent/memory/.
-    monkeypatch.setattr("app.shared.HISTORY_PATH", str(mem / "command_history.json"))
+    # write._append_portal_audit reads PORTAL_AUDIT_LOG_PATH from its own
+    # module namespace — patch there so audit-log writes go under tmp_path.
+    audit_log = logs / "portal_commands.log"
+    monkeypatch.setattr("app.data.write.PORTAL_AUDIT_LOG_PATH", str(audit_log))
     from app.data import _cache as cache_mod
 
     cache_mod._cache_clear_all()
@@ -51,7 +51,7 @@ def paths(tmp_path, monkeypatch):
         goals=mem / "goal.json",
         portal_config=mem / "portal_config.json",
         scheduled_tasks=mem / "scheduled_tasks.json",
-        history=mem / "command_history.json",
+        audit_log=audit_log,
         inbox=msg / "inbox.json",
         outbox=msg / "outbox.json",
         outbox_history=msg / "outbox_history.json",
@@ -96,11 +96,15 @@ def test_queue_to_inbox_clamps_priority(paths):
     assert data[1]["priority"] == 1
 
 
-def test_queue_to_inbox_writes_history(paths):
-    write.queue_to_inbox("hi", "message", "2026-01-01T00:00:00Z")
-    hist = json.loads(paths.history.read_text())
-    assert hist[-1]["content"] == "hi"
-    assert hist[-1]["result"] == "queued"
+def test_queue_to_inbox_writes_audit_log(paths):
+    write.queue_to_inbox("hi", "message", "2026-01-01T00:00:00Z", priority=2)
+    lines = paths.audit_log.read_text().splitlines()
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert entry["content"] == "hi"
+    assert entry["type"] == "message"
+    assert entry["priority"] == 2
+    assert entry["timestamp"] == "2026-01-01T00:00:00Z"
 
 
 # ---------- run_script ----------

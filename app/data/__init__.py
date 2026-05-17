@@ -36,7 +36,6 @@ from app.data.message import (  # noqa: F401
     load_inbox_history,
     load_outbox,
     load_outbox_history,
-    load_history,
 )
 
 # Logs

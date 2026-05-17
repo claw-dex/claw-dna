@@ -32,7 +32,7 @@ from collections import Counter
 
 MEMORY = Path("/agent/memory")
 MESSAGES = Path("/agent/messages")
-MV2_PATH = MEMORY / "long_term_memory.mv2"
+LONG_TERM_MEMORY_MV2_PATH = MEMORY / "long_term_memory.mv2"
 SCRIPTS = Path("/agent/scripts")
 DREAM_DIR = MEMORY / "dream"
 
@@ -779,20 +779,40 @@ def _build_recall_queries(inbox, goals) -> list:
     return unique
 
 
-def _fetch_old_memories(limit: int = 50, inbox=None, goals=None) -> list:
-    """Fetch memories older than 24h from long-term semantic memory.
+def _memory_cycle_number(hit: dict) -> int | None:
+    """Extract cycle_number from a recall hit.
+
+    Ingest writes the cycle to `metadata["cycle"]` (string) and also as a
+    `cycle:<N>` tag. Prefer metadata; fall back to the tag for older entries
+    where metadata may be absent on the SDK hit.
+    """
+    meta = hit.get("metadata") or {}
+    raw = meta.get("cycle") if isinstance(meta, dict) else None
+    if raw is None:
+        for t in hit.get("tags") or []:
+            if isinstance(t, str) and t.startswith("cycle:"):
+                raw = t.split(":", 1)[1]
+                break
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _fetch_old_memories(limit: int = 20, inbox=None, goals=None) -> list:
+    """Fetch memories from long-term semantic memory across the full history.
 
     Issues all recall() queries in parallel (one per inbox message + most recent
     in-progress/pending goal), dedupes hits by frame_id (fallback: title+snippet),
     and trims to `limit` after merging.
     """
-    if not MV2_PATH.exists():
+    if not LONG_TERM_MEMORY_MV2_PATH.exists():
         return []
     queries = _build_recall_queries(inbox, goals)
     if not queries:
         return []
-    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
-    until_ts = str(int(cutoff.timestamp()))
     try:
         from scripts.memory_recall import recall
     except Exception:
@@ -802,7 +822,7 @@ def _fetch_old_memories(limit: int = 50, inbox=None, goals=None) -> list:
     # max_workers=min(len(queries), 5) avoids creating excess threads for large inboxes.
     def _safe_recall(q: str) -> list:
         try:
-            return recall(q, until=until_ts)
+            return recall(q)
         except Exception:
             return []
 
@@ -813,17 +833,14 @@ def _fetch_old_memories(limit: int = 50, inbox=None, goals=None) -> list:
     seen_keys: set = set()
     for hits in per_query_hits:
         for h in hits:
-            if len(combined) >= limit:
-                break
             fid = h.get("frame_id")
             key = ("fid", fid) if fid else ("ts", h.get("title"), h.get("snippet"))
             if key in seen_keys:
                 continue
             seen_keys.add(key)
             combined.append(h)
-        if len(combined) >= limit:
-            break
     combined.sort(key=lambda h: h.get("score", 0.0), reverse=True)
+    combined = combined[:limit]
     for i, h in enumerate(combined, 1):
         h["rank"] = i
     return combined
@@ -836,8 +853,8 @@ def _list_recent_dream_files(hours: int = 24) -> list:
     Each item: {"path": str, "kind": "learning"|"topic", "mtime": ISO str}.
     Sorted by mtime desc.
 
-    Pairs with `_fetch_old_memories` (which returns memvid entries OLDER than
-    24h) — together they cover the full memory timeline.
+    Pairs with `_fetch_old_memories` (which recalls across the full memvid
+    history) — together they cover the recent-file and semantic-recall views.
 
     Does NOT touch dream/remark.json (internal dream-process state).
     """
@@ -872,6 +889,131 @@ def _list_recent_dream_files(hours: int = 24) -> list:
     return out
 
 
+# ── Data collectors (side-effect-free, shared by stdout + JSON) ────────────────
+
+TAB_ERROR_RECENT_H = 6.0  # errors within this window are "active"
+
+
+def _collect_cycle_lock_info() -> dict | None:
+    """Return cycle-lock state as a plain dict, or None when no lock exists.
+
+    Does NOT mutate the lock file — stdout mode is responsible for stale-lock
+    cleanup.
+    """
+    lock_path = MEMORY / ".cycle.lock"
+    if not lock_path.exists():
+        return None
+    try:
+        data = json.loads(lock_path.read_text())
+    except Exception:
+        return {"present": True, "parseable": False}
+    pid = data.get("pid")
+    alive = False
+    if isinstance(pid, int):
+        try:
+            os.kill(pid, 0)
+            alive = True
+        except OSError:
+            alive = False
+    return {
+        "present": True,
+        "parseable": True,
+        "pid": pid,
+        "cycle": data.get("cycle"),
+        "started": data.get("started", ""),
+        "alive": alive,
+    }
+
+
+def _collect_online_agents() -> list:
+    """Return online registered agents as plain dicts (empty list if none)."""
+    agents = load_json(MEMORY / "agents.json")
+    if not isinstance(agents, list):
+        return []
+    out = []
+    for a in agents:
+        if not isinstance(a, dict) or a.get("status") != "online":
+            continue
+        caps = a.get("capabilities") or []
+        cap_names = [
+            str(c.get("id") or c.get("name"))
+            for c in caps
+            if isinstance(c, dict) and (c.get("id") or c.get("name"))
+        ]
+        out.append(
+            {
+                "name": a.get("name") or "?",
+                "type": a.get("type") or "?",
+                "last_ping_at": a.get("last_ping_at") or "never",
+                "responsibilities": (a.get("responsibilities") or "").strip(),
+                "capabilities": cap_names,
+                "inbox": a.get("inbox") or "",
+                "outbox": a.get("outbox") or "",
+            }
+        )
+    return out
+
+
+def _summarize_tab_errors(server_errors) -> dict:
+    """Summarize server_errors into counts + last-3 preview (no truncation)."""
+    if not server_errors:
+        return {"total": 0, "recent_count": 0, "old_count": 0, "last3": []}
+    recent = [e for e in server_errors if _error_age_hours(e) <= TAB_ERROR_RECENT_H]
+    old = [e for e in server_errors if _error_age_hours(e) > TAB_ERROR_RECENT_H]
+    last3 = [
+        {
+            "timestamp": e.get("timestamp", ""),
+            "tab": e.get("tab", ""),
+            "error": str(e.get("error", "")),
+            "age_hours": round(_error_age_hours(e), 2),
+        }
+        for e in server_errors[-3:]
+    ]
+    return {
+        "total": len(server_errors),
+        "recent_count": len(recent),
+        "old_count": len(old),
+        "last3": last3,
+    }
+
+
+def _collect_backup_info() -> dict:
+    """Summarize backup snapshots under /agent/backup/memory."""
+    backup_root = Path("/agent/backup/memory")
+    if not backup_root.exists():
+        return {"present": False, "count": 0, "latest": None}
+    try:
+        dirs = sorted(
+            [d for d in backup_root.iterdir() if d.is_dir()],
+            key=lambda d: d.name,
+            reverse=True,
+        )
+    except Exception:
+        return {"present": True, "count": 0, "latest": None}
+    if not dirs:
+        return {"present": True, "count": 0, "latest": None}
+    latest_name = dirs[0].name
+    age_seconds = None
+    stale = None
+    try:
+        ts = datetime.datetime.strptime(latest_name, "%Y%m%dT%H%M%SZ").replace(
+            tzinfo=datetime.timezone.utc
+        )
+        age_seconds = (
+            datetime.datetime.now(datetime.timezone.utc) - ts
+        ).total_seconds()
+        stale = age_seconds > 3600
+    except Exception:
+        pass
+    return {
+        "present": True,
+        "count": len(dirs),
+        "latest": latest_name,
+        "age_seconds": age_seconds,
+        "stale": stale,
+    }
+
+
 # ── Output Modes ────────────────────────────────────────────────────────────────
 
 
@@ -884,29 +1026,20 @@ def _print_online_agents() -> None:
     missing/empty or no agent is online, so non-users of the feature see
     no clutter.
     """
-    agents = load_json(MEMORY / "agents.json")
-    if not isinstance(agents, list):
-        return
-    online = [a for a in agents if isinstance(a, dict) and a.get("status") == "online"]
+    online = _collect_online_agents()
     if not online:
         return
 
     print(f"\n[AGENTS]  {len(online)} online — available for delegation")
     for a in online:
-        name = a.get("name") or "?"
-        agent_type = a.get("type") or "?"
-        responsibilities = (a.get("responsibilities") or "").strip() or "(none)"
-        caps = a.get("capabilities") or []
-        cap_names: list[str] = []
-        for c in caps:
-            if isinstance(c, dict):
-                cn = c.get("id") or c.get("name")
-                if cn:
-                    cap_names.append(str(cn))
-        cap_summary = ", ".join(cap_names) if cap_names else "(none)"
         last_ping = a.get("last_ping_at") or "never"
         last_ping_str = ago(last_ping) if last_ping != "never" else "never"
-        print(f"  • {name}  [type={agent_type}]  (last ping {last_ping_str})")
+        responsibilities = a.get("responsibilities") or "(none)"
+        cap_summary = ", ".join(a.get("capabilities") or []) or "(none)"
+        print(
+            f"  • {a.get('name', '?')}  [type={a.get('type', '?')}]  "
+            f"(last ping {last_ping_str})"
+        )
         print(f"      responsibilities: {responsibilities}")
         print(f"      capabilities:     {cap_summary}")
         print(f"      inbox:            {a.get('inbox') or '?'}")
@@ -962,29 +1095,25 @@ def print_full(
     print(f"\n[PORTAL]  {icon} {portal}")
 
     # ── Cycle Lock (crash detection) ─────────────────────────────
-    cycle_lock = MEMORY / ".cycle.lock"
-    if cycle_lock.exists():
-        try:
-            lock_data = json.loads(cycle_lock.read_text())
-            lock_pid = lock_data.get("pid")
-            lock_cycle = lock_data.get("cycle", "?")
-            lock_started = lock_data.get("started", "")
-            # Check if the PID is still alive
-            import signal
-
-            try:
-                os.kill(lock_pid, 0)  # signal 0 = test if process exists
-                print(
-                    f"\n[CYCLE LOCK]  ⚠ Cycle {lock_cycle} (PID {lock_pid}) still running (started {ago(lock_started)})"
-                )
-            except (OSError, TypeError):
-                print(
-                    f"\n[CYCLE LOCK]  ✗ STALE — Cycle {lock_cycle} (PID {lock_pid}) crashed (started {ago(lock_started)})"
-                )
-                print(f"  → Previous heartbeat died without cleanup. Lock removed.")
-                cycle_lock.unlink(missing_ok=True)
-        except Exception:
-            cycle_lock.unlink(missing_ok=True)
+    lock_info = _collect_cycle_lock_info()
+    if lock_info is not None:
+        lock_path = MEMORY / ".cycle.lock"
+        if not lock_info.get("parseable"):
+            lock_path.unlink(missing_ok=True)
+        elif lock_info.get("alive"):
+            print(
+                f"\n[CYCLE LOCK]  ⚠ Cycle {lock_info.get('cycle', '?')} "
+                f"(PID {lock_info.get('pid')}) still running "
+                f"(started {ago(lock_info.get('started', ''))})"
+            )
+        else:
+            print(
+                f"\n[CYCLE LOCK]  ✗ STALE — Cycle {lock_info.get('cycle', '?')} "
+                f"(PID {lock_info.get('pid')}) crashed "
+                f"(started {ago(lock_info.get('started', ''))})"
+            )
+            print(f"  → Previous heartbeat died without cleanup. Lock removed.")
+            lock_path.unlink(missing_ok=True)
 
     # ── Constitution Runtime Check ──────────────────────────────
     constitution_issues = _check_constitution()
@@ -995,29 +1124,45 @@ def print_full(
     else:
         print(f"\n[CONSTITUTION]  ✓ all checks passed")
 
-    # ── Goals ────────────────────────────────────────────────────
+    # ── State ────────────────────────────────────────────────────
+    hb = (
+        ago(state.get("last_heartbeat", "")) if state.get("last_heartbeat") else "never"
+    )
+    last_summary = str(state.get("last_cycle_summary", "")).strip()
+    print(
+        f"\n[STATE]  cycle={state.get('cycle_number')}  "
+        f"agent_status={state.get('agent_status')}  heartbeat={hb}"
+    )
+    if last_summary:
+        print(f"  last_cycle_summary: {last_summary}")
+
+    # ── Goals (summary only — content is handled by heartbeat.sh) ─
     by_status = Counter(g.get("status", "?") for g in goals)
     print(
         f"\n[GOALS]  total={len(goals)}  pending={by_status.get('pending',0)}  "
         f"in_progress={by_status.get('in_progress',0)}  "
         f"completed={by_status.get('completed',0)}  failed={by_status.get('failed',0)}"
     )
-    if goals:
-        lg = goals[-1]
-        text = str(lg.get("content") or lg.get("goal", ""))[:85]
-        print(f"  Latest: [{lg.get('status')}] {text}")
 
-    # ── Inbox ────────────────────────────────────────────────────
+    # ── Inbox (summary only — content is handled by heartbeat.sh) ─
     if inbox is None:
         print(f"\n[INBOX]  missing")
     elif isinstance(inbox, list) and inbox:
         types = Counter(m.get("type") for m in inbox)
         print(f"\n[INBOX]  {len(inbox)} message(s): {dict(types)}")
-        for m in inbox[:3]:
-            snippet = str(m.get("content", ""))[:70]
-            print(f"  [{m.get('type')}] {snippet}")
     else:
         print(f"\n[INBOX]  empty")
+
+    # ── Failures ─────────────────────────────────────────────────
+    if failures:
+        print(f"\n[FAILURES]  {len(failures)} recent")
+        for f in failures[-3:]:
+            print(f"  • {str(f.get('summary', f))[:100]}")
+    else:
+        print(f"\n[FAILURES]  none")
+
+    # ── Capabilities ─────────────────────────────────────────────
+    print(f"\n[CAPABILITIES]  total={capabilities.get('total', 0)}")
 
     # ── Agents (goal mode only) ──────────────────────────────────
     # Surface online registered agents (any type) so the main agent knows
@@ -1058,49 +1203,39 @@ def print_full(
 
     # ── Portal Tab Errors ─────────────────────────────────────────
     if server_errors:
-        # Classify errors by recency
-        RECENT_THRESHOLD_H = 6.0  # errors within 6h are "active"
         OLD_THRESHOLD_H = 48.0  # errors >48h are "stale" (auto-archived at cycle start)
+        summary = _summarize_tab_errors(server_errors)
 
-        def _age_label(e):
-            h = _error_age_hours(e)
+        def _age_label(h: float) -> str:
             if h < 1:
                 return f"{int(h*60)}m ago"
             if h < 24:
                 return f"{h:.0f}h ago"
             return f"{h/24:.1f}d ago"
 
-        recent_errs = [
-            e for e in server_errors if _error_age_hours(e) <= RECENT_THRESHOLD_H
-        ]
-        old_errs = [
-            e for e in server_errors if _error_age_hours(e) > RECENT_THRESHOLD_H
-        ]
-        last3 = server_errors[-3:]
-
-        if recent_errs:
+        if summary["recent_count"] > 0:
             print(
-                f"\n[TAB ERRORS]  {len(server_errors)} logged  ({len(recent_errs)} RECENT ≤{RECENT_THRESHOLD_H:.0f}h, "
-                f"{len(old_errs)} old)"
+                f"\n[TAB ERRORS]  {summary['total']} logged  "
+                f"({summary['recent_count']} RECENT ≤{TAB_ERROR_RECENT_H:.0f}h, "
+                f"{summary['old_count']} old)"
             )
-            for e in last3:
-                ts = e.get("timestamp", "")[:16]
-                tab = e.get("tab", "?")
+            for e in summary["last3"]:
+                ts = str(e.get("timestamp", ""))[:16]
+                tab = e.get("tab") or "?"
                 err = str(e.get("error", ""))[:60]
-                age = _age_label(e)
-                flag = " ⚠ ACTIVE" if _error_age_hours(e) <= RECENT_THRESHOLD_H else ""
-                print(f"  {ts} [{tab}] {err}  ({age}){flag}")
+                age_h = e.get("age_hours", 0.0)
+                flag = " ⚠ ACTIVE" if age_h <= TAB_ERROR_RECENT_H else ""
+                print(f"  {ts} [{tab}] {err}  ({_age_label(age_h)}){flag}")
             print("  → Fix the affected module before the next goal cycle.")
         else:
-            # All errors are old — downgrade severity
             print(
-                f"\n[TAB ERRORS]  {len(server_errors)} logged  (✓ all >{RECENT_THRESHOLD_H:.0f}h old — likely resolved)"
+                f"\n[TAB ERRORS]  {summary['total']} logged  "
+                f"(✓ all >{TAB_ERROR_RECENT_H:.0f}h old — likely resolved)"
             )
-            for e in last3:
-                ts = e.get("timestamp", "")[:16]
-                tab = e.get("tab", "?")
-                age = _age_label(e)
-                print(f"  {ts} [{tab}]  ({age})")
+            for e in summary["last3"]:
+                ts = str(e.get("timestamp", ""))[:16]
+                tab = e.get("tab") or "?"
+                print(f"  {ts} [{tab}]  ({_age_label(e.get('age_hours', 0.0))})")
             print(
                 f"  → Run with --clear-old-errors to purge errors >{OLD_THRESHOLD_H:.0f}h old."
             )
@@ -1146,36 +1281,28 @@ def print_full(
             )
 
     # ── Backup Status ─────────────────────────────────────────────
-    backup_root = Path("/agent/backup/memory")
-    if backup_root.exists():
-        backup_dirs = sorted(
-            [d for d in backup_root.iterdir() if d.is_dir()],
-            key=lambda d: d.name,
-            reverse=True,
-        )
-        if backup_dirs:
-            latest_name = backup_dirs[0].name
-            try:
-                ts = datetime.datetime.strptime(latest_name, "%Y%m%dT%H%M%SZ").replace(
-                    tzinfo=datetime.timezone.utc
-                )
-                age_s = (
-                    datetime.datetime.now(datetime.timezone.utc) - ts
-                ).total_seconds()
-                age_str = ago(ts.isoformat())
-                stale = age_s > 3600
-                icon = "⚠ STALE" if stale else "✓"
-                print(
-                    f"\n[BACKUP]  {icon}  latest={latest_name}  ({age_str})  total={len(backup_dirs)}"
-                )
-                if stale:
-                    print(f"  → cycle_close.py will auto-create a fresh snapshot")
-            except Exception:
-                print(f"\n[BACKUP]  {len(backup_dirs)} backups (latest: {latest_name})")
-        else:
-            print(f"\n[BACKUP]  no backups yet — cycle_close.py creates them")
-    else:
+    backup = _collect_backup_info()
+    if not backup["present"]:
         print(f"\n[BACKUP]  no backups dir — cycle_close.py creates them")
+    elif backup["count"] == 0:
+        print(f"\n[BACKUP]  no backups yet — cycle_close.py creates them")
+    elif backup.get("age_seconds") is None:
+        print(f"\n[BACKUP]  {backup['count']} backups (latest: {backup['latest']})")
+    else:
+        stale = bool(backup.get("stale"))
+        icon = "⚠ STALE" if stale else "✓"
+        age_str = ago(
+            (
+                datetime.datetime.now(datetime.timezone.utc)
+                - datetime.timedelta(seconds=backup["age_seconds"])
+            ).isoformat()
+        )
+        print(
+            f"\n[BACKUP]  {icon}  latest={backup['latest']}  ({age_str})  "
+            f"total={backup['count']}"
+        )
+        if stale:
+            print(f"  → cycle_close.py will auto-create a fresh snapshot")
 
     # ── Short-Term Memory (Recent Journal) ────────────────────────
     # Full content of every active journal entry (no truncation). Timestamps are
@@ -1213,16 +1340,21 @@ def print_full(
             f"\n[RECENT MEMORY FILES]  {len(recent_dream_files)} file(s) updated in last 24h:"
         )
         for f in recent_dream_files:
-            print(f"  • {f['path']}  ({ago(f['mtime'])})")
+            print(f"  • [{f.get('kind', '?')}] {f['path']}  ({ago(f['mtime'])})")
 
-    # ── Long-Term Memory Recall ───────────────────────────────────
+    # ── Related Long-Term Memory ───────────────────────────────────
     if old_memories:
-        print(f"\n[LONG-TERM MEMORY]  {len(old_memories)} recalled (>24h old):")
+        print(f"\n[RELATED MEMORIES]  {len(old_memories)} recalled:")
         for m in old_memories:
-            title = m.get("title", "")[:80]
+            title = m.get("title", "")[:100]
+            snippet = m.get("snippet", "")[:200]
             score = m.get("score")
             score_str = f" (score: {score:.4f})" if score is not None else ""
-            print(f"  {title}{score_str}")
+            cycle = _memory_cycle_number(m)
+            cycle_str = f" [cycle {cycle}]" if cycle is not None else ""
+            print(f"  {title}{cycle_str}{score_str}")
+            if snippet:
+                print(f"    {snippet}")
 
     # ── Evolve Recommendation (only in evolve mode) ────────────────
     if EVOLVE_MODE:
@@ -1303,11 +1435,13 @@ def print_json_output(
     capabilities,
     inbox,
     portal,
+    server_errors=None,
     cycles=None,
     old_memories=None,
     recent_dream_files=None,
 ):
     suggested = None
+    evolve_text = None
     if EVOLVE_MODE:
         by_cat = cycles_info.get("by_cat", {})
         caps_with_signals = dict(capabilities)
@@ -1332,10 +1466,17 @@ def print_json_output(
                 )
         except Exception:
             pass
-        _, suggested, _ = evolve_recommendation(
+        evolve_text, suggested, _ = evolve_recommendation(
             by_cat, caps_with_signals, cycles=cycles, goals=goals
         )
     by_status = Counter(g.get("status", "?") for g in goals)
+    inbox_is_list = isinstance(inbox, list)
+    inbox_by_type = (
+        dict(Counter(m.get("type") for m in inbox if isinstance(m, dict)))
+        if inbox_is_list
+        else {}
+    )
+    constitution_issues = _check_constitution()
     print(
         json.dumps(
             {
@@ -1348,14 +1489,21 @@ def print_json_output(
                     "last_cycle_summary": state.get("last_cycle_summary", ""),
                 },
                 "portal": portal,
+                "cycle_lock": _collect_cycle_lock_info(),
+                "constitution": {
+                    "ok": not constitution_issues,
+                    "violations": constitution_issues,
+                },
+                "online_agents": _collect_online_agents(),
+                "tab_errors": _summarize_tab_errors(server_errors),
+                "backup": _collect_backup_info(),
                 "goals": {
                     "total": len(goals),
                     "by_status": dict(by_status),
-                    "latest": goals[-1] if goals else None,
                 },
                 "inbox": {
-                    "count": len(inbox) if isinstance(inbox, list) else 0,
-                    "messages": inbox[:3] if isinstance(inbox, list) else [],
+                    "count": len(inbox) if inbox_is_list else 0,
+                    "by_type": inbox_by_type,
                 },
                 "cycles": cycles_info,
                 "failures_count": len(failures),
@@ -1384,12 +1532,14 @@ def print_json_output(
                 ],
                 "capabilities_count": capabilities.get("total", 0),
                 "evolve_suggestion": suggested,
+                "evolve_recommendation_text": evolve_text,
                 "old_memories": [
                     {
                         "rank": m.get("rank"),
                         "score": m.get("score"),
                         "title": m.get("title", "")[:100],
                         "snippet": m.get("snippet", "")[:200],
+                        "cycle_number": _memory_cycle_number(m),
                     }
                     for m in (old_memories or [])
                 ],
@@ -1530,10 +1680,10 @@ def main():
     portal = portal_health()
 
     # Step 3b: Fetch long-term memories (once, shared across output modes)
-    old_memories = _fetch_old_memories(limit=50, inbox=inbox, goals=goals)
+    old_memories = _fetch_old_memories(limit=20, inbox=inbox, goals=goals)
 
     # Step 3c: List dream learning/topic files updated in the last 24h.
-    # Pairs with old_memories (>24h via memvid) for a complete memory window.
+    # Pairs with old_memories (full-history memvid recall) for a complete memory window.
     recent_dream_files = _list_recent_dream_files(hours=24)
 
     # Step 4: Output
@@ -1548,6 +1698,7 @@ def main():
             capabilities,
             inbox,
             portal,
+            server_errors=server_errors,
             cycles=cycles,
             old_memories=old_memories,
             recent_dream_files=recent_dream_files,

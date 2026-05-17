@@ -54,7 +54,6 @@ DEFAULTS = {
     "cycles.json": [],
     "goal.json": [],
     "journal.json": [],
-    "command_history.json": [],
 }
 
 # ── Status constants ───────────────────────────────────────────────────────────

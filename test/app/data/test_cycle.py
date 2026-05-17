@@ -16,17 +16,18 @@ def patch_cycle_paths(monkeypatch, tmp_path):
     memory.mkdir(parents=True)
     logs = memory / "logs"
     logs.mkdir()
-    history = memory / "command_history.json"
+    messages = tmp_path / "messages"
+    messages.mkdir()
 
     monkeypatch.setattr("app.shared.MEMORY_DIR", str(memory))
     monkeypatch.setattr("app.shared.LOGS_DIR", str(logs))
-    monkeypatch.setattr("app.shared.HISTORY_PATH", str(history))
+    monkeypatch.setattr("app.shared.MESSAGES_DIR", str(messages))
     monkeypatch.setattr(cycle_mod, "MEMORY_DIR", str(memory))
     monkeypatch.setattr(cycle_mod, "LOGS_DIR", str(logs))
-    monkeypatch.setattr(cycle_mod, "HISTORY_PATH", str(history))
+    monkeypatch.setattr(cycle_mod, "MESSAGES_DIR", str(messages))
 
     cache_mod._cache_clear_all()
-    return {"memory": memory, "logs": logs, "history": history}
+    return {"memory": memory, "logs": logs, "messages": messages}
 
 
 def _write(p, obj):
@@ -203,20 +204,18 @@ def test_load_balance_uses_weights_suggestion(patch_cycle_paths):
 # ---------- load_activity ----------
 
 
-def test_load_activity_merges_history_and_cycles(patch_cycle_paths, monkeypatch):
-    # Stub load_history at the import site (cycle.load_activity imports inline).
-    fake_history = [
+def test_load_activity_merges_inbox_history_and_cycles(patch_cycle_paths, monkeypatch):
+    # Stub load_inbox_history at the import site (cycle.load_activity imports inline).
+    fake_inbox_history = [
         {
             "timestamp": "2026-04-01T00:00:00+00:00",
             "type": "bash",
             "content": "ls",
-            "result": "files",
         },
         {
             "timestamp": "2026-04-01T01:00:00+00:00",
             "type": "goal",
             "content": "build",
-            "result": "ok",
         },
         {  # missing timestamp -> skipped
             "type": "message",
@@ -225,7 +224,7 @@ def test_load_activity_merges_history_and_cycles(patch_cycle_paths, monkeypatch)
     ]
     import app.data.message as message_mod
 
-    monkeypatch.setattr(message_mod, "load_history", lambda: fake_history)
+    monkeypatch.setattr(message_mod, "load_inbox_history", lambda: fake_inbox_history)
 
     cycles = [
         {
@@ -255,6 +254,6 @@ def test_load_activity_merges_history_and_cycles(patch_cycle_paths, monkeypatch)
 def test_load_activity_empty_when_no_data(patch_cycle_paths, monkeypatch):
     import app.data.message as message_mod
 
-    monkeypatch.setattr(message_mod, "load_history", lambda: [])
+    monkeypatch.setattr(message_mod, "load_inbox_history", lambda: [])
     cache_mod._cache_clear_all()
     assert cycle_mod.load_activity() == []

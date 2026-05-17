@@ -121,7 +121,7 @@ _SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
 # A read inbox message stays in the live inbox for this long after the
 # external agent acknowledges it (so the agent has a window to re-fetch the
 # content if it crashed mid-processing) before it is archived.
-INBOX_ARCHIVE_AFTER_SECONDS = 600  # 10 minutes
+INBOX_ARCHIVE_AFTER_SECONDS = 900  # 15 minutes
 
 log = logging.getLogger("external_agent_api")
 

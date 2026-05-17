@@ -113,9 +113,7 @@ def test_build_report_basic():
     caps = {"utility_scripts": ["a.py", "b.py"]}
     journal = [{"cycle_number": 2, "summary": "did stuff"}]
 
-    rep = mr.build_report(
-        2, cycles, goals, caps, journal, notes=[], command_history=[], server_errors=[]
-    )
+    rep = mr.build_report(2, cycles, goals, caps, journal, notes=[], server_errors=[])
     assert rep["milestone_cycle"] == 2
     assert rep["total_completed_cycles"] == 2
     assert rep["type_breakdown"]["evolve"] == 1
