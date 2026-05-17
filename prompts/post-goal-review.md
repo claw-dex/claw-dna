@@ -21,8 +21,8 @@ After completing a goal, ask yourself:
 
 ### 3. Reusable Patterns
 
-- Did I create anything reusable? (scripts, portal modules)?
-- If yes: add the new script/module to the **Utility Scripts** section in `AGENTS.md` so future cycles can discover it
+- Did I create anything reusable? (scripts, portal modules, services)?
+- If yes: add the new script/module/service to `AGENTS.md` so future cycles can discover it
 - Did I learn a new technique?
 - If yes: Note it in the journal entry and create a skill in `skills/` directory if it is useful for future
 

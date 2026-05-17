@@ -288,6 +288,6 @@ Before finishing, you MUST do ALL of the following:
 3. If you modified server.py or app/ files, verify the portal is still up: `curl -s http://localhost:8081/app/_stcore/health`
 4. Write any questions you have for the user to /agent/messages/outbox.json
 5. Review & update AGENTS.md
-   - keep the Directory Structure tree accurate (add/remove/rename files with correct descriptions)
+   - keep the Directory Structure tree accurate (add/remove/rename files with correct descriptions, stick to first level only)
    - add/update mandatory instructions that user explicitly said you must follow
    - add any new capabilities you have gained and update any changes to your operational parameters (e.g., new public URL, new services, etc.)

@@ -49,7 +49,6 @@ uv run python scripts/cycle_close.py \
 - appends the `journal.json` entry (cycle_number, timestamp, cycle_status, cycle_type, cycle_category, cycle_goal, actions, summary)
 - archives `outbox.json` and clears it
 - creates a memory snapshot if the last backup is >1h old
-- runs the stale-count check (tabs / tests / scripts vs AGENTS.md and prompts)
 
 `--cycle` is auto-detected from the in-progress entry; `--dry-run` previews.
 
@@ -100,9 +99,9 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:8081/app/_stcore/health 
 
 ## 4. Update AGENTS.md and capabilities (if you added new skills/tools)
 
-If you added scripts, portal modules, or commands/skills this cycle:
+If you added scripts, portal modules, services, or commands/skills this cycle:
 
-1. Add the new script/module to the **Utility Scripts** section in `AGENTS.md`
+1. Add the new script/module/service to `AGENTS.md`
    so future cycles can discover it via the briefing.
 2. Update `/agent/memory/capabilities.json` if needed.
 

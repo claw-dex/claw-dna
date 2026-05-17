@@ -8,21 +8,20 @@ Automates the repetitive boilerplate from cycle-close.md:
   3. Appends a journal entry to journal.json
   4. Normalizes cycles.json schema (inlined — no subprocess)
   5. Archives inbox.json items to inbox_history.json, then clears inbox.json
-  6. Checks for stale tab/test/script counts and warns when drift is found
-  7. Auto-backs up memory files if last backup >1h old (inlined — no subprocess)
-  8. Dispatches the long-term-memory (memvid) flush in a detached background
+  6. Auto-backs up memory files if last backup >1h old (inlined — no subprocess)
+  7. Dispatches the long-term-memory (memvid) flush in a detached background
      process so the script returns immediately. The .mv2 becomes durable a
      few seconds after "Done." prints. Logs to /agent/memory/.memvid_flush.log.
      Use --no-bg-memvid to flush inline (e.g., when a downstream caller needs
      the .mv2 fully written before exit).
-  9. Reports what was written
+  8. Reports what was written
 
 Usage:
     uv run python scripts/cycle_close.py \\
         --type evolve \\
         --category efficiency \\
         --summary "Built cycle_close.py to automate end-of-cycle boilerplate" \\
-        --actions "Built scripts/cycle_close.py" "Updated AGENTS.md" "Tested portal health" \\
+        --actions "Built scripts/cycle_close.py" "Tested portal health" \\
         --status completed
 
     # --cycle is OPTIONAL: auto-detected from state.json (state.cycle_number + 1)
@@ -61,7 +60,6 @@ Enum Reference: See prompts/enum.md for agent status values and other enums.
 
 import fcntl
 import json
-import glob as glob_mod
 import os
 import re
 import shutil
@@ -412,146 +410,6 @@ def write_atomic(path: Path, data) -> None:
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
-
-
-# ── Stale-count check ────────────────────────────────────────────────────────
-
-
-def check_stale_counts():
-    """Auto-detect mismatched counts in AGENTS.md and prompts.
-
-    Recurring failure mode: cycle adds a tab/script but AGENTS.md and
-    server.md still show the old number. This check runs every cycle so
-    drift is caught immediately rather than lingering until the next
-    prompt_evolution cycle.
-
-    Prints a warning with exact fix commands only when a mismatch is found.
-    Silent (no output) when everything matches — avoids noise in normal runs.
-    """
-    issues = []
-
-    # ── 1. Tab count ─────────────────────────────────────────────────────────
-    server_py = Path("/agent/server.py")
-    if server_py.exists():
-        src = server_py.read_text()
-        idx = src.find("TAB_REGISTRY = [")
-        if idx != -1:
-            body = src[idx:]
-            actual_tabs = body[: body.find("]")].count("(")
-        else:
-            actual_tabs = None
-
-        if actual_tabs is not None:
-            # Check prompts/server.md for tab count references
-            server_md = Path("/agent/prompts/server.md")
-            if server_md.exists():
-                md_text = server_md.read_text()
-                matches = re.findall(r"(\d+)\s+tab", md_text)
-                for m in matches:
-                    if int(m) != actual_tabs:
-                        issues.append(
-                            f"  ⚠ Tab count mismatch: server.md says '{m} tab*' but "
-                            f"TAB_REGISTRY has {actual_tabs} tabs"
-                        )
-                        break
-
-            # Check AGENTS.md for tab count
-            agents_md = Path("/agent/AGENTS.md")
-            if agents_md.exists():
-                md_text = agents_md.read_text()
-                matches = re.findall(r"(\d+)\s+tabs?\s+total", md_text)
-                for m in matches:
-                    if int(m) != actual_tabs:
-                        issues.append(
-                            f"  ⚠ Tab count mismatch: AGENTS.md says '{m} tabs total' but "
-                            f"TAB_REGISTRY has {actual_tabs} tabs"
-                        )
-                        break
-
-    # ── 2. Self-test count ───────────────────────────────────────────────────
-    self_test = Path("/agent/scripts/self_test.py")
-    error_triage = Path("/agent/prompts/error-triage.md")
-    self_heal_md = Path("/agent/prompts/self-heal.md")
-
-    if self_test.exists():
-        # Get test count using mtime-based cache to avoid 1.4s subprocess on every cycle.
-        # Cache file: /agent/memory/self_test_count.json → {mtime: float, count: int}
-        # Only re-runs self_test.py when the file has actually changed.
-        _count_cache = MEMORY / "self_test_count.json"
-        actual_tests = None
-        try:
-            current_mtime = self_test.stat().st_mtime
-            # Check cache
-            cached = None
-            if _count_cache.exists():
-                try:
-                    cached = json.loads(_count_cache.read_text())
-                except Exception:
-                    cached = None
-            if cached and abs(cached.get("mtime", 0) - current_mtime) < 0.001:
-                # Cache hit — self_test.py unchanged, use stored count
-                actual_tests = cached.get("count")
-            else:
-                # Cache miss — run self_test and cache result
-                try:
-                    import importlib.util
-
-                    spec = importlib.util.spec_from_file_location(
-                        "self_test", str(self_test)
-                    )
-                    self_test_mod = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(self_test_mod)
-                    self_test_mod.run_all()
-                    actual_tests = len(self_test_mod.results)
-                    if actual_tests:
-                        _count_cache.write_text(
-                            json.dumps({"mtime": current_mtime, "count": actual_tests})
-                        )
-                except Exception:
-                    pass
-        except Exception:
-            actual_tests = None
-
-        if actual_tests is not None:
-            for prompt_path in [error_triage, self_heal_md]:
-                if prompt_path.exists():
-                    prompt_text = prompt_path.read_text()
-                    matches = re.findall(r"(\d+)[\s-]test", prompt_text)
-                    for pm in matches:
-                        if int(pm) != actual_tests:
-                            issues.append(
-                                f"  ⚠ Test count mismatch: {prompt_path.name} says '{pm} test*' but "
-                                f"self_test.py reports {actual_tests} tests — update the prompt"
-                            )
-                            break  # one warning per file is enough
-
-    # ── 3. Script count ──────────────────────────────────────────────────────
-    scripts_dir = Path("/agent/scripts")
-    if scripts_dir.exists():
-        actual_scripts = len(
-            glob_mod.glob(str(scripts_dir / "*.py"))
-            + glob_mod.glob(str(scripts_dir / "*.sh"))
-        )
-        agents_md = Path("/agent/AGENTS.md")
-        if agents_md.exists():
-            md_text = agents_md.read_text()
-            # Look for "N scripts" patterns in capabilities section
-            matches = re.findall(r"(\d+)\s+scripts?\b", md_text)
-            for m in matches:
-                if int(m) != actual_scripts and abs(int(m) - actual_scripts) > 1:
-                    issues.append(
-                        f"  ⚠ Script count: AGENTS.md references '{m} scripts' but "
-                        f"/agent/scripts/ has {actual_scripts} files — run sync-capabilities.py"
-                    )
-                    break
-
-    # ── Output ───────────────────────────────────────────────────────────────
-    if issues:
-        print("\n[STALE COUNTS DETECTED] Fix before closing:")
-        for issue in issues:
-            print(issue)
-        print("  → Update AGENTS.md and prompts/ to match actual counts (takes ~30s)")
-    # Silent when all counts match
 
 
 # ── Auto-backup ──────────────────────────────────────────────────────────────
@@ -1168,16 +1026,13 @@ def main():
                 "  ⚠ inbox archive — FAILED; inbox left intact for next cycle to retry"
             )
 
-    # 6. Stale-count check (always — catches drift from any cycle type)
-    check_stale_counts()
-
-    # 7. Auto-backup memory files if last backup >1h old (eliminates manual step 6)
+    # 6. Auto-backup memory files if last backup >1h old (eliminates manual step 6)
     _auto_backup_if_stale(dry_run=False)
 
-    # 8. Sync auto memory (markdown files for agent native memory)
+    # 7. Sync auto memory (markdown files for agent native memory)
     _sync_auto_memory()
 
-    # 9. Buffer the journal entry, then flush every memvid write for this
+    # 8. Buffer the journal entry, then flush every memvid write for this
     #    cycle in a single open + ONE commit (inbox messages + journal entry).
     #    cycle records are no longer ingested — cycles.json is excluded from
     #    long-term memory.
