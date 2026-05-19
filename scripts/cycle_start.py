@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-cycle_start.py — Single-command cycle startup briefing (replaces running memory-stats + memory-repair separately).
+cycle_start.py — Single-command cycle startup briefing.
 
 Combines in one Python process (one `uv run` invocation):
   1. Memory repair scan (detect + fix corrupted JSON)
@@ -36,7 +36,9 @@ LONG_TERM_MEMORY_MV2_PATH = MEMORY / "long_term_memory.mv2"
 SCRIPTS = Path("/agent/scripts")
 DREAM_DIR = MEMORY / "dream"
 
-from scripts.memory_repair import run_repair as _run_memory_repair  # noqa: E402
+from scripts.repair_memory_files import (
+    run_repair as _run_repair_memory_files,
+)  # noqa: E402
 
 # ── Flags ───────────────────────────────────────────────────────────────────────
 args = sys.argv[1:]
@@ -196,7 +198,7 @@ def _auto_archive_journal_inlined(
     to_keep = [e for e in entries if e.get("cycle_number") not in archive_cycles]
     # Merge with existing archive (deduplicate by cycle number). Migrate the
     # archive in place so the legacy "cycle" key is rewritten to "cycle_number".
-    from scripts.memory_repair import migrate_journal_list
+    from scripts.repair_memory_files import migrate_journal_list
 
     existing = load_json(ARCHIVE_PATH)
     existing_list = existing if isinstance(existing, list) else []
@@ -263,7 +265,7 @@ def _auto_archive_cycles_inlined(
     to_archive = [e for e in entries if e.get("cycle_number") in archive_cycles]
     to_keep = [e for e in entries if e.get("cycle_number") not in archive_cycles]
     # Merge with existing archive (deduplicate by cycle number).
-    from scripts.memory_repair import migrate_cycles_list
+    from scripts.repair_memory_files import migrate_cycles_list
 
     existing = load_json(ARCHIVE_PATH)
     existing_list = existing if isinstance(existing, list) else []
@@ -315,7 +317,7 @@ def check_orphaned_cycles(cycles: list, max_age_minutes: int = 30) -> tuple:
 
 
 def load_all():
-    from scripts.memory_repair import (
+    from scripts.repair_memory_files import (
         migrate_cycles_list,
         migrate_journal_list,
         migrate_state_dict,
@@ -1558,7 +1560,7 @@ def main():
     if NO_REPAIR:
         repair = {"ok": 0, "repaired": 0, "failed": 0, "issues": []}
     else:
-        repair = _run_memory_repair()
+        repair = _run_repair_memory_files()
 
     # Step 2: Load data
     state, goals, cycles, failures, journal, capabilities, inbox, server_errors = (

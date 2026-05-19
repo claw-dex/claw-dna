@@ -9,15 +9,15 @@ from datetime import datetime, timezone
 
 import pytest
 
-# Stub scripts.memory_repair before importing cycle_start
+# Stub scripts.repair_memory_files before importing cycle_start
 if "scripts" not in sys.modules:
     pkg = types.ModuleType("scripts")
     pkg.__path__ = []
     sys.modules["scripts"] = pkg
-if "scripts.memory_repair" not in sys.modules:
-    mr = types.ModuleType("scripts.memory_repair")
+if "scripts.repair_memory_files" not in sys.modules:
+    mr = types.ModuleType("scripts.repair_memory_files")
     mr.run_repair = lambda: {"ok": 0, "repaired": 0, "failed": 0, "issues": []}
-    sys.modules["scripts.memory_repair"] = mr
+    sys.modules["scripts.repair_memory_files"] = mr
 
 import cycle_start as cs
 

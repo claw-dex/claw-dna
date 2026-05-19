@@ -62,7 +62,7 @@ def main():
             print(f"Unknown argument: {args[i]}")
             sys.exit(1)
 
-    from scripts.memory_repair import (
+    from scripts.repair_memory_files import (
         migrate_cycles_list,
         migrate_journal_list,
         migrate_state_dict,

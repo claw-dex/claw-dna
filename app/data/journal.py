@@ -34,7 +34,7 @@ def _parse_journal_entries():
         if cached_am == active_mtime and cached_arch == archive_mtime:
             return result
 
-    from scripts.memory_repair import migrate_journal_list
+    from scripts.repair_memory_files import migrate_journal_list
 
     active = _read_json_safe(active_path, [])
     if not isinstance(active, list):

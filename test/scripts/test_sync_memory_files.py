@@ -1,4 +1,4 @@
-"""Tests for scripts/memory_sync.py."""
+"""Tests for scripts/sync_memory_files.py."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-import memory_sync as msync
+import sync_memory_files as msync
 
 
 @pytest.fixture
@@ -203,7 +203,7 @@ def test_sync_all_dry_run(patch_paths, capsys):
 
 def test_main_runs(patch_paths, monkeypatch, capsys):
     (patch_paths / "state.json").write_text(json.dumps({"cycle_number": 1}))
-    monkeypatch.setattr(sys, "argv", ["memory_sync.py", "--only", "state"])
+    monkeypatch.setattr(sys, "argv", ["sync_memory_files.py", "--only", "state"])
     msync.main()
     assert (
         "synced" in capsys.readouterr().out.lower()

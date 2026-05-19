@@ -18,7 +18,7 @@ from app.shared import MEMORY_DIR
 )
 def load_state(data):
     """Load state.json — mtime-cached, invalidates on every heartbeat write."""
-    from scripts.memory_repair import migrate_state_dict
+    from scripts.repair_memory_files import migrate_state_dict
 
     if isinstance(data, dict):
         migrate_state_dict(data)

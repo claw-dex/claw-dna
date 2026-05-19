@@ -29,7 +29,7 @@ def load_cycles():
     sorted by cycle_number ascending so downstream slicing (`[-30:]`, `[-10:]`)
     keeps yielding the most recent entries.
     """
-    from scripts.memory_repair import migrate_cycles_list
+    from scripts.repair_memory_files import migrate_cycles_list
 
     active = _read_json_safe(f"{MEMORY_DIR}/cycles.json", [])
     if not isinstance(active, list):

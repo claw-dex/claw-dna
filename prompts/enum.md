@@ -2,7 +2,7 @@
 
 This document defines all enum-type fields used throughout the MewClaw system. These are fields with a fixed set of possible string values.
 
-> **Field-name rename (current schema):** state/cycle/journal records use disambiguated field names so the same concept doesn't collide across files. State entries use `agent_status` (not `status`). Cycle and journal entries use `cycle_number` (not `cycle`), `cycle_status` (not `status`), `cycle_type` (not `type`), `cycle_category` (not `category`); journal entries also use `cycle_goal` (not `goal`). `scripts/memory_repair.py` migrates legacy keys at load time, so on-disk data may still carry the old names until rewritten.
+> **Field-name rename (current schema):** state/cycle/journal records use disambiguated field names so the same concept doesn't collide across files. State entries use `agent_status` (not `status`). Cycle and journal entries use `cycle_number` (not `cycle`), `cycle_status` (not `status`), `cycle_type` (not `type`), `cycle_category` (not `category`); journal entries also use `cycle_goal` (not `goal`). `scripts/repair_memory_files.py` migrates legacy keys at load time, so on-disk data may still carry the old names until rewritten.
 
 ---
 

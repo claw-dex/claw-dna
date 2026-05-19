@@ -1,6 +1,6 @@
 ---
 name: memory-inspect
-description: Inspect the long-term semantic memory `.mv2` file (memvid SDK) for size, frame counts, segment catalog, payload-vs-on-disk efficiency, and per-frame breakdown. Use when the `.mv2` file is growing unexpectedly fast, when diagnosing storage bloat or commit/segment inflation, when comparing the indexed entry count against the source JSON files (journal, cycles, inbox_history), when sampling frame contents to find auto-chunked records, or when deciding whether to rebuild via `memory-ingest`. Triggers on "inspect mv2", "why is long_term_memory.mv2 so big", "memvid file growth", "memvid stats", "check memory file size", "memvid storage utilisation", or any disk-usage investigation of the agent's long-term memory store.
+description: Inspect the long-term semantic memory `.mv2` file (memvid SDK) for size, frame counts, segment catalog, payload-vs-on-disk efficiency, and per-frame breakdown. Also checks HNSW embedding dimension alignment. Use when the `.mv2` file is growing unexpectedly fast, when diagnosing storage bloat or commit/segment inflation, when comparing the indexed entry count against the source JSON files (journal, cycles, inbox_history), when verifying the HNSW index is aligned with the current embedding model, or when deciding whether to rebuild via `memory-ingest`. Triggers on "inspect mv2", "why is long_term_memory.mv2 so big", "memvid file growth", "memvid stats", "check memory file size", "memvid storage utilisation", "check HNSW alignment", "verify embedding dimension", or any disk-usage or HNSW health investigation of the agent's long-term memory store.
 ---
 
 # memory-inspect
@@ -30,6 +30,7 @@ that inflation visible.
 | `--top-tags N` | How many top tags to print (default: 20) |
 | `--sample N` | Print N raw timeline entries (default: 0) |
 | `--deep` | Call SDK introspection (`stats`, `memories_stats`, `state`, `get_capacity`, `doctor`, `verify`, `list_tables`) and fetch full frames for the largest fan-out records — outputs JSON |
+| `--stats` | Query SDK `stats()` and compare the stored embedding dimension against `EMBED_MODEL` in `memory_ingest.py`. Prints alignment status (✅ ALIGNED / ❌ MISMATCH). Exit code 2 if mismatched — use as a scriptable health check. Supports `--json`. |
 | `--frame N` | Fetch a single frame by id via `mem.frame()` and print full content — outputs JSON |
 | `--api` | Print `dir(mem)` for the opened handle and exit (lists all SDK methods) |
 | `--json` | Output the default report as JSON |
@@ -68,6 +69,12 @@ uv run python scripts/memory_inspect.py --mv2 /agent/memory/project_notes.mv2
 # Inspect a .mv2 whose source JSON files live in a different directory
 uv run python scripts/memory_inspect.py \
     --mv2 /tmp/standalone.mv2 --memory /agent/memory
+
+# HNSW / embedding dimension health check (exit code 2 = mismatch → needs --build)
+uv run python scripts/memory_inspect.py --stats
+
+# Machine-readable stats check (for scripts / system-check)
+uv run python scripts/memory_inspect.py --stats --json
 ```
 
 ## What the report tells you
@@ -110,6 +117,25 @@ the cheapest fix.
 `fanout_samples` shows the records with the most child frames (these are
 typically large journal entries that the SDK auto-split into multiple
 sub-frames). `flat_frame_samples` shows zero-child entries for comparison.
+
+### `--stats` (HNSW / embedding health check)
+
+Calls `mem.stats()` and reads `EMBED_MODEL` from `memory_ingest.py` to verify
+the index was built with the same embedding model that future appends will use.
+
+| Output field | Meaning |
+|---|---|
+| `dimension_aligned` | `true` = healthy; `false` = MISMATCH, rebuild needed |
+| `effective_vec_dimension` | Dimension stored in the HNSW index |
+| `expected_dimension` | Dimension the current `EMBED_MODEL` produces |
+| `stored_model` | Full model name recorded inside the `.mv2` |
+| `expected_model` | Full model name implied by `EMBED_MODEL` in `memory_ingest.py` |
+
+Exit code `2` signals a mismatch so shell scripts / `system-check.md` can act
+on `$?` directly. Exit code `0` = aligned. Exit code `1` = file-not-found or
+SDK error.
+
+**Fix for dimension mismatch:** `uv run python scripts/memory_ingest.py --build`
 
 ### Note on stderr noise
 

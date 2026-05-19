@@ -47,7 +47,7 @@ def _load_json(path, default=None):
 
 
 def _load_state():
-    from scripts.memory_repair import migrate_state_dict
+    from scripts.repair_memory_files import migrate_state_dict
 
     state = _load_json(MEMORY_DIR / "state.json", {})
     if isinstance(state, dict):
@@ -56,7 +56,7 @@ def _load_state():
 
 
 def _load_cycles():
-    from scripts.memory_repair import migrate_cycles_list
+    from scripts.repair_memory_files import migrate_cycles_list
 
     cycles = _load_json(MEMORY_DIR / "cycles.json", [])
     if isinstance(cycles, list):
@@ -85,7 +85,7 @@ def _load_capabilities():
 
 
 def _load_journal():
-    from scripts.memory_repair import migrate_journal_list
+    from scripts.repair_memory_files import migrate_journal_list
 
     journal = _load_json(MEMORY_DIR / "journal.json", [])
     if isinstance(journal, list):

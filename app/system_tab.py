@@ -69,11 +69,7 @@ _SCRIPT_ARGS: dict[str, list] = {
         {"flag": "--format", "help": "Output format: md or json", "placeholder": "md"},
     ],
     # Memory
-    "memory_stats.py": [
-        {"flag": "--json", "help": "Machine-readable JSON output"},
-        {"flag": "--short", "help": "One-liner summary only"},
-    ],
-    "memory_repair.py": [
+    "repair_memory_files.py": [
         {"flag": "--dry-run", "help": "Scan only, no writes"},
         {"flag": "--backup", "help": "Create backups only (no repair)"},
         {"flag": "--quiet", "help": "Only print summary line"},
@@ -136,7 +132,7 @@ _SCRIPT_ARGS: dict[str, list] = {
         {"flag": "--json", "help": "Output as JSON"},
         {"flag": "--quiet", "help": "Suppress progress output"},
     ],
-    "memory_sync.py": [
+    "sync_memory_files.py": [
         {"flag": "--dry-run", "help": "Preview only, do not write .md files"},
         {
             "flag": "--only",

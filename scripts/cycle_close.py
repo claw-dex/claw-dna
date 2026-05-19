@@ -84,13 +84,13 @@ def _normalize_cycle_entry(entry: dict) -> tuple:
       - "timestamp" → "start"
       - rename legacy keys to current schema (cycle → cycle_number,
         status → cycle_status, type → cycle_type, category → cycle_category,
-        goal → cycle_goal) via memory_repair.migrate_cycle_entry
+        goal → cycle_goal) via repair_memory_files.migrate_cycle_entry
       - drop "summary" — summaries live on journal.json now, mirroring them
         onto cycles.json was redundant
       - computes duration_seconds when start+end present but duration missing
       - adds default cycle_status/cycle_type if absent
     """
-    from scripts.memory_repair import migrate_cycle_entry
+    from scripts.repair_memory_files import migrate_cycle_entry
 
     c = dict(entry)
     n = 0
@@ -506,15 +506,15 @@ def _auto_backup_if_stale(dry_run: bool = False) -> None:
 
 
 def _sync_auto_memory() -> None:
-    """Sync JSON memory → .md files via memory_sync.py.
+    """Sync JSON memory → .md files via sync_memory_files.py.
 
     Non-fatal: if sync fails, cycle-close prints a warning but exits 0.
     """
     try:
-        from scripts.memory_sync import sync_all
+        from scripts.sync_memory_files import sync_all
 
         sync_all()
-        print(f"  ✓ auto memory — synced via memory_sync.py")
+        print(f"  ✓ auto memory — synced via sync_memory_files.py")
     except Exception as e:
         print(f"  ⚠ auto memory sync failed (non-fatal): {e}")
 
@@ -828,7 +828,7 @@ def main():
     # Migrate legacy field names in memory before any reads so the rest of
     # this function only sees the current schema. Disk gets rewritten when
     # we save updates below.
-    from scripts.memory_repair import (
+    from scripts.repair_memory_files import (
         migrate_cycles_list,
         migrate_journal_list,
         migrate_state_dict,

@@ -120,7 +120,7 @@ _CRITICAL_DIRS = [
     f"{AGENT_DIR}/workspace",
 ]
 # Canonical defaults for /agent/memory/state.json. Single source of truth —
-# scripts/app_check.py imports this; scripts/memory_repair.py keeps a
+# scripts/app_check.py imports this; scripts/repair_memory_files.py keeps a
 # parallel copy (with timestamps) because it must run even when app/ is
 # unimportable, and that copy carries a comment pointing back here.
 STATE_DEFAULTS = {

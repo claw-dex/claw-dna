@@ -901,7 +901,7 @@ def handle_status_command(
         goals = json.loads(goals_path.read_text()) if goals_path.exists() else []
         cycles = json.loads(cycles_path.read_text()) if cycles_path.exists() else []
 
-        from scripts.memory_repair import migrate_state_dict
+        from scripts.repair_memory_files import migrate_state_dict
 
         if isinstance(state, dict):
             migrate_state_dict(state)
@@ -1105,7 +1105,7 @@ def handle_today_command(
         # --- Cycles run today ---
         cycles_path = BASE / "memory" / "cycles.json"
         cycles = json.loads(cycles_path.read_text()) if cycles_path.exists() else []
-        from scripts.memory_repair import migrate_cycles_list
+        from scripts.repair_memory_files import migrate_cycles_list
 
         if isinstance(cycles, list):
             migrate_cycles_list(cycles)
@@ -1251,7 +1251,7 @@ def handle_cycles_command(
             append_chat_message(chat_history, from_chat, "bot", response)
             return
 
-        from scripts.memory_repair import migrate_cycles_list
+        from scripts.repair_memory_files import migrate_cycles_list
 
         migrate_cycles_list(cycles)
 

@@ -77,7 +77,7 @@
     "enabled": true
   },
   {
-    "id": "memory_repair",
+    "id": "repair_memory_files",
     "name": "Memory Repair",
     "description": "Detects and auto-repairs corrupted JSON memory files; restores from backups or safe defaults",
     "category": "memory",
@@ -91,8 +91,8 @@
     "enabled": true
   },
   {
-    "id": "memory_sync",
-    "name": "Memory Sync",
+    "id": "sync_memory_files",
+    "name": "Sync Memory Files",
     "description": "Generates .md auto-memory files from JSON memory data (state, capabilities, goals); makes memory accessible to the agent's memory system",
     "category": "memory",
     "enabled": true
@@ -129,13 +129,6 @@
     "id": "search",
     "name": "Hybrid Full-Text Search",
     "description": "Two-stage hybrid search (scripts/search.py): ripgrep does a fast exact-match pre-filter to discover candidate files, then BM25S indexes each one and produces a globally re-ranked list of relevance-scored snippets across /agent (memory/, messages/, web/, workspace/, scripts/, prompts/) and any other repo path. Large files (>100 KB) get cached on-disk indices rebuilt only when source mtime changes; supports --dir scoping, --top N, --no-rg (catalog-only), --json, --rebuild-all, --list-catalog, --reset-catalog. Exposed to the agent via the 'search' skill",
-    "category": "memory",
-    "enabled": true
-  },
-  {
-    "id": "memory_stats",
-    "name": "Memory Stats Summary",
-    "description": "Fast cycle-start status summary that reads all key memory files and prints a concise structured report (text/JSON/--short) so future cycles don't have to open multiple files manually",
     "category": "memory",
     "enabled": true
   },

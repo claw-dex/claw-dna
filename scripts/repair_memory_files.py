@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-memory_repair.py — Detect and auto-repair corrupted agent memory files.
+repair_memory_files.py — Detect and auto-repair corrupted agent memory files.
 
 Scans all critical JSON memory files, attempts repair from .backup copies
 or safe defaults, and creates fresh .backup copies after successful repair.
 
 Usage:
-    python3 memory_repair.py              # scan + repair + report
-    python3 memory_repair.py --dry-run    # scan only, no writes
-    python3 memory_repair.py --backup     # only create backups (no repair)
-    python3 memory_repair.py --quiet      # only print summary line
-    python3 memory_repair.py --json       # output machine-readable JSON
+    python3 repair_memory_files.py              # scan + repair + report
+    python3 repair_memory_files.py --dry-run    # scan only, no writes
+    python3 repair_memory_files.py --backup     # only create backups (no repair)
+    python3 repair_memory_files.py --quiet      # only print summary line
+    python3 repair_memory_files.py --json       # output machine-readable JSON
 
 Exit code: 0 = all ok (or repaired), 1 = unrecoverable issues remain.
 
@@ -34,7 +34,7 @@ def _now():
 # ── Defaults for reconstruction ────────────────────────────────────────────────
 #
 # state.json defaults are duplicated from app/shared.py:STATE_DEFAULTS so that
-# memory_repair can run when the app/ package itself is unimportable (the
+# repair_memory_files can run when the app/ package itself is unimportable (the
 # whole point of a recovery tool). Keep these two in sync — fields here that
 # diverge from STATE_DEFAULTS are scoped to repair-time only:
 #   - last_cycle_summary  → marker so post-repair journals identify the source
@@ -46,7 +46,7 @@ DEFAULTS = {
         "cycle_number": 0,
         "agent_status": "idle",
         "current_goal": None,
-        "last_cycle_summary": "Reconstructed by memory_repair.py",
+        "last_cycle_summary": "Reconstructed by repair_memory_files.py",
         "last_heartbeat": _now(),
         "last_cycle_run": _now(),
         "services": {},
@@ -575,7 +575,7 @@ def main():
         if failed_count:
             parts.append(f"{failed_count} FAILED")
         mode = " [dry-run]" if dry_run else (" [backup-only]" if backup_only else "")
-        print(f"memory-repair{mode}: {', '.join(parts)}")
+        print(f"repair-memory-files{mode}: {', '.join(parts)}")
         sys.exit(1 if failed_count > 0 else 0)
 
     # Full output

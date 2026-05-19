@@ -217,7 +217,7 @@ def compose_journal_text(entry: dict) -> str:
     """Compose readable text from a journal entry for semantic embedding.
 
     Caller is expected to have already migrated the entry to the current
-    schema (e.g. via memory_repair.migrate_journal_entry); reads only new
+    schema (e.g. via repair_memory_files.migrate_journal_entry); reads only new
     field names.
     """
     parts = []
@@ -238,7 +238,7 @@ def compose_journal_text(entry: dict) -> str:
 
 def transform_journal_entry(entry: dict) -> dict | None:
     """Convert a single journal entry into an ingest chunk, or None if unusable."""
-    from scripts.memory_repair import migrate_journal_entry
+    from scripts.repair_memory_files import migrate_journal_entry
 
     if not isinstance(entry, dict):
         return None
@@ -289,7 +289,7 @@ def transform_journal(journal: list) -> list:
 
 def transform_cycle_entry(entry: dict) -> dict | None:
     """Convert a single cycle record into an ingest chunk, or None if unusable."""
-    from scripts.memory_repair import migrate_cycle_entry
+    from scripts.repair_memory_files import migrate_cycle_entry
 
     if not isinstance(entry, dict):
         return None
@@ -737,7 +737,7 @@ def _detect_and_transform(entry: dict) -> dict | None:
     """Auto-detect entry type and route to the correct transformer.
 
     Detection heuristic (applies to current schema; legacy keys are mapped
-    by the transformers themselves via memory_repair.migrate_*):
+    by the transformers themselves via repair_memory_files.migrate_*):
       - Has "actions" or ("cycle_goal" + "summary") → journal entry
       - Has "start" or "end" or "duration_seconds" → cycle record
       - Has "content" and "status" (no cycle fields) → goal record

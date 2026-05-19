@@ -84,7 +84,7 @@ Entry appended by cycle-close:
 ```
 
 - `cycle_goal` and `cycle_category` are appended only when present (see `cycle_close.py:1090-1093`).
-- Older entries on disk may still carry the pre-rename keys (`cycle`, `type`, `status`, `category`, `goal`); `memory_repair.py` migrates them on the next repair run.
+- Older entries on disk may still carry the pre-rename keys (`cycle`, `type`, `status`, `category`, `goal`); `repair_memory_files.py` migrates them on the next repair run.
 
 ### goal.json
 

@@ -1,4 +1,4 @@
-"""Tests for scripts/memory_repair.py."""
+"""Tests for scripts/repair_memory_files.py."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-import memory_repair as mr
+import repair_memory_files as mr
 
 
 @pytest.fixture
@@ -156,7 +156,7 @@ def test_run_repair_backup_only(patch_paths):
 def test_main_quiet_exits_zero_on_healthy(patch_paths, monkeypatch, capsys):
     for name, default in mr.DEFAULTS.items():
         (patch_paths / name).write_text(json.dumps(default))
-    monkeypatch.setattr(sys, "argv", ["memory_repair.py", "--quiet"])
+    monkeypatch.setattr(sys, "argv", ["repair_memory_files.py", "--quiet"])
     with pytest.raises(SystemExit) as exc:
         mr.main()
     assert exc.value.code == 0
@@ -165,7 +165,7 @@ def test_main_quiet_exits_zero_on_healthy(patch_paths, monkeypatch, capsys):
 def test_main_json_output(patch_paths, monkeypatch, capsys):
     for name, default in mr.DEFAULTS.items():
         (patch_paths / name).write_text(json.dumps(default))
-    monkeypatch.setattr(sys, "argv", ["memory_repair.py", "--json"])
+    monkeypatch.setattr(sys, "argv", ["repair_memory_files.py", "--json"])
     with pytest.raises(SystemExit):
         mr.main()
     data = json.loads(capsys.readouterr().out)

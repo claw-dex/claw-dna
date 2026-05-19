@@ -52,7 +52,7 @@ def _write_json_atomic(path, data):
 
 
 def cmd_archive(keep=DEFAULT_KEEP, dry_run=False):
-    from scripts.memory_repair import migrate_journal_list
+    from scripts.repair_memory_files import migrate_journal_list
 
     _migrate_legacy_archive()
     entries = _load_json(JOURNAL, [])
@@ -145,7 +145,7 @@ def cmd_list():
 
 
 def cmd_search(query):
-    from scripts.memory_repair import migrate_journal_list
+    from scripts.repair_memory_files import migrate_journal_list
 
     _migrate_legacy_archive()
     q = query.lower()

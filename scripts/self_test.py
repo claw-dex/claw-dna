@@ -130,7 +130,7 @@ def test_state_fields():
         _check("state_fields", False, f"cannot read: {e}")
         return
 
-    from scripts.memory_repair import migrate_state_dict
+    from scripts.repair_memory_files import migrate_state_dict
 
     migrate_state_dict(state)
 
@@ -365,10 +365,9 @@ def test_data_loaders():
 CRITICAL_SCRIPTS = [
     "cycle_start.py",
     "cycle_close.py",
-    "memory_repair.py",
+    "repair_memory_files.py",
     "self_test.py",
     "journal_archive.py",
-    "memory_stats.py",
     "metrics_collector.py",
     "milestone_report.py",
     "maintain.py",

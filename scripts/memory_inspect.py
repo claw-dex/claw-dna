@@ -15,6 +15,8 @@ Usage:
     uv run python scripts/memory_inspect.py --sample 5         # show 5 raw entries
     uv run python scripts/memory_inspect.py --json
     uv run python scripts/memory_inspect.py --api               # dump SDK surface
+    uv run python scripts/memory_inspect.py --stats              # HNSW/embedding health check
+    uv run python scripts/memory_inspect.py --stats --json       # machine-readable stats
 
 Optional:
     --mv2 PATH        Path to the .mv2 file (default: /agent/memory/long_term_memory.mv2)
@@ -31,11 +33,14 @@ Optional:
     --frame N         Fetch frame N via mem.frame() and print full content
     --api             Print dir(mem) for the opened handle and exit
     --json            Output report as JSON
+    --stats            Query SDK stats() and compare embedding dimension against
+                       memory_ingest.py EMBED_MODEL. Exit code 2 = MISMATCH.
 
 Exit codes: 0 = success, 1 = error (file not found, SDK error)
 """
 
 import json
+import re
 import sys
 from collections import Counter
 from datetime import datetime, timezone
@@ -49,6 +54,14 @@ except ImportError:
 
 MEMORY = Path("/agent/memory")
 DEFAULT_MV2 = MEMORY / "long_term_memory.mv2"
+
+# Maps EMBED_MODEL short-keys (from memory_ingest.py) to (full_model_name, dimension).
+# Keep this in sync if memory_ingest.py ever changes EMBED_MODEL.
+_MODEL_DIMENSION_MAP = {
+    "bge-small": ("BAAI/bge-small-en-v1.5", 384),
+    "bge-base": ("BAAI/bge-base-en-v1.5", 768),
+    "bge-large": ("BAAI/bge-large-en-v1.5", 1024),
+}
 
 
 def _require_sdk():
@@ -77,6 +90,7 @@ def parse_args(argv):
         "api": False,
         "json_mode": False,
         "help": False,
+        "stats": False,
     }
     i = 0
     while i < len(args):
@@ -107,6 +121,8 @@ def parse_args(argv):
             result["api"] = True
         elif a == "--json":
             result["json_mode"] = True
+        elif a == "--stats":
+            result["stats"] = True
         i += 1
 
     # Resolve defaults — `--mv2` falls back to DEFAULT_MV2; `--memory`
@@ -116,6 +132,25 @@ def parse_args(argv):
     if result["memory"] is None:
         result["memory"] = str(Path(result["mv2"]).resolve().parent)
     return result
+
+
+def _read_embed_model_from_ingest() -> tuple[str | None, str | None, int | None]:
+    """Parse EMBED_MODEL from memory_ingest.py (sibling script).
+
+    Returns (model_key, full_model_name, expected_dimension).
+    Falls back gracefully if the file is missing or unparseable.
+    """
+    ingest_path = Path(__file__).parent / "memory_ingest.py"
+    try:
+        text = ingest_path.read_text(encoding="utf-8")
+        m = re.search(r'^EMBED_MODEL\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
+        if m:
+            key = m.group(1)
+            full, dim = _MODEL_DIMENSION_MAP.get(key, (None, None))
+            return key, full, dim
+    except OSError:
+        pass
+    return None, None, None
 
 
 # ── File-system inspection ──────────────────────────────────────────────────
@@ -582,6 +617,118 @@ def inspect_sources(memory_dir: Path) -> dict:
 # ── Reporting ───────────────────────────────────────────────────────────────
 
 
+def inspect_stats(mv2: Path) -> dict:
+    """Query SDK stats() and compare embedding dimension against memory_ingest.py.
+
+    Returns a structured dict. Key field `dimension_aligned` is:
+      True  — stored dimension matches memory_ingest.py EMBED_MODEL
+      False — MISMATCH: index needs a --build rebuild
+      None  — could not determine (SDK error or unknown model)
+    """
+    model_key, expected_model, expected_dim = _read_embed_model_from_ingest()
+
+    mem = _open_readonly(mv2)
+    try:
+        raw = mem.stats()
+    except Exception as e:
+        return {"error": f"stats() failed: {type(e).__name__}: {e}"}
+
+    identity_summary = raw.get("embedding_identity_summary") or {}
+    identity = (
+        (identity_summary.get("identity") or {})
+        if isinstance(identity_summary, dict)
+        else {}
+    )
+    stored_model = identity.get("model")
+    stored_dim = identity.get("dimension")
+    provider = identity.get("provider")
+    effective_dim = raw.get("effective_vec_dimension")
+
+    if expected_dim is not None and effective_dim is not None:
+        aligned = effective_dim == expected_dim
+    else:
+        aligned = None
+
+    # Try to get SDK version from global info
+    sdk_version = None
+    try:
+        sdk_info = memvid_sdk.info()
+        sdk_version = (
+            sdk_info.get("sdk_version") if isinstance(sdk_info, dict) else None
+        )
+    except Exception:
+        pass
+
+    return {
+        "model_key": model_key,
+        "expected_model": expected_model,
+        "expected_dimension": expected_dim,
+        "stored_model": stored_model,
+        "stored_dimension": stored_dim,
+        "effective_vec_dimension": effective_dim,
+        "provider": provider,
+        "dimension_aligned": aligned,
+        "frame_count": raw.get("frame_count"),
+        "active_frame_count": raw.get("active_frame_count"),
+        "has_vec_index": raw.get("has_vec_index"),
+        "has_lex_index": raw.get("has_lex_index"),
+        "has_time_index": raw.get("has_time_index"),
+        "size_bytes": raw.get("size_bytes"),
+        "vec_index_bytes": raw.get("vec_index_bytes"),
+        "lex_index_bytes": raw.get("lex_index_bytes"),
+        "compression_ratio_percent": raw.get("compression_ratio_percent"),
+        "sdk_version": sdk_version,
+    }
+
+
+def print_stats_report(s: dict) -> None:
+    """Human-readable output for --stats."""
+    if "error" in s:
+        print(f"ERROR: {s['error']}")
+        return
+
+    aligned = s["dimension_aligned"]
+    if aligned is True:
+        status = "✅ ALIGNED"
+    elif aligned is False:
+        status = "❌ MISMATCH"
+    else:
+        status = "⚠️  UNKNOWN"
+
+    print("── HNSW / Embedding Stats ──────────────────────────────────────────")
+    if s.get("model_key"):
+        exp = (
+            f"{s['expected_model']} (dim: {s['expected_dimension']})"
+            if s.get("expected_model")
+            else "unknown"
+        )
+        print(f"  Configured model (memory_ingest.py): {s['model_key']} → {exp}")
+    else:
+        print("  Configured model (memory_ingest.py): could not read EMBED_MODEL")
+    stored = f"{s.get('stored_model', '?')} via {s.get('provider', '?')} (dim: {s.get('stored_dimension', '?')})"
+    print(f"  Stored in index:                     {stored}")
+    print(
+        f"  Effective vec dimension:             {s.get('effective_vec_dimension', '?')}"
+    )
+    print(f"  Dimension alignment:                 {status}")
+    if aligned is False:
+        print(f"\n  ⚠️  Fix: uv run python scripts/memory_ingest.py --build")
+
+    print("\n── Index Health ────────────────────────────────────────────────────")
+    print(f"  Total frames:         {s.get('frame_count', '?')}")
+    print(f"  Active frames:        {s.get('active_frame_count', '?')}")
+    print(f"  Has vec index:        {'✅' if s.get('has_vec_index') else '❌'}")
+    print(f"  Has lex index:        {'✅' if s.get('has_lex_index') else '❌'}")
+    print(f"  Has time index:       {'✅' if s.get('has_time_index') else '❌'}")
+    print(f"  Index size:           {_fmt_bytes(s.get('size_bytes') or 0)}")
+    print(f"  Vec index:            {_fmt_bytes(s.get('vec_index_bytes') or 0)}")
+    print(f"  Lex index:            {_fmt_bytes(s.get('lex_index_bytes') or 0)}")
+    if s.get("compression_ratio_percent") is not None:
+        print(f"  Compression ratio:    {s['compression_ratio_percent']:.1f}%")
+    if s.get("sdk_version"):
+        print(f"  SDK version:          {s['sdk_version']}")
+
+
 def _fmt_bytes(n: int) -> str:
     if n is None:
         return "?"
@@ -682,8 +829,8 @@ def print_text_report(report: dict, top_tags: int) -> None:
             print(f"    {d:<12} {v}")
 
 
-def main():
-    opts = parse_args(sys.argv)
+def main(argv: list[str] | None = None):
+    opts = parse_args([""] + argv if argv is not None else sys.argv)
     if opts["help"]:
         print(__doc__)
         sys.exit(0)
@@ -692,6 +839,17 @@ def main():
     if not mv2.exists():
         print(f"ERROR: {mv2} not found.", file=sys.stderr)
         sys.exit(1)
+
+    if opts["stats"]:
+        s = inspect_stats(mv2)
+        if opts["json_mode"]:
+            print(json.dumps(s, indent=2, default=str))
+        else:
+            print_stats_report(s)
+        # Exit 2 on mismatch so callers can check $?
+        if s.get("dimension_aligned") is False or "error" in s:
+            sys.exit(2)
+        sys.exit(0)
 
     if opts["api"]:
         mem = _open_readonly(mv2)

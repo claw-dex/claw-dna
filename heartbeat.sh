@@ -422,7 +422,7 @@ jq --arg ts "$CYCLE_RUN_TS" '.last_cycle_run = $ts' /agent/memory/state.json > "
 
 # ── Sync JSON memory → .md files for agent auto-memory ──
 # Must run before the agent starts so auto-memory reflects current state.
-uv run python /agent/scripts/memory_sync.py 2>/dev/null || true
+uv run python /agent/scripts/sync_memory_files.py 2>/dev/null || true
 
 cd /agent
 # Run agent in background so we can capture its PID for crash detection.

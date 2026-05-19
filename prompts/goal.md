@@ -26,7 +26,7 @@ the outcome belongs in `--summary` at close. `state.current_goal` is the dynamic
 in-flight sub-task (the agent may update it mid-cycle); it is not what gets written
 to the journal. See `prompts/cycle-close.md` for the full rule on goal vs summary.
 
-Review the output before proceeding. If memory-repair reports any fixes, note them in your journal.
+Review the output before proceeding. If repair-memory-files reports any fixes, note them in your journal.
 
 ## Step 0: Determine Mode
 

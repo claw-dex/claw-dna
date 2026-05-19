@@ -47,7 +47,7 @@ def _is_in_progress(entry: dict) -> bool:
 
 
 def cmd_archive(keep=DEFAULT_KEEP, dry_run=False):
-    from scripts.memory_repair import migrate_cycles_list
+    from scripts.repair_memory_files import migrate_cycles_list
 
     entries = _load_json(CYCLES, [])
     if not isinstance(entries, list):
@@ -160,7 +160,7 @@ def cmd_list():
 
 
 def cmd_search(query):
-    from scripts.memory_repair import migrate_cycles_list
+    from scripts.repair_memory_files import migrate_cycles_list
 
     q = query.lower()
     results = []

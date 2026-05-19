@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-memory_sync.py — Generate agent auto-memory .md files from JSON memory data.
+sync_memory_files.py — Generate agent auto-memory .md files from JSON memory data.
 
 Reads JSON memory files in /agent/memory/ and generates corresponding .md files
 with auto-memory frontmatter format, making them accessible to the agent's
 memory system
 
 Usage:
-    uv run python scripts/memory_sync.py                          # sync all
-    uv run python scripts/memory_sync.py --only capabilities,state  # sync specific
-    uv run python scripts/memory_sync.py --dry-run                # preview only
+    uv run python scripts/sync_memory_files.py                          # sync all
+    uv run python scripts/sync_memory_files.py --only capabilities,state  # sync specific
+    uv run python scripts/sync_memory_files.py --dry-run                # preview only
 
 Exit codes: 0 = success, 1 = errors encountered.
 """
@@ -104,7 +104,7 @@ def render_services() -> str:
 
 
 def render_state() -> str:
-    from scripts.memory_repair import migrate_state_dict
+    from scripts.repair_memory_files import migrate_state_dict
 
     data = load_json(MEMORY / "state.json")
     if not isinstance(data, dict):
@@ -128,7 +128,7 @@ def render_state() -> str:
 
 
 def render_cycles() -> str:
-    from scripts.memory_repair import migrate_cycles_list
+    from scripts.repair_memory_files import migrate_cycles_list
 
     data = load_json(MEMORY / "cycles.json")
     if not isinstance(data, list):
@@ -161,7 +161,7 @@ def render_cycles() -> str:
 
 
 def render_journal() -> str:
-    from scripts.memory_repair import migrate_journal_list
+    from scripts.repair_memory_files import migrate_journal_list
 
     data = load_json(MEMORY / "journal.json")
     if not isinstance(data, list):
