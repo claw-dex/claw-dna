@@ -157,6 +157,38 @@ st.set_page_config(
 )
 ```
 
+**Always update the portal theme** to match the agent's character for this
+goal. The default theme (`base = "dark"` only) is a placeholder — replace it
+with a deliberate choice that reinforces the goal's tone.
+
+> **Skip this entire sub-step if you reached this point from migration
+> recovery.** Migration mode halts at Step 0.6 and never executes Step 2, so
+> in practice this skip is automatic — but if the preserved goal in Step 0.5
+> directs you to perform post-migration portal work, do **not** retheme as
+> part of it unless the user explicitly asked for a theme change. Restored
+> backups carry the user's prior theme and must not be overwritten.
+
+How to choose:
+
+1. Infer the desired tone from the first goal — e.g. a trading agent → high-
+   contrast/Stripe/Snowflake; a creative writing assistant → Solarized-Light
+   or a warm custom palette; a security tool → Dracula or Nord; a brand-
+   specific agent → a custom theme using the brand's primary color.
+2. Use the `change-portal-theme` skill at `skills/change-portal-theme/SKILL.md`
+   for the exact mechanics. It documents the option reference and the eight
+   bundled presets at `skills/developing-with-streamlit/templates/themes/`
+   (`dracula`, `github`, `minimal`, `nord`, `snowflake`, `solarized-light`,
+   `spotify`, `stripe`).
+3. Edit **only** the `[theme]` block (and `[[theme.fontFaces]]` if needed) in
+   `.streamlit/config.toml`. Leave `[server]` and `[browser]` untouched.
+4. If the goal explicitly names a brand, color, or aesthetic, honor it
+   directly instead of picking a preset.
+5. `git add .streamlit/config.toml` after the edit (Step 3 covers
+   git-tracking).
+
+If `[[theme.fontFaces]]` is added, the portal must be restarted for the new
+font face to load — see the `change-portal-theme` skill's checklist.
+
 ## Step 3: Execute
 
 Implement your chosen improvement:
