@@ -891,6 +891,180 @@ def _list_recent_dream_files(hours: int = 24) -> list:
     return out
 
 
+# ── Skill nudges & lifecycle pre-pass ─────────────────────────────────────────
+
+NUDGES_PATH = MEMORY / "nudges.json"
+SKILLS_DIR_CYS = Path("/agent/skills")
+SKILLS_USAGE_PATH = SKILLS_DIR_CYS / ".usage.json"
+
+_NUDGE_DEFAULTS = {
+    "cycles_since_skill_review": 0,
+    "cycles_since_skill_create": 0,
+    "last_nudge_cycle": 0,
+    "last_nudge_kind": None,
+    "thresholds": {"review_every": 10, "create_every": 25, "consolidate_every": 50},
+    "suppress_until_cycle": 0,
+}
+
+
+def _load_nudge_state() -> dict:
+    raw = load_json(NUDGES_PATH) if NUDGES_PATH.exists() else None
+    if not isinstance(raw, dict):
+        raw = {}
+    out = {**_NUDGE_DEFAULTS, **raw}
+    out["thresholds"] = {
+        **_NUDGE_DEFAULTS["thresholds"],
+        **(raw.get("thresholds") or {}),
+    }
+    return out
+
+
+def _skill_keywords() -> set[str]:
+    """Return lowercase directory names of every skill on disk.
+
+    Intentionally narrow: harvesting words from `description:` lines would
+    flood the set with common English fragments ("with", "your", "this")
+    that match nearly every dream-learning file, suppressing orphan-learning
+    nudges entirely. Directory names (e.g. `change-portal-theme`) are
+    sufficiently distinctive on their own.
+    """
+    tokens: set[str] = set()
+    if not SKILLS_DIR_CYS.is_dir():
+        return tokens
+    for sub in SKILLS_DIR_CYS.iterdir():
+        if not sub.is_dir() or sub.name.startswith("."):
+            continue
+        if (sub / "SKILL.md").exists():
+            tokens.add(sub.name.lower())
+    return tokens
+
+
+def _compute_nudge_signals(journal, goals, recent_dream_files) -> dict:
+    # Repeated failure patterns: same `error` summary substring ≥3 in last 50 entries.
+    failure_counter: Counter = Counter()
+    for e in journal[-50:]:
+        if e.get("cycle_status") != "failed":
+            continue
+        sig = (e.get("error") or e.get("summary") or "").strip()[:80].lower()
+        if sig:
+            failure_counter[sig] += 1
+    repeated_failures = [
+        {"pattern": pat, "count": n}
+        for pat, n in failure_counter.most_common(3)
+        if n >= 3
+    ]
+
+    # Hot goal categories: ≥4 of last 20 goals share a category, no matching skill.
+    skill_tokens = _skill_keywords()
+    cat_counter: Counter = Counter()
+    for g in (goals or [])[-20:]:
+        cat = (g.get("category") or g.get("type") or "").strip().lower()
+        if cat:
+            cat_counter[cat] += 1
+    hot_categories = []
+    for cat, n in cat_counter.most_common(3):
+        if n < 4:
+            continue
+        if any(cat in tok or tok in cat for tok in skill_tokens):
+            continue
+        hot_categories.append({"category": cat, "count": n})
+
+    # Orphan dream learnings: learning files with no overlap with skill tokens.
+    orphan_learnings = []
+    for item in recent_dream_files or []:
+        if item.get("kind") != "learning":
+            continue
+        p = Path(item["path"])
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")[:2048].lower()
+        except OSError:
+            continue
+        if any(tok in text for tok in skill_tokens):
+            continue
+        orphan_learnings.append({"path": str(p), "mtime": item.get("mtime")})
+
+    return {
+        "repeated_failures": repeated_failures,
+        "hot_goal_categories": hot_categories,
+        "orphan_learnings": orphan_learnings[:5],
+    }
+
+
+def _render_skill_nudges(state, signals: dict, mode: str | None) -> str | None:
+    """Build the `[SKILL NUDGE]` briefing block, or return None when silent."""
+    if mode not in ("goal", "evolve"):
+        return None
+    thr = state.get("thresholds", {})
+    cur_cycle = int(state.get("last_nudge_cycle", 0))
+    if cur_cycle < int(state.get("suppress_until_cycle", 0)):
+        return None
+
+    lines = []
+    rf, hc, ol = (
+        signals["repeated_failures"],
+        signals["hot_goal_categories"],
+        signals["orphan_learnings"],
+    )
+    if not (
+        rf
+        or hc
+        or ol
+        or int(state.get("cycles_since_skill_create", 0)) >= thr.get("create_every", 25)
+        or int(state.get("cycles_since_skill_review", 0)) >= thr.get("review_every", 10)
+    ):
+        return None
+
+    if rf:
+        lines.append("  ⚠ repeated failure patterns:")
+        for f in rf:
+            lines.append(f"    - {f['count']}× {f['pattern']!r}")
+        lines.append("    → consider `skill_manage create` for an error-recovery skill")
+
+    if hc:
+        lines.append("  ⚠ hot goal categories with no matching skill:")
+        for h in hc:
+            lines.append(f"    - {h['count']} recent goals in {h['category']!r}")
+        lines.append("    → consider `skill_manage create` capturing the procedure")
+
+    if ol:
+        lines.append("  ⚠ recent dream learnings not yet captured as skills:")
+        for o in ol:
+            lines.append(f"    - {Path(o['path']).name}")
+        lines.append(
+            "    → if the learning is reusable, `skill_manage create` or patch"
+        )
+
+    cs_create = int(state.get("cycles_since_skill_create", 0))
+    cs_review = int(state.get("cycles_since_skill_review", 0))
+    if cs_create >= thr.get("create_every", 25):
+        lines.append(
+            f"  ⏱  {cs_create} cycles since last skill create — consider whether anything earned a skill"
+        )
+    if cs_review >= thr.get("review_every", 10):
+        lines.append(
+            f"  ⏱  {cs_review} cycles since last skill review — `skill_manage list --state stale`"
+        )
+
+    if not lines:
+        return None
+    return "[SKILL NUDGE]\n" + "\n".join(lines)
+
+
+def _render_skill_lifecycle_report() -> str | None:
+    """Run skill_lifecycle.compute() and return a briefing block, or None."""
+    try:
+        from scripts import skill_lifecycle  # type: ignore
+    except Exception:
+        return None
+    try:
+        diff = skill_lifecycle.compute()
+    except Exception:
+        return None
+    if not (diff.active_to_stale or diff.stale_to_archived):
+        return None
+    return "[SKILL LIFECYCLE]\n" + skill_lifecycle.report(diff)
+
+
 # ── Data collectors (side-effect-free, shared by stdout + JSON) ────────────────
 
 TAB_ERROR_RECENT_H = 6.0  # errors within this window are "active"
@@ -1396,6 +1570,22 @@ def print_full(
             for cat, reason in maturity_penalties:
                 print(f"  ⊘ maturity {cat}: {reason}")
         print(f"\n  → Suggest: {suggested}")
+
+    # ── Skill nudges & lifecycle pre-pass ────────────────────────
+    try:
+        nudge_state = _load_nudge_state()
+        signals = _compute_nudge_signals(journal, goals, recent_dream_files)
+        nudge_block = _render_skill_nudges(nudge_state, signals, MODE)
+        if nudge_block:
+            print("\n" + nudge_block)
+    except Exception as e:
+        print(f"\n[SKILL NUDGE]  (skipped: {e})")
+    try:
+        lifecycle_block = _render_skill_lifecycle_report()
+        if lifecycle_block:
+            print("\n" + lifecycle_block)
+    except Exception:
+        pass
 
     print(f"\n{'='*62}\n")
 

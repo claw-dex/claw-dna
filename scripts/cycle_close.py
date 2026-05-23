@@ -63,6 +63,7 @@ import json
 import os
 import re
 import shutil
+import shlex
 import subprocess
 import sys
 from datetime import datetime, timezone, timedelta
@@ -677,6 +678,64 @@ def _dispatch_memvid_flush_bg(chunks: list, cycle_n: int) -> None:
         _flush_memvid_buffer(chunks)
 
 
+def _tick_nudge_counters() -> None:
+    """Increment cycles_since_skill_{review,create} by 1, under an exclusive
+    file lock so it can't race with `skill_manage create/patch` resetting the
+    same counters. Quiet on any error — nudges.json is non-essential context
+    and must never fail cycle-close.
+    """
+    try:
+        from scripts.skill_manage import _mutate_nudges
+
+        def _tick(data):
+            for k in ("cycles_since_skill_review", "cycles_since_skill_create"):
+                data[k] = int(data.get(k, 0)) + 1
+
+        _mutate_nudges(_tick)
+    except Exception:
+        pass
+
+
+_SKILL_BUMP_DELAY_SECS = 30
+
+
+def _dispatch_skill_bump_bg(cycle_n: int) -> None:
+    """Spawn a detached subprocess that sleeps then runs `skill_manage
+    bump-usage`. The delay (default 30s) gives the transcript writer time
+    to flush the final entries of this cycle to disk before parsing kicks
+    in — without it, the bump would routinely miss the tail of long cycles.
+
+    Best-effort: any failure (missing transcript, import error, parse error)
+    is silently absorbed so cycle-close stays atomic. Mirrors the memvid
+    flush dispatch pattern.
+    """
+    script = SCRIPTS / "skill_manage.py"
+    if not script.exists():
+        return
+    log_path = MEMORY / ".skill_bump.log"
+    cmd = (
+        f"sleep {_SKILL_BUMP_DELAY_SECS} && "
+        f"{shlex.quote(sys.executable)} {shlex.quote(str(script))} "
+        f"bump-usage --cycle {int(cycle_n)}"
+    )
+    try:
+        with open(log_path, "ab") as log_f:
+            proc = subprocess.Popen(
+                ["/bin/sh", "-c", cmd],
+                stdin=subprocess.DEVNULL,
+                stdout=log_f,
+                stderr=log_f,
+                start_new_session=True,
+                close_fds=True,
+            )
+        print(
+            f"  ✓ skill bump — dispatched in background "
+            f"(pid={proc.pid}, delay={_SKILL_BUMP_DELAY_SECS}s, log={log_path})"
+        )
+    except Exception as e:
+        print(f"  ⚠ skill bump — spawn failed ({e}); skipping")
+
+
 def _flush_memvid_child(buf_path: Path) -> int:
     """Background-mode entry point: load chunks, flush memvid under a lock.
 
@@ -1041,6 +1100,12 @@ def main():
         _flush_memvid_buffer(memvid_buffer)
     else:
         _dispatch_memvid_flush_bg(memvid_buffer, cycle_n)
+
+    # 9. Skill use-count bump (detached; transcript-driven, best-effort).
+    _dispatch_skill_bump_bg(cycle_n)
+
+    # 10. Tick nudge counters (cycles_since_*). Best-effort; never fatal.
+    _tick_nudge_counters()
 
     print(f"\n[cycle-close] Done. Cycle {cycle_n} closed.\n")
 
