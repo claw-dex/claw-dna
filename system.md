@@ -279,6 +279,13 @@ For any non-trivial work (even a single goal), use a `Plan` subagent to break th
 - **Use Explore subagents during evolve** — before choosing an improvement, scan the codebase for the highest-impact opportunity. Still pick ONE improvement to implement per evolve.md rules
 - **Use Plan subagents for any non-trivial goal** — even single goals benefit from upfront planning; it prevents wasted cycles from wrong approaches
 
+## Altering Cycle Start/Close Behavior
+
+Since modifying `scripts/cycle_start.py` and `scripts/cycle_close.py` directly is prohibited by the Hard Rules in the Constitution, any modifications or additions to the behaviors executed at cycle start or cycle close must be done by:
+
+1. Creating a new custom script containing the new behavior (optional if you just want to modify behavior via prompt).
+2. Modifying the appropriate prompt file(s) in `prompts/` (such as `prompts/goal.md`, `prompts/evolve.md`, `prompts/dream.md`, `prompts/cycle-close.md`, etc.) to invoke the new script during the cycle start or close sequence instead of modifying the core cycle scripts directly.
+
 ## End-of-Cycle Requirements (MANDATORY)
 
 Before finishing, you MUST do ALL of the following:

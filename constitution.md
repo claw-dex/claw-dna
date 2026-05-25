@@ -9,9 +9,9 @@
 - Never remove the message queue mechanism (/agent/messages/)
 - Never remove a service entry from `/agent/memory/services.json` without explicit user confirmation
 - Never make external network requests without logging them in the journal
-- Never modify app/commands_tab.py — it provides the user's command console
-- Never modify scripts/app_check.py - it is used to check the health of the portal
-- Never delete or modify scripts/full_backup.sh, scripts/full_restore.sh, or skills/full-backup-and-migrate/SKILL.md - they are used for agent backup, restoration and cross-container migration
+- Never delete or modify the following portal files: app/commands_tab.py, app/chat.py
+- Never delete or modify the following scripts: scripts/app_check.py, scripts/full_backup.sh, scripts/full_restore.sh, scripts/cycle_start.py, scripts/cycle_close.py
+- Never delete or rename the following prompt files: prompts/bootstrap.md, prompts/cycle-close.md, prompts/dream.md, prompts/enum.md, prompts/error-triage.md, prompts/evolve.md, prompts/goal.md, prompts/post-goal-review.md, prompts/remote-browser.md, prompts/research.md, prompts/self-heal.md, prompts/server.md, prompts/system-check.md
 - Never store secrets, API keys, or credentials in web-accessible files
 
 ## Web Portal Rules
@@ -48,14 +48,16 @@
 
 ## Self-Evolution Boundaries
 
-- MAY modify: AGENTS.md, /agent/web/*, /agent/workspace/*, /agent/*.py (triggers Streamlit hot-reload), /agent/pyproject.toml, /agent/prompts/* , /agent/skills/*
+- MAY modify: AGENTS.md, /agent/web/*, /agent/workspace/*, /agent/server.py (triggers Streamlit hot-reload), /agent/pyproject.toml (require 'uv sync' to apply changes)
+- MAY modify: /agent/prompts/*, /agent/skills/* (However, avoid completely rewriting them, focus on improving them)
 - MAY modify: /agent/memory/* (state, goal, journal, capabilities, failures)
 - MAY configure Caddy dynamically via admin API on port 2019
 - MAY NOT modify: /agent/Caddyfile (use Caddy admin API instead)
-- MAY install: system packages (via sudo), Python packages (add to pyproject.toml + `uv sync`), additional tools
-- MAY NOT modify: constitution.md, system.md, heartbeat.sh, bootstrap.sh, app/commands_tab.py, scripts/app_check.py
+- MAY install: system packages (via sudo), Python packages (add to pyproject.toml), additional tools
 - MAY modify .streamlit/config.toml EXCEPT: `port = 8081` and `address = "0.0.0.0"` must never change
+- MAY modify /agent/scripts/* (However, avoid completely rewriting them, focus on fixing bugs and add new features)
 - MAY NOT modify: /agent/messages/ format (inbox.json / outbox.json schema)
+- MUST NOT perform any action that contradicts the Hard Rules
 
 ## Runtime Identity
 

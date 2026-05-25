@@ -52,6 +52,39 @@ as the `BACKUP_ZIP` variable referenced throughout the skill. Skip or modify
 individual phases only if the preserved goal explicitly tells you to (and log
 what you skipped in the cycle-close summary).
 
+### Step 0.2b — Verify and Fix Streamlit Portal Health
+
+After Recovery completes, you **must** verify that the Streamlit portal is fully functional and accessible. Since a migration restores files, dependencies, and configurations from another environment, conflicts or mismatches can easily break the Streamlit app, locking the user out of the agent portal.
+
+Run the following checks and fix any issues before proceeding:
+
+1. **Verify local health endpoint and page content**:
+   ```bash
+   curl -s http://localhost:8081/app/_stcore/health
+   curl -s http://localhost:8081/app/
+   ```
+   Confirm that the health endpoint returns `ok` and the home page returns HTML content.
+
+2. **Run headless render check**:
+   ```bash
+   uv run python scripts/app_check.py
+   ```
+   This validates that `server.py` and all tab modules import correctly, render without exceptions, and can write successfully to the messages inbox.
+
+3. **Resolve common portal issues**:
+   * **Dependency/Import Errors**: If the check reports missing packages or import errors, verify that `pyproject.toml` and `uv.lock` were restored correctly and run:
+     ```bash
+     uv sync
+     ```
+   * **Syntax / Runtime Errors**: Check the output and logs. If there are syntax or runtime exceptions (often caused by unresolved git merge conflicts, missing files, or code drift), inspect the offending files in `app/` or `server.py` and fix the code.
+   * **Port/Service Unreachable**: If the server is unreachable, verify service status:
+     ```bash
+     uv run python scripts/service_manager.py status
+     ```
+     Ensure both Streamlit and Caddy services are running. Check portal config `/agent/memory/portal_config.json` and Caddyfile settings.
+
+Do **not** proceed to Step 0.3 or close the cycle until the Streamlit portal is healthy and passes `scripts/app_check.py`.
+
 ### Step 0.3 — Restore the preserved goal
 
 After Recovery completes, `goal.json` reflects the source-agent's goal history.
@@ -103,6 +136,8 @@ Use the same `jq` pattern as Step 6 below to flip the status (substituting
 `$NEW_ID` instead of the first goal).
 
 ### Step 0.6 — Cycle-close and stop
+
+Before closing, run `uv run python scripts/app_check.py` one last time to ensure no post-migration changes or edits broke the portal. 
 
 Run `cycle_close.py` with `--type evolve --category capability` and a summary
 describing what was restored, any post-migration work performed, and the final
