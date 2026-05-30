@@ -726,7 +726,7 @@ def render():
             st.download_button(
                 "Download all errors (JSON)",
                 data=json.dumps(errors, indent=2, default=str),
-                file_name="portal_errors.json",
+                file_name="server_errors.json",
                 mime="application/json",
             )
         with col_clr:

@@ -28,10 +28,37 @@ set -uo pipefail
 
 # ── Prevent concurrent heartbeats (flock guard) ────────────
 LOCK_FILE="/agent/memory/.heartbeat.lock"
+SKIP_FILE="/agent/memory/.heartbeat_skips"
+
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
-    echo "[$(date -Is)] Another heartbeat is already running. Skipping."
-    exit 0
+    SKIPS=$(cat "$SKIP_FILE" 2>/dev/null)
+    if ! [[ "$SKIPS" =~ ^[0-9]+$ ]]; then
+        SKIPS=0
+    fi
+    SKIPS=$((SKIPS + 1))
+    
+    if [ "$SKIPS" -ge 6 ]; then
+        echo "[$(date -Is)] Heartbeat lock held for too long (${SKIPS} consecutive skips). Forcefully cleaning up lock..."
+        rm -f "$SKIP_FILE"
+        
+        if command -v fuser >/dev/null 2>&1; then
+            fuser -k -9 "$LOCK_FILE" 2>/dev/null || true
+        elif command -v lsof >/dev/null 2>&1; then
+            lsof -t "$LOCK_FILE" 2>/dev/null | xargs kill -9 2>/dev/null || true
+        fi
+        
+        # Recreate the lock file inode to bypass the stuck one
+        rm -f "$LOCK_FILE"
+        exec 9>"$LOCK_FILE"
+        flock -n 9 || true
+    else
+        echo "$SKIPS" > "$SKIP_FILE"
+        echo "[$(date -Is)] Another heartbeat is already running. Skipping."
+        exit 0
+    fi
+else
+    rm -f "$SKIP_FILE"
 fi
 # Lock is held for the duration of the script via fd 9.
 # The file is intentionally NOT removed on exit — it's a stable rendezvous
@@ -183,6 +210,14 @@ select_prompt() {
     fi
     # exit 2 (timeout) or 3 (unavailable) → non-fatal, continue
 
+    # 3c. Server runtime errors
+    local server_errors_count
+    server_errors_count=$(jq 'length' /agent/memory/server_errors.json 2>/dev/null || echo 0)
+    if [ "$server_errors_count" -gt 0 ]; then
+        echo "heal:app_error"
+        return
+    fi
+
     # 4. User command waiting in inbox or active goal in progress
     #    (checked before starvation guard so active work always takes priority)
     local inbox_size
@@ -300,23 +335,21 @@ build_task_prompt() {
             echo "Read this goal carefully. Incorporate it into your bootstrap plan."
             echo "You MAY modify server.py and app/*.py to customise the Streamlit UI for this goal."
             ;;
-        heal:*)
-            local symptom="${mode#heal:}"
+        heal:app_error)
             cat /agent/prompts/self-heal.md
             echo ""
-            case "$symptom" in
-                app_error)
-                    echo "The Streamlit server process is running but server.py raised an exception during headless render."
-                    echo "This means a broken import, missing dependency, or error in init."
-                    echo ""
-                    echo "Reproduce: cd /agent && uv run python scripts/app_check.py"
-                    ;;
-                *)
-                    echo "Streamlit health endpoint (/_stcore/health) did not return 'ok'."
-                    echo "Check that the Streamlit process is running on port 8081."
-                    echo "The process manager (PID 1) runs Caddy (8080) and Streamlit (8081)."
-                    ;;
-            esac
+            echo "The Streamlit server process is running but server.py raised an exception during headless render,"
+            echo "or there are unresolved server errors in server_errors.json."
+            echo "This means a broken import, syntax error, missing dependency, or runtime error in a Streamlit component or app."
+            echo ""
+            echo "Reproduce: cd /agent && uv run python scripts/app_check.py"
+            ;;
+        heal:server_down)
+            cat /agent/prompts/self-heal.md
+            echo ""
+            echo "Streamlit health endpoint (/_stcore/health) did not return 'ok'."
+            echo "Check that the Streamlit process is running on port 8081."
+            echo "The process manager (PID 1) runs Caddy (8080) and Streamlit (8081)."
             ;;
         goal)
             cat /agent/prompts/goal.md
@@ -340,17 +373,26 @@ build_task_prompt() {
             cat /agent/memory/goal.json 2>/dev/null || echo '[]'
             echo "</your_goals>"
             ;;
-        heal:*)
-            local symptom="${mode#heal:}"
+        heal:app_error)
             echo "## Detected Symptom"
-            echo "Health check result: \`${symptom}\`"
-            if [ "$symptom" = "app_error" ]; then
-                echo ""
-                echo "App check result:"
-                echo '```json'
-                cat /agent/memory/app_check_result.json 2>/dev/null || echo "{}"
-                echo '```'
-            fi
+            echo "Health check result: \`app_error\`"
+            echo ""
+            echo "App check result:"
+            echo '```json'
+            cat /agent/memory/app_check_result.json 2>/dev/null || echo "{}"
+            echo '```'
+            echo ""
+            echo "Server Errors (if any):"
+            echo '```json'
+            cat /agent/memory/server_errors.json 2>/dev/null || echo "[]"
+            echo '```'
+            # Clear the errors now that they are embedded in the prompt
+            # so we don't get stuck in a heal loop if the agent doesn't clear them
+            echo "[]" > /agent/memory/server_errors.json 2>/dev/null || true
+            ;;
+        heal:server_down)
+            echo "## Detected Symptom"
+            echo "Health check result: \`server_down\`"
             ;;
         goal)
             echo "<your_inbox_messages>"

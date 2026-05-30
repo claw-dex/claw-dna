@@ -256,6 +256,37 @@ def check_commands_tab_form(AppTest) -> tuple[str, str, list[str], str]:
     return "ok", "", [], test_content
 
 
+def check_server_errors() -> tuple[str, str, list[dict]]:
+    """Check the real memory/server_errors.json for server crash errors and deduplicate them."""
+    real_errors_path = REPO_ROOT / "memory" / "server_errors.json"
+    if not real_errors_path.exists():
+        return "ok", "", []
+
+    try:
+        errors = json.loads(real_errors_path.read_text())
+    except Exception as e:
+        return "fail", f"Failed to read server errors: {e}", []
+
+    if not isinstance(errors, list) or not errors:
+        return "ok", "", []
+
+    # Deduplicate errors
+    unique_errors = {}
+    for err in errors:
+        if not isinstance(err, dict):
+            continue
+        sig = (err.get("tab") or err.get("method"), err.get("error"))
+        unique_errors[sig] = err
+
+    deduped_errors = list(unique_errors.values())
+
+    return (
+        "warn" if deduped_errors else "ok",
+        f"Found {len(deduped_errors)} unique server errors",
+        deduped_errors,
+    )
+
+
 def main() -> int:
     try:
         from streamlit.testing.v1 import AppTest
@@ -286,9 +317,25 @@ def main() -> int:
     #            lands in the sandbox's messages/inbox.json).
     form_status, form_detail, form_excs, _ = check_commands_tab_form(AppTest)
 
+    # ── Check 3: Real server errors (memory/server_errors.json) ──
+    server_errors_status, server_errors_detail, server_errors = check_server_errors()
+    if server_errors:
+        print("\n[app-check] Server Errors (Deduplicated):")
+        for i, err in enumerate(server_errors, 1):
+            tab = err.get("tab") or err.get("method") or "Unknown"
+            ts = str(err.get("timestamp", ""))[:19].replace("T", " ")
+            error_msg = str(err.get("error", ""))
+            print(f"  {i}. [{ts}] Tab: {tab} — {error_msg}")
+        print()
+
     checks = {
         "server_render": {"status": server_status, "detail": server_detail},
         "commands_tab_form": {"status": form_status, "detail": form_detail},
+        "server_errors": {
+            "status": server_errors_status,
+            "detail": server_errors_detail,
+            "errors": server_errors,
+        },
     }
 
     # Aggregate result: timeout > fail > ok.
