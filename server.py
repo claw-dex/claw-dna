@@ -10,7 +10,6 @@ from datetime import datetime, timezone
 
 import hydralit_components as hc
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh
 
 from app.shared import _startup_check, heartbeat_freshness
 from app.data import load_state, load_errors, load_cycle_velocity, load_services
@@ -326,88 +325,96 @@ if "app_initialized" not in st.session_state:
 else:
     _init()
 
-# ── Auto-refresh (header metrics only — fixed 60s) ───────────────────────────
-# The chat module owns its own faster poll-driven refresh in render() so the
-# global timer cannot affect chat correctness. This keeps the 60s rerun from
-# being entangled with the chat session: the ClaudeChat singleton lives in
-# @st.cache_resource and survives reruns, so the global tick is harmless to
-# the chat — it just refreshes header metrics (heartbeat, cycle, services).
-st_autorefresh(interval=60_000, key="global_refresh")
 
-# ── Header ────────────────────────────────────────────────────
+# ── Header — refreshes independently every 60 s via st.fragment ──────────────
+# Only this fragment re-runs on the 60-second timer; tab render() functions
+# are NOT called unless the user interacts inside that tab.
+# The chat module owns its own @st.fragment(run_every="3s") and is unaffected.
+@st.fragment(run_every=60)
+def _render_header():
+    state = load_state() or {}
+    cycle_num = state.get("cycle_number", 0)
+    agent_status = state.get("agent_status", "unknown")
+    last_heartbeat = state.get("last_heartbeat", "—")
+    current_goal = state.get("current_goal", "")
+
+    # Status pill color (see prompts/enum.md → Agent Status for all valid values)
+    status_colors = {
+        "idle": "🟡",
+        "running": "🟢",
+        "healing": "🔴",
+        "bootstrapping": "🔵",
+        "awaiting_first_heartbeat": "⚪",
+        "waiting_for_human": "🟠",  # Agent waiting for user input/escalation
+    }
+    status_icon = status_colors.get(agent_status, "⚪")
+
+    hb_display, hb_icon = heartbeat_freshness(last_heartbeat)
+    velocity = load_cycle_velocity()
+    _services = load_services() or {}
+    _alive_services = sum(1 for s in _services.values() if s.get("alive"))
+
+    st.title("Autonomous AI Agent")
+    st.caption("Autonomous AI agent — self-improving, self-healing, self-evolving.")
+
+    col_status, col_cycle, col_hb, col_vel, col_svc, col_goal, col_health = st.columns(
+        [1, 1, 1, 1, 1, 3, 1]
+    )
+    with col_status:
+        st.metric("Status", f"{status_icon} {agent_status}")
+    with col_cycle:
+        st.metric("Cycle", f"#{cycle_num}")
+    with col_hb:
+        st.metric("Heartbeat", f"{hb_icon} {hb_display}")
+    with col_vel:
+        vel_str = f"{velocity}/hr" if velocity is not None else "—"
+        st.metric(
+            "Velocity",
+            vel_str,
+            help="Cycles per hour (rolling last 10 completed cycles)",
+        )
+    with col_svc:
+        _svc_icon = (
+            "🟢"
+            if _alive_services == len(_services) and _alive_services > 0
+            else ("🟡" if _alive_services > 0 else "⚪")
+        )
+        st.metric(
+            "Services",
+            f"{_svc_icon} {_alive_services}/{len(_services)}",
+            help="Running / total registered services",
+        )
+    with col_goal:
+        _goal_display = (current_goal or "—")[:60] + (
+            "…" if current_goal and len(current_goal) > 60 else ""
+        )
+        _goal_help = current_goal if current_goal and len(current_goal) > 60 else None
+        st.metric("Current Goal", _goal_display, help=_goal_help)
+    with col_health:
+        try:
+            from datetime import timedelta
+
+            _errs = load_errors() or []
+            _cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+            _recent_errs = [e for e in _errs if e.get("timestamp", "") >= _cutoff]
+            _err_count = len(_recent_errs)
+            _health_icon = (
+                "🟢" if _err_count == 0 else ("🟡" if _err_count < 5 else "🔴")
+            )
+            st.metric("Portal Health", f"{_health_icon} {_err_count} err")
+            if _err_count > 0:
+                st.caption("See System → Tab Crash Errors")
+        except Exception:
+            st.metric("Portal Health", "⚪ —")
+
+    st.divider()
+
+
+# Read cycle_num cheaply (mtime-cached) to gate the first-run screen
 state = load_state() or {}
 cycle_num = state.get("cycle_number", 0)
-agent_status = state.get("agent_status", "unknown")
-last_heartbeat = state.get("last_heartbeat", "—")
-current_goal = state.get("current_goal", "")
 
-# Status pill color (see prompts/enum.md → Agent Status for all valid values)
-status_colors = {
-    "idle": "🟡",
-    "running": "🟢",
-    "healing": "🔴",
-    "bootstrapping": "🔵",
-    "awaiting_first_heartbeat": "⚪",
-    "waiting_for_human": "🟠",  # Agent waiting for user input/escalation
-}
-status_icon = status_colors.get(agent_status, "⚪")
-
-
-hb_display, hb_icon = heartbeat_freshness(last_heartbeat)
-velocity = load_cycle_velocity()
-_services = load_services() or {}
-_alive_services = sum(1 for s in _services.values() if s.get("alive"))
-
-st.title("Autonomous AI Agent")
-st.caption("Autonomous AI agent — self-improving, self-healing, self-evolving.")
-
-col_status, col_cycle, col_hb, col_vel, col_svc, col_goal, col_health = st.columns(
-    [1, 1, 1, 1, 1, 3, 1]
-)
-with col_status:
-    st.metric("Status", f"{status_icon} {agent_status}")
-with col_cycle:
-    st.metric("Cycle", f"#{cycle_num}")
-with col_hb:
-    st.metric("Heartbeat", f"{hb_icon} {hb_display}")
-with col_vel:
-    vel_str = f"{velocity}/hr" if velocity is not None else "—"
-    st.metric(
-        "Velocity", vel_str, help="Cycles per hour (rolling last 10 completed cycles)"
-    )
-with col_svc:
-    _svc_icon = (
-        "🟢"
-        if _alive_services == len(_services) and _alive_services > 0
-        else ("🟡" if _alive_services > 0 else "⚪")
-    )
-    st.metric(
-        "Services",
-        f"{_svc_icon} {_alive_services}/{len(_services)}",
-        help="Running / total registered services",
-    )
-with col_goal:
-    _goal_display = (current_goal or "—")[:60] + (
-        "…" if current_goal and len(current_goal) > 60 else ""
-    )
-    _goal_help = current_goal if current_goal and len(current_goal) > 60 else None
-    st.metric("Current Goal", _goal_display, help=_goal_help)
-with col_health:
-    try:
-        from datetime import timedelta
-
-        _errs = load_errors() or []
-        _cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-        _recent_errs = [e for e in _errs if e.get("timestamp", "") >= _cutoff]
-        _err_count = len(_recent_errs)
-        _health_icon = "🟢" if _err_count == 0 else ("🟡" if _err_count < 5 else "🔴")
-        st.metric("Portal Health", f"{_health_icon} {_err_count} err")
-        if _err_count > 0:
-            st.caption("See System → Tab Crash Errors")
-    except Exception:
-        st.metric("Portal Health", "⚪ —")
-
-st.divider()
+_render_header()
 
 # ── Main content — first-run gate ─────────────────────────────
 if cycle_num == 0:
