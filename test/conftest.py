@@ -26,12 +26,14 @@ def agent_root(tmp_path: Path) -> Path:
         "messages/external",
         "messages/bridge/telegram",
         "messages/bridge/whatsapp",
+        "messages/bridge/slack",
         "memory",
         "memory/heartbeats",
         "memory/logs",
         "workspace/upload",
         "workspace/telegram",
         "workspace/whatsapp",
+        "workspace/slack",
     ):
         (tmp_path / sub).mkdir(parents=True, exist_ok=True)
     return tmp_path
@@ -86,6 +88,7 @@ def frozen_now(monkeypatch):
         "external_agent_api",
         "scheduler_daemon",
         "telegram_bridge",
+        "slack_bridge",
         "webhook.whatsapp_bridge_handler",
         "webhook_receiver",
     )
@@ -216,6 +219,37 @@ def patch_whatsapp_paths(monkeypatch, agent_root, patch_shared_paths):
     monkeypatch.setattr(wa, "STATE_JSON", agent_root / "memory" / "state.json")
     monkeypatch.setattr(wa, "MEDIA_DIR", agent_root / "workspace" / "whatsapp")
     return wa
+
+
+@pytest.fixture
+def patch_slack_paths(monkeypatch, agent_root, patch_shared_paths):
+    import slack_bridge as sb
+
+    monkeypatch.setattr(sb, "BASE", agent_root)
+    monkeypatch.setattr(sb, "STATE_FILE", agent_root / "memory" / "slack_state.json")
+    monkeypatch.setattr(sb, "INBOX_FILE", agent_root / "messages" / "inbox.json")
+    monkeypatch.setattr(sb, "OUTBOX_FILE", agent_root / "messages" / "outbox.json")
+    bridge_dir = agent_root / "messages" / "bridge" / "slack"
+    monkeypatch.setattr(sb, "BRIDGE_DIR", bridge_dir)
+    monkeypatch.setattr(sb, "INBOX_HISTORY_FILE", bridge_dir / "inbox_history.json")
+    monkeypatch.setattr(sb, "OUTBOX_HISTORY_FILE", bridge_dir / "outbox_history.json")
+    monkeypatch.setattr(sb, "CHAT_HISTORY_FILE", bridge_dir / "chat_history.json")
+    monkeypatch.setattr(sb, "LOG_DIR", agent_root / "memory" / "logs")
+    monkeypatch.setattr(
+        sb, "LOG_FILE", agent_root / "memory" / "logs" / "slack_bridge.log"
+    )
+    monkeypatch.setattr(sb, "HEARTBEAT_DIR", agent_root / "memory" / "heartbeats")
+    monkeypatch.setattr(
+        sb,
+        "HEARTBEAT_FILE",
+        agent_root / "memory" / "heartbeats" / "slack_bridge.heartbeat",
+    )
+    monkeypatch.setattr(sb, "LOCK_FILE", agent_root / "memory" / "slack_bridge.lock")
+    monkeypatch.setattr(sb, "STATE_JSON", agent_root / "memory" / "state.json")
+    monkeypatch.setattr(sb, "MEDIA_DIR", agent_root / "workspace" / "slack")
+    # Reset the cached heartbeat so tests get a clean read.
+    monkeypatch.setattr(sb, "_heartbeat_cache", {"mtime": 0.0, "value": None})
+    return sb
 
 
 @pytest.fixture
