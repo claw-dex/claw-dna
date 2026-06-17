@@ -105,11 +105,21 @@ class FakeSlackClient:
         self.names = names or {}
         self.fail = fail
 
-    def chat_postMessage(self, channel, text, mrkdwn=True):
+    def chat_postMessage(self, channel, text, mrkdwn=True, thread_ts=None):
         if self.fail:
             raise RuntimeError("boom")
-        self.sent.append({"channel": channel, "text": text, "mrkdwn": mrkdwn})
-        return {"ok": True, "ts": "1700000000.000100"}
+        self._counter = getattr(self, "_counter", 0) + 1
+        ts = f"1700000000.{self._counter:06d}"
+        self.sent.append(
+            {
+                "channel": channel,
+                "text": text,
+                "mrkdwn": mrkdwn,
+                "thread_ts": thread_ts,
+                "ts": ts,
+            }
+        )
+        return {"ok": True, "ts": ts}
 
     def users_info(self, user):
         if user == "RAISE":
@@ -273,7 +283,49 @@ def test_validate_state_wrong_types(patch_slack_paths):
 def test_validate_state_non_dict(patch_slack_paths):
     sb = patch_slack_paths
     out = sb._validate_state(["not", "a", "dict"])
-    assert out == {"sent_hashes": [], "processed_keys": []}
+    assert out == {"sent_hashes": [], "processed_keys": [], "daily_threads": {}}
+
+
+def test_validate_state_daily_threads_wrong_type(patch_slack_paths):
+    sb = patch_slack_paths
+    out = sb._validate_state(
+        {"sent_hashes": [], "processed_keys": [], "daily_threads": "nope"}
+    )
+    assert out["daily_threads"] == {}
+
+
+def test_validate_state_drops_malformed_daily_thread_entries(patch_slack_paths):
+    sb = patch_slack_paths
+    out = sb._validate_state(
+        {
+            "sent_hashes": [],
+            "processed_keys": [],
+            "daily_threads": {
+                "D1": {"date": "2026-04-30", "thread_ts": "1.0"},  # valid
+                "D2": "garbage",  # not a dict
+                "D3": {"date": 5, "thread_ts": "2.0"},  # wrong inner type
+                "D4": {"date": "2026-04-30"},  # missing thread_ts
+            },
+        }
+    )
+    assert out["daily_threads"] == {"D1": {"date": "2026-04-30", "thread_ts": "1.0"}}
+
+
+def test_send_outbox_tolerates_corrupt_daily_thread(
+    patch_slack_paths, agent_root, frozen_now
+):
+    sb = patch_slack_paths
+    frozen_now(FROZEN)
+    (agent_root / "messages" / "outbox.json").write_text(
+        json.dumps([{"type": "info", "content": "hi"}])
+    )
+    client = FakeSlackClient()
+    ctx = make_ctx(sb, chat_ids=["D1"])
+    ctx["state"]["daily_threads"] = {"D1": "garbage"}  # corrupt inner entry
+    # must not raise (would otherwise wedge the main loop) and still deliver
+    sb.send_outbox_messages(client, ctx)
+    assert len(client.sent) == 1
+    assert client.sent[0]["thread_ts"] is None
 
 
 def test_validate_state_filters_non_strings(patch_slack_paths):
@@ -284,14 +336,22 @@ def test_validate_state_filters_non_strings(patch_slack_paths):
 
 def test_state_round_trip(patch_slack_paths):
     sb = patch_slack_paths
-    state = {"sent_hashes": ["h1"], "processed_keys": ["C1:1.0"]}
+    state = {
+        "sent_hashes": ["h1"],
+        "processed_keys": ["C1:1.0"],
+        "daily_threads": {"D1": {"date": "2026-04-30", "thread_ts": "1.0"}},
+    }
     sb.save_state(state)
     assert sb.load_state() == state
 
 
 def test_load_state_missing_returns_default(patch_slack_paths):
     sb = patch_slack_paths
-    assert sb.load_state() == {"sent_hashes": [], "processed_keys": []}
+    assert sb.load_state() == {
+        "sent_hashes": [],
+        "processed_keys": [],
+        "daily_threads": {},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -464,6 +524,123 @@ def test_send_outbox_no_channels(patch_slack_paths, agent_root):
     ctx = make_ctx(sb, chat_ids=[])
     sb.send_outbox_messages(client, ctx)
     assert client.sent == []
+
+
+def test_send_outbox_threads_per_day(patch_slack_paths, agent_root, frozen_now):
+    sb = patch_slack_paths
+    frozen_now(FROZEN)
+    outbox = [
+        {"type": "info", "content": "first of the day"},
+        {"type": "info", "content": "second of the day"},
+    ]
+    (agent_root / "messages" / "outbox.json").write_text(json.dumps(outbox))
+    client = FakeSlackClient()
+    ctx = make_ctx(sb, chat_ids=["D1"])
+
+    sb.send_outbox_messages(client, ctx)
+
+    assert len(client.sent) == 2
+    # first message roots the day's thread (no thread_ts)
+    assert client.sent[0]["thread_ts"] is None
+    # second nests under the first message's ts → one conversation
+    assert client.sent[1]["thread_ts"] == client.sent[0]["ts"]
+    # the day's thread root is persisted in state
+    entry = ctx["state"]["daily_threads"]["D1"]
+    assert entry["date"] == "2026-04-30"
+    assert entry["thread_ts"] == client.sent[0]["ts"]
+
+
+def test_send_outbox_new_day_starts_new_thread(
+    patch_slack_paths, agent_root, frozen_now
+):
+    sb = patch_slack_paths
+    frozen_now(FROZEN)  # 2026-04-30
+    (agent_root / "messages" / "outbox.json").write_text(
+        json.dumps([{"type": "info", "content": "today's message"}])
+    )
+    client = FakeSlackClient()
+    # yesterday's thread root is stale → today's first message must NOT nest
+    ctx = make_ctx(sb, chat_ids=["D1"])
+    ctx["state"]["daily_threads"] = {
+        "D1": {"date": "2026-04-29", "thread_ts": "1600000000.000001"}
+    }
+
+    sb.send_outbox_messages(client, ctx)
+
+    assert client.sent[0]["thread_ts"] is None  # new top-level root for the new day
+    assert ctx["state"]["daily_threads"]["D1"]["date"] == "2026-04-30"
+
+
+def test_send_outbox_per_channel_threads(patch_slack_paths, agent_root, frozen_now):
+    sb = patch_slack_paths
+    frozen_now(FROZEN)
+    outbox = [
+        {"type": "info", "content": "m1"},
+        {"type": "info", "content": "m2"},
+    ]
+    (agent_root / "messages" / "outbox.json").write_text(json.dumps(outbox))
+    client = FakeSlackClient()
+    ctx = make_ctx(sb, chat_ids=["D1", "D2"])
+
+    sb.send_outbox_messages(client, ctx)
+
+    # each channel keeps its own independent thread root + nesting
+    by_channel: dict = {}
+    for s in client.sent:
+        by_channel.setdefault(s["channel"], []).append(s)
+    assert set(by_channel) == {"D1", "D2"}
+    for cid, msgs in by_channel.items():
+        assert len(msgs) == 2
+        assert msgs[0]["thread_ts"] is None
+        assert msgs[1]["thread_ts"] == msgs[0]["ts"]
+        assert ctx["state"]["daily_threads"][cid]["thread_ts"] == msgs[0]["ts"]
+
+
+def test_send_outbox_no_ts_response_falls_back_top_level(
+    patch_slack_paths, agent_root, frozen_now
+):
+    sb = patch_slack_paths
+    frozen_now(FROZEN)
+
+    class NoTsClient(FakeSlackClient):
+        def chat_postMessage(self, channel, text, mrkdwn=True, thread_ts=None):
+            self.sent.append({"channel": channel, "text": text, "thread_ts": thread_ts})
+            return {"ok": True}  # success but no 'ts'
+
+    outbox = [
+        {"type": "info", "content": "m1"},
+        {"type": "info", "content": "m2"},
+    ]
+    (agent_root / "messages" / "outbox.json").write_text(json.dumps(outbox))
+    client = NoTsClient()
+    ctx = make_ctx(sb, chat_ids=["D1"])
+
+    sb.send_outbox_messages(client, ctx)
+
+    # no root could be recorded → both posts stay top-level, nothing persisted
+    assert [s["thread_ts"] for s in client.sent] == [None, None]
+    assert ctx["state"]["daily_threads"] == {}
+
+
+def test_send_outbox_prunes_stale_other_channel(
+    patch_slack_paths, agent_root, frozen_now
+):
+    sb = patch_slack_paths
+    frozen_now(FROZEN)  # 2026-04-30
+    (agent_root / "messages" / "outbox.json").write_text(
+        json.dumps([{"type": "info", "content": "to D1"}])
+    )
+    client = FakeSlackClient()
+    ctx = make_ctx(sb, chat_ids=["D1"])
+    # D2 has a stale (yesterday) root and gets no message today → must be pruned
+    ctx["state"]["daily_threads"] = {
+        "D2": {"date": "2026-04-29", "thread_ts": "1600000000.000009"}
+    }
+
+    sb.send_outbox_messages(client, ctx)
+
+    assert "D2" not in ctx["state"]["daily_threads"]
+    assert ctx["state"]["daily_threads"]["D1"]["date"] == "2026-04-30"
 
 
 # ---------------------------------------------------------------------------

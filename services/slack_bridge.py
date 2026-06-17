@@ -335,12 +335,17 @@ def parse_command(text: str) -> tuple[str | None, list[str]]:
 # ---------------------------------------------------------------------------
 
 
+def _default_state() -> dict:
+    # daily_threads: {channel_id: {"date": "YYYY-MM-DD", "thread_ts": "..."}} —
+    # the per-day Slack thread root the agent posts its activity under.
+    return {"sent_hashes": [], "processed_keys": [], "daily_threads": {}}
+
+
 def _validate_state(data) -> dict:
     """Ensure state has the expected structure, repairing wrong types."""
-    default = {"sent_hashes": [], "processed_keys": []}
     if not isinstance(data, dict):
         log.warning(f"Slack state has unexpected type {type(data).__name__}, resetting")
-        return dict(default)
+        return _default_state()
     for field in ("sent_hashes", "processed_keys"):
         vals = data.get(field)
         if not isinstance(vals, list):
@@ -356,22 +361,49 @@ def _validate_state(data) -> dict:
                     f"Removed {len(vals) - len(cleaned)} non-string entries from {field}"
                 )
                 data[field] = cleaned
+    threads = data.get("daily_threads")
+    if not isinstance(threads, dict):
+        if threads is not None:
+            log.warning(
+                f"Slack state daily_threads has wrong type "
+                f"{type(threads).__name__}, resetting to {{}}"
+            )
+        data["daily_threads"] = {}
+    else:
+        # Drop malformed inner entries so a corrupt value can't crash
+        # send_outbox_messages and permanently wedge outbox delivery.
+        cleaned = {
+            cid: ent
+            for cid, ent in threads.items()
+            if isinstance(ent, dict)
+            and isinstance(ent.get("date"), str)
+            and isinstance(ent.get("thread_ts"), str)
+        }
+        if len(cleaned) != len(threads):
+            log.warning(
+                f"Dropped {len(threads) - len(cleaned)} malformed daily_threads entries"
+            )
+        data["daily_threads"] = cleaned
     return data
 
 
 def load_state() -> dict:
-    default = {"sent_hashes": [], "processed_keys": []}
     if STATE_FILE.exists():
         try:
             data = json.loads(STATE_FILE.read_text())
             return _validate_state(data)
         except Exception as e:
             log.warning(f"Corrupt slack state file, using defaults: {e}")
-    return dict(default)
+    return _default_state()
 
 
 def save_state(state: dict):
     atomic_write_json(STATE_FILE, state, indent=2)
+
+
+def _utc_date() -> str:
+    """Today's date as YYYY-MM-DD in UTC (used to key the per-day thread)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
 def msg_hash(msg: dict) -> str:
@@ -478,18 +510,23 @@ def build_chat_context(history: dict, chat_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def slack_send(client, channel: str, text: str):
+def slack_send(client, channel: str, text: str, thread_ts: str | None = None):
     """Send a message to a Slack channel. Returns the API response or None.
 
     Truncates to Slack's text limit and swallows API errors (logging them) so
-    a single failed send never crashes the bridge.
+    a single failed send never crashes the bridge. When *thread_ts* is given the
+    message is posted as a reply in that thread (used to keep the agent's daily
+    activity in a single conversation rather than one chat per message).
     """
     if not channel:
         return None
     if len(text) > SLACK_MAX_LEN:
         text = text[: SLACK_MAX_LEN - 3] + "..."
+    kwargs = {"channel": channel, "text": text, "mrkdwn": True}
+    if thread_ts:
+        kwargs["thread_ts"] = thread_ts
     try:
-        return client.chat_postMessage(channel=channel, text=text, mrkdwn=True)
+        return client.chat_postMessage(**kwargs)
     except Exception as e:
         log.warning(f"Slack chat_postMessage to {channel} failed: {e}")
         return None
@@ -1644,17 +1681,41 @@ def send_outbox_messages(client, ctx: dict) -> None:
     with lock:
         chat_ids = list(ctx["chat_ids"])
         already_sent = set(ctx["state"]["sent_hashes"])
+        # Copy the per-day thread roots so we can read/extend them while unlocked.
+        daily = dict(ctx["state"].get("daily_threads", {}))
     if not chat_ids:
         return
 
-    # Send outside the lock. Collect results to commit afterwards.
+    today = _utc_date()
+
+    def _thread_root(cid: str) -> str | None:
+        """Today's thread root for *cid*, or None if a new one must be started."""
+        entry = daily.get(cid)
+        if isinstance(entry, dict) and entry.get("date") == today:
+            return entry.get("thread_ts")
+        return None
+
+    # Send outside the lock. The first message of the day for a channel is posted
+    # top-level and becomes that day's thread root; later messages nest under it,
+    # so the agent's activity is one conversation per day instead of one per
+    # message. Collect results + any new thread roots to commit afterwards.
     results: list[tuple[dict, str, list[str], str]] = []
     for msg in outbox:
         h = msg_hash(msg)
         if h in already_sent:
             continue
         text = _format_outbox_msg(msg)
-        succeeded = [cid for cid in chat_ids if slack_send(client, cid, text)]
+        succeeded = []
+        for cid in chat_ids:
+            root = _thread_root(cid)
+            resp = slack_send(client, cid, text, thread_ts=root)
+            if not resp:
+                continue
+            succeeded.append(cid)
+            if root is None:
+                new_root = resp.get("ts") if isinstance(resp, dict) else None
+                if new_root:
+                    daily[cid] = {"date": today, "thread_ts": new_root}
         if succeeded:
             results.append((msg, h, succeeded, text))
             log.info(
@@ -1675,6 +1736,10 @@ def send_outbox_messages(client, ctx: dict) -> None:
             for cid in succeeded:
                 append_chat_message(chat_history, cid, "bot", text)
         state["sent_hashes"] = state["sent_hashes"][-1000:]
+        # Persist the per-day thread roots (keep only the current day).
+        state["daily_threads"] = {
+            cid: ent for cid, ent in daily.items() if ent.get("date") == today
+        }
         append_to_history([r[0] for r in results], OUTBOX_HISTORY_FILE)
         save_chat_history(chat_history)
         save_state(state)
@@ -1775,7 +1840,9 @@ class _AssistantSayClient:
     def __init__(self, say):
         self._say = say
 
-    def chat_postMessage(self, channel=None, text="", mrkdwn=True):
+    def chat_postMessage(self, channel=None, text="", mrkdwn=True, thread_ts=None):
+        # Assistant ``say`` is already bound to the user's thread; ignore any
+        # thread_ts (command replies never pass one anyway).
         return self._say(text)
 
 
