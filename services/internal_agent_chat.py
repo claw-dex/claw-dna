@@ -833,7 +833,7 @@ def _build_send_reply_handler(session_name: str, cfg: dict):
         # primary delivery has already succeeded; a failed mirror is
         # surfaced but does NOT fail the tool call.
         mirrored = False
-        if msg_type == "agent_needs_human":
+        if msg_type in ("agent_needs_human", "agent_response"):
             mirror_env = {
                 "type": "needs_human",
                 "subject": "[from internal agent " + session_name + "]",

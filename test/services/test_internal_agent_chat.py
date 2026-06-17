@@ -418,12 +418,55 @@ def test_send_reply_agent_needs_human_mirrors_to_main_outbox(
     assert "mirrored" in out["content"][0]["text"]
 
 
-def test_send_reply_non_needs_human_does_not_mirror(patch_iac_paths, agent_root):
-    """Only agent_needs_human triggers the outbox mirror — other types must not."""
+def test_send_reply_agent_response_mirrors_to_main_outbox(patch_iac_paths, agent_root):
+    """agent_response → primary delivery + main outbox mirror.
+
+    agent_response mirrors to the outbox with the same needs_human envelope
+    shape as agent_needs_human, so existing notification channels (Telegram /
+    WhatsApp) surface completed-work responses without main-agent intervention.
+    """
+    iac = patch_iac_paths
+    h = _make_handler(iac)
+    out = _run(
+        h(
+            {
+                "agent": "main",
+                "type": "agent_response",
+                "content": "Task completed successfully",
+            }
+        )
+    )
+    assert out.get("is_error") is not True
+    # Primary delivery — main inbox got the agent_response envelope
+    inbox_items = json.loads(iac.INBOX_FILE.read_text())
+    assert len(inbox_items) == 1
+    assert inbox_items[0]["type"] == "agent_response"
+    assert inbox_items[0]["content"] == "Task completed successfully"
+    # Mirror — main outbox got a needs_human envelope with the prefix
+    outbox_path = agent_root / "messages" / "outbox.json"
+    assert outbox_path.exists()
+    outbox_items = json.loads(outbox_path.read_text())
+    assert len(outbox_items) == 1
+    mirror = outbox_items[0]
+    assert mirror["type"] == "needs_human"
+    assert mirror["content"] == (
+        "[from internal agent planner] Task completed successfully"
+    )
+    assert mirror["subject"] == "[from internal agent planner]"
+    assert mirror["timestamp"]
+    # Tool output text mentions the mirror so the LLM knows it happened
+    assert "mirrored" in out["content"][0]["text"]
+
+
+def test_send_reply_non_mirrored_types_do_not_mirror(patch_iac_paths, agent_root):
+    """Only agent_needs_human and agent_response trigger the outbox mirror.
+
+    agent_error and agent_info must NOT write to the outbox.
+    """
     iac = patch_iac_paths
     outbox_path = agent_root / "messages" / "outbox.json"
     h = _make_handler(iac)
-    for t in ("agent_response", "agent_error", "agent_info"):
+    for t in ("agent_error", "agent_info"):
         out = _run(h({"agent": "main", "type": t, "content": "x"}))
         assert out.get("is_error") is not True
     # Outbox file must not exist or be empty
@@ -431,18 +474,19 @@ def test_send_reply_non_needs_human_does_not_mirror(patch_iac_paths, agent_root)
         assert json.loads(outbox_path.read_text()) == []
     # And no "mirrored" mention in the success messages
     # (re-run one to grab the text)
-    out = _run(h({"agent": "main", "type": "agent_response", "content": "z"}))
+    out = _run(h({"agent": "main", "type": "agent_info", "content": "z"}))
     assert "mirrored" not in out["content"][0]["text"]
 
 
-def test_send_reply_needs_human_mirror_works_when_target_is_external(
-    patch_iac_paths, agent_root
+@pytest.mark.parametrize("msg_type", ["agent_needs_human", "agent_response"])
+def test_send_reply_mirror_works_when_target_is_external(
+    patch_iac_paths, agent_root, msg_type
 ):
     """Mirror must fire even when the primary target is NOT the main inbox.
 
-    A user-blocking question can come up while the agent is chatting with
-    another peer; the operator still needs to see it. The peer gets the
-    full agent_needs_human envelope; main outbox gets the stripped mirror.
+    Both agent_needs_human and agent_response trigger the outbox mirror.
+    The peer gets the full envelope; main outbox gets the stripped mirror
+    regardless of whether the agent is asking a question or returning results.
     """
     iac = patch_iac_paths
     bot_inbox = agent_root / "messages" / "external" / "research" / "inbox.json"
@@ -462,14 +506,14 @@ def test_send_reply_needs_human_mirror_works_when_target_is_external(
         h(
             {
                 "agent": "research",
-                "type": "agent_needs_human",
+                "type": msg_type,
                 "content": "Need a credential to continue",
             }
         )
     )
     assert out.get("is_error") is not True
     # Primary: peer inbox got the full envelope
-    assert json.loads(bot_inbox.read_text())[0]["type"] == "agent_needs_human"
+    assert json.loads(bot_inbox.read_text())[0]["type"] == msg_type
     # Mirror: main outbox still got the human-notification entry
     outbox_items = json.loads((agent_root / "messages" / "outbox.json").read_text())
     assert len(outbox_items) == 1

@@ -222,7 +222,9 @@ locally-executed goals.
 
 Inbox items with `source: "external_agent"` are forwarded by `external_agent_api.py` from a registered external agent's outbox. They carry these extra fields:
 
-- `type`: prefixed with `agent_` — one of `agent_response`, `agent_needs_human`, `agent_error`, `agent_info`. The prefix lets you distinguish forwarded entries from native inbox types (`goal`, `message`, `event`) at a glance; strip the prefix to see the external agent's intent.
+- `type`: prefixed with `agent_` — one of `agent_response`, `agent_needs_human`, `agent_error`, `agent_info`. The prefix lets you distinguish forwarded entries from native inbox types (`goal`, `message`, `event`) at a glance; strip the prefix to see the external agent's intent. These fall into two categories:
+  - **Final-response** (sent once, signals task completion): `agent_response` (task done, results attached), `agent_needs_human` (task blocked, human must intervene).
+  - **Transient** (may be sent multiple times while working): `agent_error` (recoverable error, work continues), `agent_info` (unsolicited status update or intermediate progress).
 - `reply_to_id` (optional): the `id` of the original delegate-inbox message
   this reply addresses. Set when the external agent supplied `reply_to_id`
   on `POST /write-outbox`. The main agent's goal-polling step matches this
@@ -235,12 +237,13 @@ Inbox items with `source: "external_agent"` are forwarded by `external_agent_api
 
 Inbox items with `source: "internal_agent"` are stamped by `services/internal_agent_chat.py` when an internal SDK-hosted peer agent sends a reply via the `mcp__internal_agent_routing__send_reply` tool. They carry the same shape as external-agent forwards:
 
-- `type`: `agent_response` | `agent_needs_human` | `agent_error` | `agent_info` (chosen by the peer agent itself; not auto-prefixed — the peer picks the `agent_*` value directly via the MCP tool — see `services/internal_agent_chat.py:336-339`).
+- `type`: `agent_response` | `agent_needs_human` | `agent_error` | `agent_info` (chosen by the peer agent itself; not auto-prefixed — the peer picks the `agent_*` value directly via the MCP tool — see `services/internal_agent_chat.py:336-339`). These fall into two categories:
+  - **Final-response** (sent once per task, signals completion): `agent_response` (task done, results ready) and `agent_needs_human` (task blocked, human must intervene). Both types are mirrored into the main outbox so Telegram / WhatsApp surfaces them.
+  - **Transient** (may be sent multiple times while working): `agent_error` (recoverable error, work continues) and `agent_info` (unsolicited status update or intermediate progress exchanged between agents). These are NOT mirrored to the outbox.
 - `source`: literal `"internal_agent"` (stamped by the daemon — `internal_agent_chat.py:402`).
 - `reply_to`: path to the peer's own inbox so the main agent can reply back.
 - `reply_to_id` (optional): the `id` of the original delegate-inbox envelope being responded to. Same correlation semantics as external — matched against `goal.delegated_message_id`.
 - `priority` (optional): integer 1-5 supplied by the peer; defaults to nothing if omitted.
-- `agent_needs_human` forwards are mirrored into the main outbox so Telegram / WhatsApp surfaces them, identical to the external-agent path.
 
 ---
 
@@ -511,8 +514,8 @@ Inbox items with `source: "internal_agent"` are stamped by `services/internal_ag
 | `cycle_type` | Cycle | `goal`, `evolve`, `self-heal`, `dream` | `cycles.json`, `journal.json` |
 | `type` | Inbox | `goal`, `message`, `bash` | `inbox.json`, `inbox_history.json` |
 | `type` | Outbox | `response`, `needs_human`, `error`, `info` | `outbox.json`, `messages/external/<name>/outbox.json` |
-| `type` | Forwarded Inbox (from external agent) | `agent_response`, `agent_needs_human`, `agent_error`, `agent_info` | `inbox.json` (with `source: "external_agent"`) |
-| `type` | Forwarded Inbox (from internal agent) | `agent_response`, `agent_needs_human`, `agent_error`, `agent_info` | `inbox.json` (with `source: "internal_agent"`) |
+| `type` | Forwarded Inbox (from external agent) | **Final-response:** `agent_response`, `agent_needs_human` — **Transient:** `agent_error`, `agent_info` | `inbox.json` (with `source: "external_agent"`) |
+| `type` | Forwarded Inbox (from internal agent) | **Final-response:** `agent_response`, `agent_needs_human` (both mirrored to outbox) — **Transient:** `agent_error`, `agent_info` | `inbox.json` (with `source: "internal_agent"`) |
 | `priority` | Inbox envelope | `1`, `2`, `3` (default), `4`, `5` | `inbox.json`, `messages/internal/<name>/inbox.json`, `messages/external/<name>/inbox.json` |
 | `control.<flag>` | Agent Registry | `clear_chat`, `clear_session` (one-shot booleans on internal agents) | `agents.json` |
 | `cycle_category` | Evolution | `reliability`, `observability`, `capability`, `efficiency`, `prompt_evolution`, `memory_consolidation`, `deep_sleep` | `cycles.json`, `journal.json` |
