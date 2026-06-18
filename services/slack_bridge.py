@@ -505,6 +505,66 @@ def build_chat_context(history: dict, chat_id: str) -> str:
     return "\n".join(lines)
 
 
+def fetch_slack_thread_context(
+    client, channel: str, event: dict, bot_user_id: str, limit: int = 10
+) -> str:
+    """Fetch up to *limit* past messages from the Slack thread the user sent in.
+
+    - If the event has a ``thread_ts`` it is a reply inside a thread;
+      ``conversations.replies`` is used to fetch that thread's history.
+    - Otherwise ``conversations.history`` is used to fetch recent messages in
+      the channel/DM (the top-level conversation).
+
+    The current message itself is excluded (it hasn't been written yet).
+    Bot/app messages are labelled ``Agent``; human messages are labelled
+    ``User``.  Returns an empty string on any API error or when there is no
+    prior context.
+    """
+    thread_ts = event.get("thread_ts")
+    current_ts = event.get("ts", "")
+
+    try:
+        if thread_ts:
+            # Message is part of a thread — fetch the thread replies.
+            resp = client.conversations_replies(
+                channel=channel,
+                ts=thread_ts,
+                limit=limit + 1,  # +1 to account for the root message
+            )
+            raw_messages = resp.get("messages") or []
+        else:
+            # Top-level DM or channel message — fetch channel history.
+            resp = client.conversations_history(
+                channel=channel,
+                limit=limit + 1,  # +1 so we can drop the current one if present
+            )
+            raw_messages = resp.get("messages") or []
+            # conversations.history returns newest-first; reverse to oldest-first.
+            raw_messages = list(reversed(raw_messages))
+    except Exception as e:
+        log.debug(f"fetch_slack_thread_context API call failed: {e}")
+        return ""
+
+    lines = []
+    for msg in raw_messages:
+        # Skip the current message (it's the one the user just sent).
+        if msg.get("ts") == current_ts:
+            continue
+        msg_text = (msg.get("text") or "").strip()
+        if not msg_text:
+            continue
+        # Determine role: bot/app messages are "Agent", humans are "User".
+        if msg.get("bot_id") or msg.get("user") == bot_user_id:
+            label = "Agent"
+        else:
+            label = "User"
+        lines.append(f"<message>{label}: {msg_text}</message>")
+
+    # Keep only the last *limit* messages.
+    selected = lines[-limit:]
+    return "\n".join(selected)
+
+
 # ---------------------------------------------------------------------------
 # Slack API helpers
 # ---------------------------------------------------------------------------
@@ -1453,6 +1513,7 @@ def _decide_authorization(
 
 def _ingest_message(
     ctx: dict,
+    client,
     channel: str,
     username: str,
     text: str,
@@ -1464,11 +1525,18 @@ def _ingest_message(
     Marks the event processed only on a successful inbox write, so a failed
     write stays eligible for Socket Mode redelivery. Returns True on success.
     Shared by the message/app_mention path and the Assistant path.
+
+    Context is fetched live from the Slack thread the user sent their message
+    in (up to 10 past messages) instead of from the local in-memory history.
     """
+    # Fetch thread context from Slack API (outside the lock — network call).
+    context = fetch_slack_thread_context(
+        client, channel, event, ctx["bot_user_id"]
+    )
+
     now_iso = datetime.now(timezone.utc).isoformat()
     with ctx["lock"]:
         chat_history = ctx["chat_history"]
-        context = build_chat_context(chat_history, channel)
         content = build_inbox_content(username, text, attachments, context)
         inbox_item = {
             "type": "message",
@@ -1611,7 +1679,7 @@ def _process_incoming(client, event, ctx, is_mention=False) -> None:
             save_state(ctx["state"])
         return
 
-    wrote = _ingest_message(ctx, channel, username, text, attachments, event)
+    wrote = _ingest_message(ctx, client, channel, username, text, attachments, event)
 
     # Ack in DMs only — channel replies arrive via the outbox, and acking every
     # channel message publicly would be noisy. Sent outside the lock.
@@ -1920,7 +1988,7 @@ def _handle_assistant_message(client, payload, ctx, say, set_status, set_title) 
             save_state(ctx["state"])
         return
 
-    if _ingest_message(ctx, channel, username, text, attachments, payload):
+    if _ingest_message(ctx, client, channel, username, text, attachments, payload):
         ack = build_ack_message()
         say(ack)  # also clears the 'thinking' status
         with ctx["lock"]:

@@ -98,12 +98,16 @@ class SuggestRecorder:
 
 
 class FakeSlackClient:
-    """Records chat_postMessage calls and answers users_info lookups."""
+    """Records chat_postMessage calls and answers users_info / history lookups."""
 
-    def __init__(self, names=None, fail=False):
+    def __init__(self, names=None, fail=False, history_messages=None, thread_messages=None):
         self.sent: list[dict] = []
         self.names = names or {}
         self.fail = fail
+        # Fake messages returned by conversations_history (newest-first, like Slack)
+        self._history_messages: list[dict] = history_messages or []
+        # Fake messages returned by conversations_replies (oldest-first, like Slack)
+        self._thread_messages: list[dict] = thread_messages or []
 
     def chat_postMessage(self, channel, text, mrkdwn=True, thread_ts=None):
         if self.fail:
@@ -126,6 +130,14 @@ class FakeSlackClient:
             raise RuntimeError("no such user")
         name = self.names.get(user, user)
         return {"ok": True, "user": {"id": user, "name": name, "profile": {}}}
+
+    def conversations_history(self, channel, limit=10):
+        """Return newest-first messages (Slack's actual order)."""
+        return {"ok": True, "messages": self._history_messages[:limit]}
+
+    def conversations_replies(self, channel, ts, limit=10):
+        """Return oldest-first thread messages (Slack's actual order)."""
+        return {"ok": True, "messages": self._thread_messages[:limit]}
 
 
 @pytest.fixture
@@ -413,6 +425,137 @@ def test_chat_history_round_trip(patch_slack_paths, frozen_now):
     sb.append_chat_message(hist, "C1", "user", "hi")
     sb.save_chat_history(hist)
     assert sb.load_chat_history() == hist
+
+
+# ---------------------------------------------------------------------------
+# fetch_slack_thread_context
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_slack_thread_context_top_level_dm(patch_slack_paths):
+    """Top-level DM (no thread_ts): uses conversations_history, reversed."""
+    sb = patch_slack_paths
+    # Slack returns newest-first; we expect oldest-first in the output.
+    client = FakeSlackClient(
+        history_messages=[
+            {"user": "U1", "text": "second message", "ts": "2.0"},
+            {"user": "U1", "text": "first message", "ts": "1.0"},
+        ]
+    )
+    event = {"ts": "3.0"}  # current message (not in history, different ts)
+    result = sb.fetch_slack_thread_context(client, "D1", event, "BOT1")
+    assert "<message>User: first message</message>" in result
+    assert "<message>User: second message</message>" in result
+    # Oldest first
+    assert result.index("first message") < result.index("second message")
+
+
+def test_fetch_slack_thread_context_threaded_reply(patch_slack_paths):
+    """Reply inside a thread: uses conversations_replies."""
+    sb = patch_slack_paths
+    client = FakeSlackClient(
+        thread_messages=[
+            {"user": "U1", "text": "root message", "ts": "1.0"},
+            {"bot_id": "B1", "text": "agent reply", "ts": "2.0"},
+            {"user": "U1", "text": "follow-up", "ts": "3.0"},
+        ]
+    )
+    event = {"thread_ts": "1.0", "ts": "4.0"}  # current ts is new, not in thread
+    result = sb.fetch_slack_thread_context(client, "D1", event, "BOT1")
+    assert "<message>User: root message</message>" in result
+    assert "<message>Agent: agent reply</message>" in result
+    assert "<message>User: follow-up</message>" in result
+
+
+def test_fetch_slack_thread_context_excludes_current_message(patch_slack_paths):
+    """The event's own ts must be filtered out from the context."""
+    sb = patch_slack_paths
+    client = FakeSlackClient(
+        history_messages=[
+            {"user": "U1", "text": "current", "ts": "5.0"},
+            {"user": "U1", "text": "previous", "ts": "4.0"},
+        ]
+    )
+    event = {"ts": "5.0"}  # this is the current message
+    result = sb.fetch_slack_thread_context(client, "D1", event, "BOT1")
+    assert "current" not in result
+    assert "<message>User: previous</message>" in result
+
+
+def test_fetch_slack_thread_context_bot_user_labelled_agent(patch_slack_paths):
+    """Messages from the bot user id are labelled Agent."""
+    sb = patch_slack_paths
+    client = FakeSlackClient(
+        history_messages=[
+            {"user": "BOT1", "text": "I am the bot", "ts": "1.0"},
+        ]
+    )
+    event = {"ts": "9.0"}
+    result = sb.fetch_slack_thread_context(client, "D1", event, "BOT1")
+    assert "<message>Agent: I am the bot</message>" in result
+
+
+def test_fetch_slack_thread_context_bot_id_labelled_agent(patch_slack_paths):
+    """Messages with bot_id set (app messages) are labelled Agent."""
+    sb = patch_slack_paths
+    client = FakeSlackClient(
+        history_messages=[
+            {"bot_id": "B99", "text": "app reply", "ts": "1.0"},
+        ]
+    )
+    event = {"ts": "9.0"}
+    result = sb.fetch_slack_thread_context(client, "D1", event, "BOT1")
+    assert "<message>Agent: app reply</message>" in result
+
+
+def test_fetch_slack_thread_context_limits_to_10(patch_slack_paths):
+    """Only the last 10 messages are returned."""
+    sb = patch_slack_paths
+    # 15 messages, newest-first from Slack (history)
+    msgs = [{"user": "U1", "text": f"m{i}", "ts": str(float(15 - i))} for i in range(15)]
+    client = FakeSlackClient(history_messages=msgs)
+    event = {"ts": "99.0"}
+    result = sb.fetch_slack_thread_context(client, "D1", event, "BOT1")
+    lines = [l for l in result.splitlines() if l.strip()]
+    assert len(lines) == 10
+
+
+def test_fetch_slack_thread_context_api_error_returns_empty(patch_slack_paths):
+    """Any API failure is swallowed and an empty string is returned."""
+    sb = patch_slack_paths
+
+    class FailingClient:
+        def conversations_history(self, **kw):
+            raise RuntimeError("Slack API down")
+
+    event = {"ts": "1.0"}
+    result = sb.fetch_slack_thread_context(FailingClient(), "D1", event, "BOT1")
+    assert result == ""
+
+
+def test_fetch_slack_thread_context_empty_history(patch_slack_paths):
+    """No prior messages yields an empty string (no crash)."""
+    sb = patch_slack_paths
+    client = FakeSlackClient(history_messages=[])
+    event = {"ts": "1.0"}
+    assert sb.fetch_slack_thread_context(client, "D1", event, "BOT1") == ""
+
+
+def test_fetch_slack_thread_context_skips_empty_text(patch_slack_paths):
+    """Messages with no text content are silently skipped."""
+    sb = patch_slack_paths
+    client = FakeSlackClient(
+        history_messages=[
+            {"user": "U1", "text": "", "ts": "1.0"},
+            {"user": "U1", "text": "   ", "ts": "2.0"},
+            {"user": "U1", "text": "real message", "ts": "3.0"},
+        ]
+    )
+    event = {"ts": "9.0"}
+    result = sb.fetch_slack_thread_context(client, "D1", event, "BOT1")
+    lines = [l for l in result.splitlines() if l.strip()]
+    assert len(lines) == 1
+    assert "real message" in result
 
 
 # ---------------------------------------------------------------------------
