@@ -336,9 +336,10 @@ def parse_command(text: str) -> tuple[str | None, list[str]]:
 
 
 def _default_state() -> dict:
-    # daily_threads: {channel_id: {"date": "YYYY-MM-DD", "thread_ts": "..."}} —
-    # the per-day Slack thread root the agent posts its activity under.
-    return {"sent_hashes": [], "processed_keys": [], "daily_threads": {}}
+    # outbox_threads: {channel_id: thread_ts} —
+    # the Slack thread root for outbox messages, set when the owner sends a new
+    # top-level DM. Rotates whenever the owner starts a new conversation.
+    return {"sent_hashes": [], "processed_keys": [], "outbox_threads": {}}
 
 
 def _validate_state(data) -> dict:
@@ -361,29 +362,36 @@ def _validate_state(data) -> dict:
                     f"Removed {len(vals) - len(cleaned)} non-string entries from {field}"
                 )
                 data[field] = cleaned
-    threads = data.get("daily_threads")
+    # Migrate legacy daily_threads → outbox_threads (flat {cid: ts} map).
+    if "daily_threads" in data and "outbox_threads" not in data:
+        legacy = data.pop("daily_threads")
+        migrated: dict = {}
+        if isinstance(legacy, dict):
+            for cid, ent in legacy.items():
+                if isinstance(ent, dict) and isinstance(ent.get("thread_ts"), str):
+                    migrated[cid] = ent["thread_ts"]
+        data["outbox_threads"] = migrated
+        if migrated:
+            log.info(f"Migrated {len(migrated)} daily_threads entries → outbox_threads")
+    elif "daily_threads" in data:
+        data.pop("daily_threads")  # remove stale key if outbox_threads already present
+
+    threads = data.get("outbox_threads")
     if not isinstance(threads, dict):
         if threads is not None:
             log.warning(
-                f"Slack state daily_threads has wrong type "
+                f"Slack state outbox_threads has wrong type "
                 f"{type(threads).__name__}, resetting to {{}}"
             )
-        data["daily_threads"] = {}
+        data["outbox_threads"] = {}
     else:
-        # Drop malformed inner entries so a corrupt value can't crash
-        # send_outbox_messages and permanently wedge outbox delivery.
-        cleaned = {
-            cid: ent
-            for cid, ent in threads.items()
-            if isinstance(ent, dict)
-            and isinstance(ent.get("date"), str)
-            and isinstance(ent.get("thread_ts"), str)
-        }
+        # Drop malformed entries (values must be non-empty strings).
+        cleaned = {cid: ts for cid, ts in threads.items() if isinstance(ts, str) and ts}
         if len(cleaned) != len(threads):
             log.warning(
-                f"Dropped {len(threads) - len(cleaned)} malformed daily_threads entries"
+                f"Dropped {len(threads) - len(cleaned)} malformed outbox_threads entries"
             )
-        data["daily_threads"] = cleaned
+        data["outbox_threads"] = cleaned
     return data
 
 
@@ -398,12 +406,36 @@ def load_state() -> dict:
 
 
 def save_state(state: dict):
-    atomic_write_json(STATE_FILE, state, indent=2)
+    try:
+        atomic_write_json(STATE_FILE, state, indent=2)
+    except Exception as e:
+        log.error(f"CRITICAL: Failed to save Slack state: {e}", exc_info=True)
 
 
-def _utc_date() -> str:
-    """Today's date as YYYY-MM-DD in UTC (used to key the per-day thread)."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+def _recover_outbox_thread(client, cid: str, bot_user_id: str) -> str | None:
+    """Find the outbox thread root by scanning the channel's recent history.
+
+    Called on startup when the local state is missing for a channel.
+    Queries Slack for recent top-level messages and returns the ``ts`` of
+    the most recent top-level message sent by the owner (non-bot user) — which
+    is the message the owner last used to start a conversation with the bot.
+
+    Returns None on any API error or when no suitable message is found.
+    """
+    try:
+        resp = client.conversations_history(channel=cid, limit=20)
+        # conversations_history returns newest-first; find most recent
+        # top-level owner message (no thread_ts = top-level DM).
+        for msg in resp.get("messages") or []:
+            # Skip bot messages and threaded replies
+            if msg.get("bot_id") or msg.get("user") == bot_user_id:
+                continue
+            if msg.get("thread_ts"):
+                continue  # skip replies — we want top-level messages only
+            return msg["ts"]
+    except Exception as e:
+        log.debug(f"Outbox thread recovery for {cid} failed: {e}")
+    return None
 
 
 def msg_hash(msg: dict) -> str:
@@ -1424,7 +1456,7 @@ def build_inbox_content(
         base_content += f"\n[Attachments]\n{attachment_lines}"
     if context:
         return (
-            "[Previous conversation context (last 24h)]\n"
+            "[Previous conversation context]\n"
             f"{context}\n[End of context]\n\n[New message]\n{base_content}"
         )
     return base_content
@@ -1530,9 +1562,7 @@ def _ingest_message(
     in (up to 10 past messages) instead of from the local in-memory history.
     """
     # Fetch thread context from Slack API (outside the lock — network call).
-    context = fetch_slack_thread_context(
-        client, channel, event, ctx["bot_user_id"]
-    )
+    context = fetch_slack_thread_context(client, channel, event, ctx["bot_user_id"])
 
     now_iso = datetime.now(timezone.utc).isoformat()
     with ctx["lock"]:
@@ -1609,6 +1639,18 @@ def _process_incoming(client, event, ctx, is_mention=False) -> None:
     channel_type = event.get("channel_type", "")
     is_dm = _is_dm_channel(channel, channel_type)
 
+    # --- Assistant-thread gate ---
+    # Messages inside a DM thread (thread_ts is set) come from the Agents &
+    # AI Apps assistant pane or are replies to an existing thread.  Both cases
+    # are handled exclusively by the @assistant.user_message middleware, which
+    # provides the `say` helper that replies *in-thread* so the ACK is visible
+    # to the user.  If we let _process_incoming race ahead and mark the event
+    # processed, the dedup check in _handle_assistant_message fires and skips
+    # the in-thread reply — the ACK then lands as a top-level DM, invisible
+    # inside the assistant pane.
+    if is_dm and event.get("thread_ts"):
+        return
+
     # --- Channel privacy gate ---
     # In channels/groups we only act when the bot is addressed: an explicit
     # @mention (app_mention, or the bot's id appearing in a message event) or
@@ -1683,12 +1725,18 @@ def _process_incoming(client, event, ctx, is_mention=False) -> None:
 
     # Ack in DMs only — channel replies arrive via the outbox, and acking every
     # channel message publicly would be noisy. Sent outside the lock.
+    # The owner's top-level DM ts becomes the outbox thread root so all future
+    # outbox messages (and this ACK) appear as replies to the same conversation.
     if wrote and is_dm:
+        owner_ts = event.get("ts")
         ack = build_ack_message()
-        slack_send(client, channel, ack)
+        slack_send(client, channel, ack, thread_ts=owner_ts)
         with lock:
+            if owner_ts:
+                ctx["state"]["outbox_threads"][channel] = owner_ts
             append_chat_message(ctx["chat_history"], channel, "bot", ack)
             save_chat_history(ctx["chat_history"])
+            save_state(ctx["state"])
 
 
 def _mentions_owner(raw_text: str, ctx: dict) -> bool:
@@ -1749,24 +1797,14 @@ def send_outbox_messages(client, ctx: dict) -> None:
     with lock:
         chat_ids = list(ctx["chat_ids"])
         already_sent = set(ctx["state"]["sent_hashes"])
-        # Copy the per-day thread roots so we can read/extend them while unlocked.
-        daily = dict(ctx["state"].get("daily_threads", {}))
+        # Copy the outbox thread roots so we can read them while unlocked.
+        outbox_threads = dict(ctx["state"].get("outbox_threads", {}))
     if not chat_ids:
         return
 
-    today = _utc_date()
-
-    def _thread_root(cid: str) -> str | None:
-        """Today's thread root for *cid*, or None if a new one must be started."""
-        entry = daily.get(cid)
-        if isinstance(entry, dict) and entry.get("date") == today:
-            return entry.get("thread_ts")
-        return None
-
-    # Send outside the lock. The first message of the day for a channel is posted
-    # top-level and becomes that day's thread root; later messages nest under it,
-    # so the agent's activity is one conversation per day instead of one per
-    # message. Collect results + any new thread roots to commit afterwards.
+    # Send outside the lock. Each message is sent as a reply under the current
+    # outbox thread root (set when the owner last sent a top-level DM). If no
+    # root is set yet for a channel the message goes top-level.
     results: list[tuple[dict, str, list[str], str]] = []
     for msg in outbox:
         h = msg_hash(msg)
@@ -1775,15 +1813,11 @@ def send_outbox_messages(client, ctx: dict) -> None:
         text = _format_outbox_msg(msg)
         succeeded = []
         for cid in chat_ids:
-            root = _thread_root(cid)
+            root = outbox_threads.get(cid)
             resp = slack_send(client, cid, text, thread_ts=root)
             if not resp:
                 continue
             succeeded.append(cid)
-            if root is None:
-                new_root = resp.get("ts") if isinstance(resp, dict) else None
-                if new_root:
-                    daily[cid] = {"date": today, "thread_ts": new_root}
         if succeeded:
             results.append((msg, h, succeeded, text))
             log.info(
@@ -1804,10 +1838,6 @@ def send_outbox_messages(client, ctx: dict) -> None:
             for cid in succeeded:
                 append_chat_message(chat_history, cid, "bot", text)
         state["sent_hashes"] = state["sent_hashes"][-1000:]
-        # Persist the per-day thread roots (keep only the current day).
-        state["daily_threads"] = {
-            cid: ent for cid, ent in daily.items() if ent.get("date") == today
-        }
         append_to_history([r[0] for r in results], OUTBOX_HISTORY_FILE)
         save_chat_history(chat_history)
         save_state(state)
@@ -1991,9 +2021,15 @@ def _handle_assistant_message(client, payload, ctx, say, set_status, set_title) 
     if _ingest_message(ctx, client, channel, username, text, attachments, payload):
         ack = build_ack_message()
         say(ack)  # also clears the 'thinking' status
+        # Update outbox thread root so agent replies land in this assistant thread.
+        # thread_ts is the root of the assistant thread; fall back to ts if absent.
+        owner_thread_ts = payload.get("thread_ts") or payload.get("ts")
         with ctx["lock"]:
+            if owner_thread_ts:
+                ctx["state"]["outbox_threads"][channel] = owner_thread_ts
             append_chat_message(ctx["chat_history"], channel, "bot", ack)
             save_chat_history(ctx["chat_history"])
+            save_state(ctx["state"])
     else:
         say(":warning: I couldn't queue that just now — please try again.")
 
@@ -2133,6 +2169,33 @@ def main():
         log.info(f"Using saved chat_ids: {chat_ids}")
     else:
         log.info("No chat_ids saved. DM the bot on Slack to auto-discover the owner.")
+
+    # --- Startup: recover outbox thread roots that were lost across restarts ---
+    # For every authorized channel whose outbox thread root is missing, query
+    # Slack's channel history to find the most recent top-level owner message
+    # and reuse its ts as the outbox thread root. This makes threading resilient
+    # to process restarts without requiring state-file surgery.
+    outbox_threads: dict = dict(state.get("outbox_threads", {}))
+    changed = False
+    for cid in chat_ids:
+        if cid in outbox_threads:
+            continue  # already have a root — keep it (owner may have set it)
+        recovered_ts = _recover_outbox_thread(app.client, cid, bot_user_id)
+        if recovered_ts:
+            outbox_threads[cid] = recovered_ts
+            log.info(
+                f"Startup: recovered outbox thread root for {cid}: ts={recovered_ts}"
+            )
+            changed = True
+        else:
+            log.debug(
+                f"Startup: no outbox thread root found for {cid} "
+                "(no owner messages found, or API error)"
+            )
+    if changed:
+        state["outbox_threads"] = outbox_threads
+        save_state(state)
+        log.info("Startup: flushed recovered thread roots to disk")
 
     ctx = {
         "bot_token": bot_token,

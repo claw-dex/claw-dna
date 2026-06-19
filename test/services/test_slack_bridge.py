@@ -100,7 +100,9 @@ class SuggestRecorder:
 class FakeSlackClient:
     """Records chat_postMessage calls and answers users_info / history lookups."""
 
-    def __init__(self, names=None, fail=False, history_messages=None, thread_messages=None):
+    def __init__(
+        self, names=None, fail=False, history_messages=None, thread_messages=None
+    ):
         self.sent: list[dict] = []
         self.names = names or {}
         self.fail = fail
@@ -131,7 +133,7 @@ class FakeSlackClient:
         name = self.names.get(user, user)
         return {"ok": True, "user": {"id": user, "name": name, "profile": {}}}
 
-    def conversations_history(self, channel, limit=10):
+    def conversations_history(self, channel, limit=10, oldest=None, **kwargs):
         """Return newest-first messages (Slack's actual order)."""
         return {"ok": True, "messages": self._history_messages[:limit]}
 
@@ -173,7 +175,7 @@ def make_ctx(sb, **over):
         "owner_user_id": None,
         "owner_username": None,
         "chat_ids": [],
-        "state": {"sent_hashes": [], "processed_keys": []},
+        "state": {"sent_hashes": [], "processed_keys": [], "outbox_threads": {}},
         "chat_history": {},
         "user_name_cache": {},
         "lock": threading.Lock(),
@@ -295,35 +297,52 @@ def test_validate_state_wrong_types(patch_slack_paths):
 def test_validate_state_non_dict(patch_slack_paths):
     sb = patch_slack_paths
     out = sb._validate_state(["not", "a", "dict"])
-    assert out == {"sent_hashes": [], "processed_keys": [], "daily_threads": {}}
+    assert out == {"sent_hashes": [], "processed_keys": [], "outbox_threads": {}}
 
 
-def test_validate_state_daily_threads_wrong_type(patch_slack_paths):
+def test_validate_state_outbox_threads_wrong_type(patch_slack_paths):
     sb = patch_slack_paths
     out = sb._validate_state(
-        {"sent_hashes": [], "processed_keys": [], "daily_threads": "nope"}
+        {"sent_hashes": [], "processed_keys": [], "outbox_threads": "nope"}
     )
-    assert out["daily_threads"] == {}
+    assert out["outbox_threads"] == {}
 
 
-def test_validate_state_drops_malformed_daily_thread_entries(patch_slack_paths):
+def test_validate_state_drops_malformed_outbox_thread_entries(patch_slack_paths):
+    sb = patch_slack_paths
+    out = sb._validate_state(
+        {
+            "sent_hashes": [],
+            "processed_keys": [],
+            "outbox_threads": {
+                "D1": "1700000001.000000",  # valid flat ts
+                "D2": "",  # empty string — invalid
+                "D3": 12345,  # wrong type
+                "D4": None,  # None — invalid
+            },
+        }
+    )
+    assert out["outbox_threads"] == {"D1": "1700000001.000000"}
+
+
+def test_validate_state_migrates_legacy_daily_threads(patch_slack_paths):
+    """daily_threads nested format is migrated to flat outbox_threads on load."""
     sb = patch_slack_paths
     out = sb._validate_state(
         {
             "sent_hashes": [],
             "processed_keys": [],
             "daily_threads": {
-                "D1": {"date": "2026-04-30", "thread_ts": "1.0"},  # valid
-                "D2": "garbage",  # not a dict
-                "D3": {"date": 5, "thread_ts": "2.0"},  # wrong inner type
-                "D4": {"date": "2026-04-30"},  # missing thread_ts
+                "D1": {"date": "2026-04-30", "thread_ts": "1700000001.000000"},
+                "D2": "garbage",  # malformed — dropped during migration
             },
         }
     )
-    assert out["daily_threads"] == {"D1": {"date": "2026-04-30", "thread_ts": "1.0"}}
+    assert "daily_threads" not in out
+    assert out["outbox_threads"] == {"D1": "1700000001.000000"}
 
 
-def test_send_outbox_tolerates_corrupt_daily_thread(
+def test_send_outbox_tolerates_missing_outbox_thread(
     patch_slack_paths, agent_root, frozen_now
 ):
     sb = patch_slack_paths
@@ -333,8 +352,7 @@ def test_send_outbox_tolerates_corrupt_daily_thread(
     )
     client = FakeSlackClient()
     ctx = make_ctx(sb, chat_ids=["D1"])
-    ctx["state"]["daily_threads"] = {"D1": "garbage"}  # corrupt inner entry
-    # must not raise (would otherwise wedge the main loop) and still deliver
+    # no outbox_threads entry → message goes top-level (thread_ts=None)
     sb.send_outbox_messages(client, ctx)
     assert len(client.sent) == 1
     assert client.sent[0]["thread_ts"] is None
@@ -351,7 +369,7 @@ def test_state_round_trip(patch_slack_paths):
     state = {
         "sent_hashes": ["h1"],
         "processed_keys": ["C1:1.0"],
-        "daily_threads": {"D1": {"date": "2026-04-30", "thread_ts": "1.0"}},
+        "outbox_threads": {"D1": "1700000001.000000"},
     }
     sb.save_state(state)
     assert sb.load_state() == state
@@ -362,7 +380,7 @@ def test_load_state_missing_returns_default(patch_slack_paths):
     assert sb.load_state() == {
         "sent_hashes": [],
         "processed_keys": [],
-        "daily_threads": {},
+        "outbox_threads": {},
     }
 
 
@@ -512,7 +530,9 @@ def test_fetch_slack_thread_context_limits_to_10(patch_slack_paths):
     """Only the last 10 messages are returned."""
     sb = patch_slack_paths
     # 15 messages, newest-first from Slack (history)
-    msgs = [{"user": "U1", "text": f"m{i}", "ts": str(float(15 - i))} for i in range(15)]
+    msgs = [
+        {"user": "U1", "text": f"m{i}", "ts": str(float(15 - i))} for i in range(15)
+    ]
     client = FakeSlackClient(history_messages=msgs)
     event = {"ts": "99.0"}
     result = sb.fetch_slack_thread_context(client, "D1", event, "BOT1")
@@ -669,52 +689,53 @@ def test_send_outbox_no_channels(patch_slack_paths, agent_root):
     assert client.sent == []
 
 
-def test_send_outbox_threads_per_day(patch_slack_paths, agent_root, frozen_now):
+def test_send_outbox_threads_under_owner_message(
+    patch_slack_paths, agent_root, frozen_now
+):
+    """All outbox messages reply under the owner's last top-level DM ts."""
     sb = patch_slack_paths
     frozen_now(FROZEN)
     outbox = [
-        {"type": "info", "content": "first of the day"},
-        {"type": "info", "content": "second of the day"},
+        {"type": "info", "content": "first update"},
+        {"type": "info", "content": "second update"},
     ]
     (agent_root / "messages" / "outbox.json").write_text(json.dumps(outbox))
     client = FakeSlackClient()
     ctx = make_ctx(sb, chat_ids=["D1"])
+    owner_ts = "1700000042.000000"
+    ctx["state"]["outbox_threads"] = {"D1": owner_ts}
 
     sb.send_outbox_messages(client, ctx)
 
     assert len(client.sent) == 2
-    # first message roots the day's thread (no thread_ts)
-    assert client.sent[0]["thread_ts"] is None
-    # second nests under the first message's ts → one conversation
-    assert client.sent[1]["thread_ts"] == client.sent[0]["ts"]
-    # the day's thread root is persisted in state
-    entry = ctx["state"]["daily_threads"]["D1"]
-    assert entry["date"] == "2026-04-30"
-    assert entry["thread_ts"] == client.sent[0]["ts"]
+    # both messages nest under the owner's DM ts
+    assert client.sent[0]["thread_ts"] == owner_ts
+    assert client.sent[1]["thread_ts"] == owner_ts
 
 
-def test_send_outbox_new_day_starts_new_thread(
+def test_send_outbox_no_owner_message_goes_toplevel(
     patch_slack_paths, agent_root, frozen_now
 ):
+    """When no outbox thread root is set, messages go top-level."""
     sb = patch_slack_paths
-    frozen_now(FROZEN)  # 2026-04-30
-    (agent_root / "messages" / "outbox.json").write_text(
-        json.dumps([{"type": "info", "content": "today's message"}])
-    )
+    frozen_now(FROZEN)
+    outbox = [
+        {"type": "info", "content": "m1"},
+        {"type": "info", "content": "m2"},
+    ]
+    (agent_root / "messages" / "outbox.json").write_text(json.dumps(outbox))
     client = FakeSlackClient()
-    # yesterday's thread root is stale → today's first message must NOT nest
     ctx = make_ctx(sb, chat_ids=["D1"])
-    ctx["state"]["daily_threads"] = {
-        "D1": {"date": "2026-04-29", "thread_ts": "1600000000.000001"}
-    }
+    # no outbox_threads entry
+    assert ctx["state"]["outbox_threads"] == {}
 
     sb.send_outbox_messages(client, ctx)
 
-    assert client.sent[0]["thread_ts"] is None  # new top-level root for the new day
-    assert ctx["state"]["daily_threads"]["D1"]["date"] == "2026-04-30"
+    assert [s["thread_ts"] for s in client.sent] == [None, None]
 
 
 def test_send_outbox_per_channel_threads(patch_slack_paths, agent_root, frozen_now):
+    """Each channel independently tracks its own outbox thread root."""
     sb = patch_slack_paths
     frozen_now(FROZEN)
     outbox = [
@@ -724,66 +745,19 @@ def test_send_outbox_per_channel_threads(patch_slack_paths, agent_root, frozen_n
     (agent_root / "messages" / "outbox.json").write_text(json.dumps(outbox))
     client = FakeSlackClient()
     ctx = make_ctx(sb, chat_ids=["D1", "D2"])
-
-    sb.send_outbox_messages(client, ctx)
-
-    # each channel keeps its own independent thread root + nesting
-    by_channel: dict = {}
-    for s in client.sent:
-        by_channel.setdefault(s["channel"], []).append(s)
-    assert set(by_channel) == {"D1", "D2"}
-    for cid, msgs in by_channel.items():
-        assert len(msgs) == 2
-        assert msgs[0]["thread_ts"] is None
-        assert msgs[1]["thread_ts"] == msgs[0]["ts"]
-        assert ctx["state"]["daily_threads"][cid]["thread_ts"] == msgs[0]["ts"]
-
-
-def test_send_outbox_no_ts_response_falls_back_top_level(
-    patch_slack_paths, agent_root, frozen_now
-):
-    sb = patch_slack_paths
-    frozen_now(FROZEN)
-
-    class NoTsClient(FakeSlackClient):
-        def chat_postMessage(self, channel, text, mrkdwn=True, thread_ts=None):
-            self.sent.append({"channel": channel, "text": text, "thread_ts": thread_ts})
-            return {"ok": True}  # success but no 'ts'
-
-    outbox = [
-        {"type": "info", "content": "m1"},
-        {"type": "info", "content": "m2"},
-    ]
-    (agent_root / "messages" / "outbox.json").write_text(json.dumps(outbox))
-    client = NoTsClient()
-    ctx = make_ctx(sb, chat_ids=["D1"])
-
-    sb.send_outbox_messages(client, ctx)
-
-    # no root could be recorded → both posts stay top-level, nothing persisted
-    assert [s["thread_ts"] for s in client.sent] == [None, None]
-    assert ctx["state"]["daily_threads"] == {}
-
-
-def test_send_outbox_prunes_stale_other_channel(
-    patch_slack_paths, agent_root, frozen_now
-):
-    sb = patch_slack_paths
-    frozen_now(FROZEN)  # 2026-04-30
-    (agent_root / "messages" / "outbox.json").write_text(
-        json.dumps([{"type": "info", "content": "to D1"}])
-    )
-    client = FakeSlackClient()
-    ctx = make_ctx(sb, chat_ids=["D1"])
-    # D2 has a stale (yesterday) root and gets no message today → must be pruned
-    ctx["state"]["daily_threads"] = {
-        "D2": {"date": "2026-04-29", "thread_ts": "1600000000.000009"}
+    ctx["state"]["outbox_threads"] = {
+        "D1": "1700000001.000000",
+        "D2": "1700000002.000000",
     }
 
     sb.send_outbox_messages(client, ctx)
 
-    assert "D2" not in ctx["state"]["daily_threads"]
-    assert ctx["state"]["daily_threads"]["D1"]["date"] == "2026-04-30"
+    by_channel: dict = {}
+    for s in client.sent:
+        by_channel.setdefault(s["channel"], []).append(s)
+    assert set(by_channel) == {"D1", "D2"}
+    assert all(m["thread_ts"] == "1700000001.000000" for m in by_channel["D1"])
+    assert all(m["thread_ts"] == "1700000002.000000" for m in by_channel["D2"])
 
 
 # ---------------------------------------------------------------------------
@@ -855,7 +829,7 @@ def test_build_inbox_content_with_attachments_and_context(patch_slack_paths):
     )
     assert "[Attachments]" in content
     assert "- document: /p/a.pdf" in content
-    assert "[Previous conversation context (last 24h)]" in content
+    assert "[Previous conversation context]" in content
     assert "[New message]" in content
 
 
@@ -949,6 +923,31 @@ def test_process_incoming_rejects_unknown_in_channel(
     assert "C9" not in ctx["chat_ids"]
     assert any("don't know you" in s["text"] for s in client.sent)
     assert not (agent_root / "messages" / "inbox.json").exists()
+
+
+def test_process_incoming_skips_dm_thread_messages(
+    patch_slack_paths, fake_keepass, agent_root
+):
+    """DM messages with thread_ts belong to the assistant handler; _process_incoming
+    must return immediately so the assistant's say() wins and the ACK lands
+    in-thread (visible in the AI assistant pane) rather than top-level (invisible)."""
+    sb = patch_slack_paths
+    client = FakeSlackClient(names={"U1": "alice"})
+    ctx = make_ctx(sb, chat_ids=["D1"])
+    event = {
+        "channel": "D1",
+        "user": "U1",
+        "text": "how many PRs today?",
+        "channel_type": "im",
+        "ts": "10.0",
+        "thread_ts": "9.0",  # inside an assistant thread
+    }
+    sb._process_incoming(client, event, ctx)
+
+    # must be silently ignored — no inbox write, no ACK, no dedup mark
+    assert client.sent == []
+    assert not (agent_root / "messages" / "inbox.json").exists()
+    assert ctx["state"]["processed_keys"] == []
 
 
 def test_process_incoming_ignores_unaddressed_channel_message(
@@ -1244,6 +1243,31 @@ def test_assistant_owner_discovery_and_ack(
     assert any("Got it!" in s for s in say.said)
 
 
+def test_assistant_message_updates_outbox_thread(
+    patch_slack_paths, fake_keepass, frozen_now, agent_root
+):
+    """_handle_assistant_message sets outbox_threads so agent replies land in-thread."""
+    sb = patch_slack_paths
+    frozen_now(FROZEN)
+    client = FakeSlackClient(names={"U1": "alice"})
+    ctx = make_ctx(sb, chat_ids=["D1"])
+    say, set_status, set_title = FakeSay(), Recorder(), Recorder()
+    # Simulate a message inside an assistant thread (thread_ts is the thread root)
+    payload = {
+        "channel": "D1",
+        "user": "U1",
+        "text": "how many PRs today?",
+        "ts": "1700000099.000000",  # this message's ts
+        "thread_ts": "1700000001.000000",  # the assistant thread root
+    }
+
+    sb._handle_assistant_message(client, payload, ctx, say, set_status, set_title)
+
+    # outbox_threads should now point to the assistant thread root
+    assert ctx["state"]["outbox_threads"]["D1"] == "1700000001.000000"
+    assert any("Got it!" in s for s in say.said)
+
+
 def test_assistant_command_answers_in_thread(
     patch_slack_paths, fake_keepass, agent_root
 ):
@@ -1372,3 +1396,142 @@ def test_build_assistant_wires_handlers(patch_slack_paths, monkeypatch):
     assistant.started(say=say, set_suggested_prompts=suggest)
     assert say.said and "agent" in say.said[0].lower()
     assert suggest.prompts == sb.ASSISTANT_SUGGESTED_PROMPTS
+
+
+# ---------------------------------------------------------------------------
+# Fix A — save_state error handling
+# ---------------------------------------------------------------------------
+
+
+def test_save_state_logs_error_on_failure(patch_slack_paths, mocker, caplog):
+    """save_state must log an ERROR (not silently swallow) when the write fails."""
+    import logging
+
+    sb = patch_slack_paths
+    mocker.patch.object(sb, "atomic_write_json", side_effect=OSError("disk full"))
+    with caplog.at_level(logging.ERROR, logger="slack_bridge"):
+        sb.save_state({"sent_hashes": [], "processed_keys": [], "daily_threads": {}})
+    assert any(
+        "CRITICAL" in r.message and "disk full" in r.message for r in caplog.records
+    )
+
+
+# ---------------------------------------------------------------------------
+# _recover_outbox_thread
+# ---------------------------------------------------------------------------
+
+
+def test_recover_outbox_thread_finds_most_recent_owner_message(patch_slack_paths):
+    """Returns the ts of the most recent top-level owner (non-bot) message."""
+    sb = patch_slack_paths
+    # Slack returns newest-first; first non-bot top-level message wins.
+    client = FakeSlackClient(
+        history_messages=[
+            {"user": "U_OWNER", "text": "latest msg", "ts": "1700000002.000000"},
+            {"user": "U_OWNER", "text": "older msg", "ts": "1700000001.000000"},
+        ]
+    )
+    ts = sb._recover_outbox_thread(client, "D1", "BOT1")
+    # Newest-first → first match is the most recent
+    assert ts == "1700000002.000000"
+
+
+def test_recover_outbox_thread_skips_bot_messages(patch_slack_paths):
+    """Bot messages are skipped; only owner messages can be thread roots."""
+    sb = patch_slack_paths
+    client = FakeSlackClient(
+        history_messages=[
+            {"bot_id": "B1", "text": "bot msg", "ts": "1700000003.000000"},
+            {"user": "BOT1", "text": "bot user msg", "ts": "1700000002.000000"},
+            {"user": "U_OWNER", "text": "owner msg", "ts": "1700000001.000000"},
+        ]
+    )
+    ts = sb._recover_outbox_thread(client, "D1", "BOT1")
+    assert ts == "1700000001.000000"
+
+
+def test_recover_outbox_thread_skips_thread_replies(patch_slack_paths):
+    """Messages with thread_ts set are nested replies and must not be used as root."""
+    sb = patch_slack_paths
+    client = FakeSlackClient(
+        history_messages=[
+            {
+                "user": "U_OWNER",
+                "text": "reply",
+                "ts": "1700000002.000000",
+                "thread_ts": "1700000001.000000",  # nested reply, skip
+            },
+            {"user": "U_OWNER", "text": "top-level", "ts": "1700000001.000000"},
+        ]
+    )
+    ts = sb._recover_outbox_thread(client, "D1", "BOT1")
+    assert ts == "1700000001.000000"
+
+
+def test_recover_outbox_thread_no_owner_messages_returns_none(patch_slack_paths):
+    """When only bot messages exist, returns None."""
+    sb = patch_slack_paths
+    client = FakeSlackClient(
+        history_messages=[
+            {"bot_id": "B1", "text": "bot only", "ts": "1700000001.000000"},
+        ]
+    )
+    assert sb._recover_outbox_thread(client, "D1", "BOT1") is None
+
+
+def test_recover_outbox_thread_empty_history_returns_none(patch_slack_paths):
+    """Empty channel history → None."""
+    sb = patch_slack_paths
+    client = FakeSlackClient(history_messages=[])
+    assert sb._recover_outbox_thread(client, "D1", "BOT1") is None
+
+
+def test_recover_outbox_thread_api_error_returns_none(patch_slack_paths):
+    """Any Slack API error is swallowed and None is returned."""
+    sb = patch_slack_paths
+
+    class FailingClient:
+        def conversations_history(self, **kw):
+            raise RuntimeError("Slack API down")
+
+    assert sb._recover_outbox_thread(FailingClient(), "D1", "BOT1") is None
+
+
+def test_send_outbox_uses_recovered_thread_across_restarts(
+    patch_slack_paths, agent_root, frozen_now
+):
+    """End-to-end: a restarted service with empty outbox_threads recovers the
+    thread root from Slack history and threads the next outbox message."""
+    sb = patch_slack_paths
+    frozen_now(FROZEN)
+
+    # Seed outbox with one new message (the current cycle's update)
+    (agent_root / "messages" / "outbox.json").write_text(
+        json.dumps([{"type": "info", "content": "second message"}])
+    )
+
+    # The Slack client has the owner's earlier top-level DM in history.
+    client = FakeSlackClient(
+        history_messages=[
+            {
+                "user": "U_OWNER",
+                "text": "hey bot",
+                "ts": "1700000001.000000",
+            },
+        ]
+    )
+
+    # State is empty (simulating what happens after a restart clears outbox_threads).
+    ctx = make_ctx(sb, chat_ids=["D1"])
+    assert ctx["state"]["outbox_threads"] == {}
+
+    # Recover the thread root manually (this is what main() does on startup).
+    recovered_ts = sb._recover_outbox_thread(client, "D1", ctx["bot_user_id"])
+    assert recovered_ts == "1700000001.000000"
+    ctx["state"]["outbox_threads"] = {"D1": recovered_ts}
+
+    # Now send the outbox — the message should nest under the recovered thread.
+    sb.send_outbox_messages(client, ctx)
+
+    assert len(client.sent) == 1
+    assert client.sent[0]["thread_ts"] == "1700000001.000000"
