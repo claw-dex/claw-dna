@@ -265,7 +265,7 @@ Inbox items with `from.source: "internal_agent"` are stamped by `services/intern
 
 ---
 
-### Message Envelope (`from` / `id` / `in_reply_to` / `to`)
+### Message Envelope (`from` / `id` / `to`)
 
 **Location:** `/agent/messages/inbox.json`, `/agent/messages/outbox.json`
 
@@ -300,23 +300,33 @@ members across Slack / Telegram / WhatsApp).
   (Goals / reminders / scheduler tasks keep their own top-level `source` — only
   inbox/outbox **message** envelopes were relocated.)
 
-**Outbox fields you write to reply:**
+**Addressing a reply — the structured `to` field:**
 
-- `in_reply_to` — the `id` of the inbox message you are answering. The bridge
-  resolves it back to that user's `from` (channel + user) and delivers **only**
-  to them, on the originating transport. Omit it for unsolicited status/FYI
-  (`type: info`) → goes to the owner only (or a configured redirect channel).
-- `to` — optional friendly `@handle` for addressing someone when you are not
-  replying to a specific message. The system resolves it. **Never** put a raw
-  chat id or user id here — only a handle, or use `in_reply_to`. Note: if that
-  person has messaged on more than one transport, a `to` send may reach them on
-  each; prefer `in_reply_to` (exactly one transport) when answering a message.
+You address an outbox message through a structured **`to`** object (the
+recipient mirror of `from`):
 
-**Three reply fields — keep them distinct:**
+- `to: {"in_reply_to": "<inbox id>"}` — reply to a specific inbox message. The
+  bridge resolves that `id` back to the sender's `from` (channel + user) and
+  delivers **only** to them, on the transport they used. This is the preferred
+  way to answer someone.
+- `to: {"handle": "@vincent"}` — address someone by friendly handle when you are
+  **not** replying to a specific message. **Never** put a raw chat/user id here.
+  If that person has messaged on more than one transport, a handle send may
+  reach them on each; prefer `to.in_reply_to` (exactly one transport) when
+  answering a message.
+- **Omit `to` entirely** for unsolicited status/FYI (`type: info`) → goes to the
+  owner only (or a configured redirect channel).
+
+`in_reply_to` previously sat at the top level; it now lives at `to.in_reply_to`.
+The legacy top-level `in_reply_to` (and a bare-string `to` handle) are still
+accepted for backward compatibility.
+
+**Reply-correlation fields — keep them distinct:**
 
 | Field | Side | Purpose |
 |-------|------|---------|
-| `in_reply_to` | outbox | **NEW** — reply to a human; drives bridge delivery to one user |
+| `to.in_reply_to` | outbox | reply to a human; drives bridge delivery to one user |
+| `to.handle` | outbox | address a human by friendly handle (no specific message) |
 | `reply_to` | inbox | filesystem path for agent↔agent inbox correlation |
 | `reply_to_id` | inbox | correlation on forwarded agent replies; matches `goal.delegated_message_id` |
 

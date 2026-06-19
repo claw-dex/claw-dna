@@ -133,6 +133,55 @@ def parse_from(value) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Structured ``to`` recipient (outbox; mirror of ``from``)
+# ---------------------------------------------------------------------------
+#
+# An outbox reply addresses its recipient through a structured ``to`` object:
+#   "to": {"in_reply_to": "<inbox id>"}   — reply to a specific message (bridge
+#                                            resolves it back to that user), OR
+#   "to": {"handle": "@vincent"}          — address someone by friendly handle.
+# ``in_reply_to`` used to be a top-level field; it now lives at ``to.in_reply_to``.
+
+
+def make_to(*, in_reply_to: str | None = None, handle: str | None = None) -> dict:
+    """Build a structured ``to`` object, dropping empty values.
+
+    ``in_reply_to`` — the ``id`` of the inbox message being answered (preferred;
+                      the bridge resolves it to that user's channel).
+    ``handle``      — a friendly ``@handle`` to address when not replying to a
+                      specific message. Never a raw chat/user id.
+    """
+    out: dict = {}
+    if in_reply_to:
+        out["in_reply_to"] = str(in_reply_to)
+    if handle:
+        out["handle"] = str(handle)
+    return out
+
+
+def reply_target(msg: dict) -> str | None:
+    """Return the value a bridge should resolve to deliver an outbox message.
+
+    Precedence: ``to.in_reply_to`` → legacy top-level ``in_reply_to`` →
+    ``to.handle`` (when ``to`` is a dict); otherwise a legacy bare-string ``to``
+    (a handle). Returns ``None`` when the message is unaddressed or not a dict.
+    The returned value is fed to ``resolve_origin`` (id) / ``resolve_handle``.
+    """
+    if not isinstance(msg, dict):
+        return None
+    to = msg.get("to")
+    if isinstance(to, dict):
+        return to.get("in_reply_to") or msg.get("in_reply_to") or to.get("handle")
+    # Legacy: top-level in_reply_to wins; otherwise a plain-string `to` handle.
+    irt = msg.get("in_reply_to")
+    if irt:
+        return irt
+    if isinstance(to, str) and to.strip():
+        return to
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Stable message id
 # ---------------------------------------------------------------------------
 

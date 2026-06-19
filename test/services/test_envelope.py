@@ -114,6 +114,41 @@ def test_message_source_none_when_absent_or_non_dict():
 
 
 # ---------------------------------------------------------------------------
+# make_to / reply_target (structured outbox `to`)
+# ---------------------------------------------------------------------------
+
+
+def test_make_to_drops_empty():
+    assert e.make_to(in_reply_to="m1") == {"in_reply_to": "m1"}
+    assert e.make_to(handle="@v") == {"handle": "@v"}
+    assert e.make_to(in_reply_to="m1", handle="@v") == {
+        "in_reply_to": "m1",
+        "handle": "@v",
+    }
+    assert e.make_to() == {}
+
+
+def test_reply_target_structured_to():
+    assert e.reply_target({"to": {"in_reply_to": "m1"}}) == "m1"
+    assert e.reply_target({"to": {"handle": "@v"}}) == "@v"
+    # in_reply_to wins over handle within `to`.
+    assert e.reply_target({"to": {"in_reply_to": "m1", "handle": "@v"}}) == "m1"
+
+
+def test_reply_target_legacy_fallback():
+    assert e.reply_target({"in_reply_to": "old"}) == "old"  # legacy top-level
+    assert e.reply_target({"to": "@legacy"}) == "@legacy"  # legacy string `to`
+    # legacy top-level in_reply_to still wins when `to` lacks one.
+    assert e.reply_target({"to": {"handle": "@v"}, "in_reply_to": "x"}) == "x"
+
+
+def test_reply_target_none_when_unaddressed():
+    assert e.reply_target({"type": "info"}) is None
+    assert e.reply_target({"to": {}}) is None
+    assert e.reply_target("not-a-dict") is None
+
+
+# ---------------------------------------------------------------------------
 # origin map: record / resolve / handle / sanitize
 # ---------------------------------------------------------------------------
 

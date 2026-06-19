@@ -61,25 +61,26 @@ Inbox messages can come from different people (owner + owner-granted members)
 across Slack / Telegram / WhatsApp. Each inbox message carries:
 
 - `id` — a stable unique id for that message.
-- `from` — a structured sender identity: `{transport, channel, user_id, handle, role}`.
+- `from` — a structured sender identity: `{source, transport, channel, user_id, handle, role}`.
   `channel`/`user_id` are bridge-internal routing fields — **never write them yourself**.
   The friendly `[Slack @handle]:` prefix inside `content` tells you who is speaking.
 
-To reply to the person who sent a message, copy that message's `id` into your
-outbox message's `in_reply_to` field. The bridge resolves it back to the right
-user on the right transport and delivers **only** to them:
+To reply to the person who sent a message, address your outbox message with a
+structured `to` whose `in_reply_to` is that message's `id`. The bridge resolves
+it back to the right user on the right transport and delivers **only** to them:
 
 ```json
-{"type": "response", "subject": "...", "content": "...", "in_reply_to": "<that inbox id>"}
+{"type": "response", "subject": "...", "content": "...", "to": {"in_reply_to": "<that inbox id>"}}
 ```
 
-- **Omit** `in_reply_to` for unsolicited status / FYI (`type: info`) — it goes to
-  the owner only (or a configured status channel).
-- You may instead set `to: "@handle"` to address someone by their friendly handle
-  when you are not replying to a specific message. **Never** put a raw chat id or
-  user id in `to` — only a handle, or use `in_reply_to`.
-- `in_reply_to` (reply to a human, drives delivery) is distinct from `reply_to` /
-  `reply_to_id` (agent↔agent inbox correlation). See `prompts/enum.md`.
+- **Omit `to`** for unsolicited status / FYI (`type: info`) — it goes to the
+  owner only (or a configured status channel).
+- You may instead set `to: {"handle": "@handle"}` to address someone by their
+  friendly handle when you are not replying to a specific message. **Never** put
+  a raw chat id or user id in `to` — only a handle, or use `to.in_reply_to`.
+- `to.in_reply_to` (reply to a human, drives delivery) is distinct from
+  `reply_to` / `reply_to_id` (agent↔agent inbox correlation). See `prompts/enum.md`.
+  (The legacy top-level `in_reply_to` is still accepted for compatibility.)
 
 ## Container Info
 
@@ -204,9 +205,9 @@ Some tasks **cannot be completed autonomously**. When you encounter one, you MUS
    - `"type": "needs_human"` — so the portal can highlight it distinctly
    - `"subject"`: short description of what's blocked
    - `"content"`: explain exactly what you need the human to do, with step-by-step instructions if possible
-   - `"in_reply_to"`: the `id` of the inbox message that triggered this, when the
-     blocker belongs to one user's request — so the ask reaches that exact person
-     (omit it to notify the owner)
+   - `"to": {"in_reply_to": "<id>"}`: the `id` of the inbox message that triggered
+     this, when the blocker belongs to one user's request — so the ask reaches
+     that exact person (omit `to` to notify the owner)
 3. Set `status` field in `state.json` to `"waiting_for_human"`
 4. Document the blocker in `state.json` in field `last_cycle_summary`
 

@@ -77,6 +77,7 @@ from envelope import (
     make_from,
     msg_hash,
     record_origin,
+    reply_target,
     resolve_handle,
     resolve_origin,
     sanitize_origin_map,
@@ -1910,7 +1911,9 @@ def send_outbox_messages(client, ctx: dict) -> None:
         if key in already_sent:
             continue
 
-        target = msg.get("in_reply_to") or msg.get("to")
+        # Recipient from the structured `to` (to.in_reply_to / to.handle), with
+        # legacy fallback to top-level in_reply_to or a bare-string `to`.
+        target = reply_target(msg)
         if target:
             recipient = _resolve_recipient(origin_map, str(target))
             if recipient is None:

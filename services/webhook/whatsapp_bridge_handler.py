@@ -37,6 +37,7 @@ from envelope import (
     make_from,
     msg_hash,  # re-exported for callers/tests referencing the module attribute
     record_origin,
+    reply_target,
     resolve_handle,
     resolve_origin,
     sanitize_origin_map,
@@ -897,7 +898,9 @@ def send_outbox_messages(
         if key in state["sent_hashes"]:
             continue
 
-        target = msg.get("in_reply_to") or msg.get("to")
+        # Recipient from the structured `to` (to.in_reply_to / to.handle), with
+        # legacy fallback to top-level in_reply_to or a bare-string `to`.
+        target = reply_target(msg)
         if target:
             resolved = resolve_origin(origin_map, str(target))
             if resolved is None:

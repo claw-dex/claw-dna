@@ -177,10 +177,10 @@ Messages are conversational — they do NOT create trackable goals.
    - **Capabilities / introspection question** (e.g., "what can you do?", "what scripts do you have?", "what plugins are installed?") → check `/agent/memory/capabilities.json` and/or `AGENTS.md` and answer directly; no scripts needed
    - **Out-of-scope question** → answer directly from memory; no scripts needed
 3. Write response to `/agent/messages/outbox.json` (always respond — silence is confusing).
-   To reply to the person who sent the message, copy that inbox message's `id`
-   into the outbox `in_reply_to` field — the bridge delivers only to that user
-   on their transport. Omit `in_reply_to` only for owner-wide status/FYI. Never
-   write raw chat/user ids. See `prompts/enum.md` → Message Envelope.
+   To reply to the person who sent the message, address it with a structured `to`:
+   `"to": {"in_reply_to": "<that inbox id>"}` — the bridge delivers only to that
+   user on their transport. Omit `to` only for owner-wide status/FYI. Never write
+   raw chat/user ids. See `prompts/enum.md` → Message Envelope.
 4. Do NOT clear outbox.json — the user reads and clears messages manually via the portal
 
 **Key principle:** A message never creates a goal.json entry, but it always gets a response.

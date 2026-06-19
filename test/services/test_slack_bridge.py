@@ -734,6 +734,57 @@ def test_send_outbox_addressed_routes_to_single_user(
     assert client.sent[0]["thread_ts"] == "1700000002.000000"
 
 
+def test_send_outbox_structured_to_in_reply_to(
+    patch_slack_paths, agent_root, frozen_now
+):
+    """The structured `to: {in_reply_to: <id>}` routes to that user's channel."""
+    sb = patch_slack_paths
+    frozen_now(FROZEN)
+    ctx = make_ctx(sb, chat_ids=["D1", "D2"], owner_user_id="U1")
+    sb.record_origin(
+        ctx["state"]["origin_map"],
+        msg_id="mid-bob",
+        from_obj=sb.make_from(
+            "slack", channel="D2", user_id="U2", handle="bob", role="member"
+        ),
+        origin_ref="1700000002.000000",
+    )
+    outbox = [
+        {"type": "response", "content": "hi bob", "to": {"in_reply_to": "mid-bob"}},
+    ]
+    (agent_root / "messages" / "outbox.json").write_text(json.dumps(outbox))
+
+    client = FakeSlackClient()
+    sb.send_outbox_messages(client, ctx)
+
+    assert len(client.sent) == 1
+    assert client.sent[0]["channel"] == "D2"
+    assert client.sent[0]["thread_ts"] == "1700000002.000000"
+
+
+def test_send_outbox_structured_to_handle(patch_slack_paths, agent_root, frozen_now):
+    """The structured `to: {handle: "@bob"}` resolves via the origin map handle."""
+    sb = patch_slack_paths
+    frozen_now(FROZEN)
+    ctx = make_ctx(sb, chat_ids=["D1", "D2"], owner_user_id="U1")
+    sb.record_origin(
+        ctx["state"]["origin_map"],
+        msg_id="mid-bob",
+        from_obj=sb.make_from(
+            "slack", channel="D2", user_id="U2", handle="bob", role="member"
+        ),
+        origin_ref="1700000002.000000",
+    )
+    outbox = [{"type": "response", "content": "hi bob", "to": {"handle": "@bob"}}]
+    (agent_root / "messages" / "outbox.json").write_text(json.dumps(outbox))
+
+    client = FakeSlackClient()
+    sb.send_outbox_messages(client, ctx)
+
+    assert len(client.sent) == 1
+    assert client.sent[0]["channel"] == "D2"
+
+
 def test_send_outbox_addressed_to_other_transport_is_skipped(
     patch_slack_paths, agent_root
 ):
