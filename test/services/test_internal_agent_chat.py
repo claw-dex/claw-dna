@@ -472,10 +472,11 @@ def test_send_reply_non_mirrored_types_do_not_mirror(patch_iac_paths, agent_root
     # Outbox file must not exist or be empty
     if outbox_path.exists():
         assert json.loads(outbox_path.read_text()) == []
-    # And no "mirrored" mention in the success messages
-    # (re-run one to grab the text)
+    # And no mirror notice in the success message. Assert the exact phrase
+    # rather than the bare word "mirrored" — the pytest tmp path can contain
+    # "mirrored" (from this test's name) and trip a substring check.
     out = _run(h({"agent": "main", "type": "agent_info", "content": "z"}))
-    assert "mirrored" not in out["content"][0]["text"]
+    assert "mirrored to main outbox" not in out["content"][0]["text"]
 
 
 @pytest.mark.parametrize("msg_type", ["agent_needs_human", "agent_response"])
