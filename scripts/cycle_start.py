@@ -1227,7 +1227,7 @@ def _print_online_agents() -> None:
         '(e.g. "Research about the topics of autonomous AI agent, produce a pdf report and upload it to my workspace"); use type="message" for a '
         'conversational note or status request (e.g. "Report your current '
         'progress back to me"). Replies surface in the main inbox.json with '
-        'source: "external_agent" | "internal_agent".'
+        'from.source: "external_agent" | "internal_agent".'
     )
 
 

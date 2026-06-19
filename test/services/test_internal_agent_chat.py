@@ -327,7 +327,7 @@ def test_send_reply_to_main_writes_to_inbox_file(patch_iac_paths):
     env = items[0]
     assert env["type"] == "agent_response"
     assert env["content"] == "done"
-    assert env["source"] == "internal_agent"
+    assert env["from"]["source"] == "internal_agent"  # source relocated into from
     assert env["reply_to"] == "messages/internal/planner/inbox.json"
     assert env["timestamp"]
     # write_to_inbox stamps received_at for the main inbox
@@ -371,7 +371,7 @@ def test_send_reply_to_external_agent_stamps_received_at(patch_iac_paths, agent_
     env = items[0]
     assert env["received_at"]  # stamped at write time
     assert env["priority"] == 2
-    assert env["source"] == "internal_agent"
+    assert env["from"]["source"] == "internal_agent"  # source relocated into from
     assert env["reply_to"] == "messages/internal/planner/inbox.json"
 
 

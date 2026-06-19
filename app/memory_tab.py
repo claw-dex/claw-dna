@@ -13,6 +13,7 @@ from app.shared import (
     _STATUS_COLORS,
     _STATUS_MD_COLORS,
     _badge,
+    message_source,
 )
 
 
@@ -264,7 +265,7 @@ def render():
                 if not isinstance(raw, str):
                     raw = str(raw)
                 content = raw[:80]
-                source = cmd.get("source") or cmd.get("channel") or ""
+                source = message_source(cmd) or cmd.get("channel") or ""
                 ts = str(cmd.get("timestamp", ""))[:19].replace("T", " ")
                 st.markdown(f"{icon} **[{cmd_type}]** {content}")
                 st.caption(f"{source} | {ts}" if source else ts)

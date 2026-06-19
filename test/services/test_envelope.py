@@ -9,17 +9,24 @@ import envelope as e
 # ---------------------------------------------------------------------------
 
 
-def test_make_from_drops_empty_values():
+def test_make_from_source_primary_drops_empty():
+    # First positional is now `source`; transport omitted when not passed.
     out = e.make_from("slack", channel="D1", user_id="", handle=None, role="owner")
-    assert out == {"transport": "slack", "channel": "D1", "role": "owner"}
+    assert out == {"source": "slack", "channel": "D1", "role": "owner"}
 
 
-def test_make_from_full():
+def test_make_from_with_distinct_transport():
     out = e.make_from(
-        "telegram", channel="123", user_id="456", handle="vincent", role="member"
+        "whatsapp",
+        transport="webhook",
+        channel="123",
+        user_id="456",
+        handle="vincent",
+        role="member",
     )
     assert out == {
-        "transport": "telegram",
+        "source": "whatsapp",
+        "transport": "webhook",
         "channel": "123",
         "user_id": "456",
         "handle": "vincent",
@@ -81,6 +88,29 @@ def test_dedup_key_prefers_id():
 def test_dedup_key_falls_back_to_hash():
     msg = {"type": "info", "content": "x"}
     assert e.dedup_key(msg) == e.msg_hash(msg)
+
+
+# ---------------------------------------------------------------------------
+# message_source
+# ---------------------------------------------------------------------------
+
+
+def test_message_source_prefers_from_source():
+    msg = {"from": {"transport": "slack", "source": "slack"}, "source": "legacy"}
+    assert e.message_source(msg) == "slack"
+
+
+def test_message_source_falls_back_to_top_level():
+    # Legacy message (string/absent from) → top-level source.
+    assert e.message_source({"source": "webhook"}) == "webhook"
+    assert e.message_source({"from": "legacy-string", "source": "portal"}) == "portal"
+
+
+def test_message_source_none_when_absent_or_non_dict():
+    assert e.message_source({}) is None
+    assert e.message_source({"from": {"transport": "slack"}}) is None
+    assert e.message_source("not-a-dict") is None
+    assert e.message_source(None) is None
 
 
 # ---------------------------------------------------------------------------

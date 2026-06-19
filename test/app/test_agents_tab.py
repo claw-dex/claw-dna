@@ -218,8 +218,10 @@ def test_send_message_writes_envelope_with_correct_shape(patch_agents_tab, monke
     assert len(items) == 1
     env = items[0]
     assert env["type"] == "message"
-    assert env["from"] == "portal"
-    assert env["source"] == "portal"
+    # `from` is a structured identity: source="portal", no transport (the portal
+    # writes directly, so source already says how it arrived — no duplication).
+    assert env["from"] == {"source": "portal", "role": "owner"}
+    assert "source" not in env  # no top-level source
     assert env["subject"] == "Hi"
     assert env["content"] == "Hello there"
     assert env["reply_to"] == "messages/inbox.json"

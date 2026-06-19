@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 from app.data._cache import _mmfile_cache, _register_cache
 from app.data._helpers import _read_json_safe
-from app.shared import MEMORY_DIR, LOGS_DIR, MESSAGES_DIR
+from app.shared import MEMORY_DIR, LOGS_DIR, MESSAGES_DIR, message_source
 
 
 @_mmfile_cache(
@@ -301,7 +301,7 @@ def load_activity():
                 "time": ts,
                 "type": etype,
                 "summary": content[:120],
-                "detail": h.get("source") or h.get("channel") or "",
+                "detail": message_source(h) or h.get("channel") or "",
             }
         )
     cycles = load_cycles()

@@ -1797,8 +1797,11 @@ def _process_authorized_message(
         if owner_username and _norm(from_user) == _norm(owner_username)
         else "member"
     )
+    # source="telegram" (origin); transport="polling_script" — the telegram
+    # bridge long-polls Telegram and writes the message into the inbox.
     from_obj = make_from(
         "telegram",
+        transport="polling_script",
         channel=from_chat,
         user_id=from_user_id,
         handle=from_user,
@@ -1810,7 +1813,7 @@ def _process_authorized_message(
         "content": content,
         "timestamp": now_iso,
         "received_at": now_iso,
-        "source": "telegram",
+        # source now lives in from.source (envelope normalization).
         "from": from_obj,
     }
     # Stamp a stable id so the agent can reply via outbox `in_reply_to`.

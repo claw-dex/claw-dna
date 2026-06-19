@@ -141,8 +141,8 @@ Delegation flow:
    `"{goal-id} Delegated to {name}: <short task>"`.
 5. Move on. Do NOT block on the delegate's reply within the same cycle.
 
-Replies surface in the main `inbox.json` with `source: "external_agent"` or
-`source: "internal_agent"` and `type` prefixed `agent_` (e.g.
+Replies surface in the main `inbox.json` with `from.source: "external_agent"` or
+`from.source: "internal_agent"` and `type` prefixed `agent_` (e.g.
 `agent_response`, `agent_error`). The polling step in "Continue In-Progress
 Goals" matches these back to your goal via `reply_to_id`:
 
@@ -268,7 +268,7 @@ For each `in_progress` goal in `goal.json` that has a `delegated_to` field:
      `type: "error"` (or `type: "needs_human"` if user action could revive
      the delegate) note to `outbox.json`.
 2. Otherwise, scan `<your_inbox_messages>` and recent `inbox_history.json`
-   for items where `source` is `external_agent`/`internal_agent` AND
+   for items where `from.source` is `external_agent`/`internal_agent` AND
    `reply_to_id == <goal.delegated_message_id>`. The sweeper (external) and
    the `send_reply` MCP tool (internal) both stamp `reply_to_id` on the
    forwarded main-inbox envelope — that is the canonical correlation key.

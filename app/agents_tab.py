@@ -295,6 +295,19 @@ def _render_inbox(agent: dict) -> None:
             _render_envelope(env)
 
 
+def _from_label(env: dict) -> str | None:
+    """Human-readable sender for an envelope's structured (or legacy) `from`."""
+    frm = env.get("from")
+    if isinstance(frm, dict):
+        return (
+            frm.get("handle")
+            or frm.get("source")
+            or frm.get("transport")
+            or frm.get("raw")
+        )
+    return str(frm) if frm else None
+
+
 def _render_envelope(env: dict) -> None:
     if not isinstance(env, dict):
         st.json(env)
@@ -302,7 +315,7 @@ def _render_envelope(env: dict) -> None:
     label = " · ".join(
         [
             str(env.get("type") or "?"),
-            str(env.get("from") or env.get("source") or "?"),
+            str(_from_label(env) or env.get("source") or "?"),
             _ts(env) or "?",
         ]
     )
@@ -479,8 +492,10 @@ def _handle_send_message(
         "type": cmd_type,
         "subject": subject,
         "content": content,
-        "source": _PORTAL_SOURCE,
-        "from": _PORTAL_SOURCE,
+        # source="portal" (origin). No transport — the portal writes directly to
+        # the inbox, so source already says how it arrived (no duplication).
+        # Inlined to avoid a cross-root import from app/ into services/.
+        "from": {"source": _PORTAL_SOURCE, "role": "owner"},
         "priority": priority,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "reply_to": _REPLY_TO,

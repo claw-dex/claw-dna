@@ -210,7 +210,7 @@ locally-executed goals.
 - The main outbox is **not** schema-validated by `services/shared.py:write_to_outbox` — types above are conventions recognized by display code (`app/commands_tab.py`, `app/shared.py`, `services/telegram_bridge.py`, `services/webhook/whatsapp_bridge_handler.py`). Other types still write, but render without an icon/badge.
 - The external-agent endpoint **strictly validates** to `("response", "needs_human", "error", "info")` via `_ALLOWED_OUTBOX_TYPES` in `services/external_agent_api.py:426`.
 - Sweeper forward priority (lower = more urgent): `needs_human` (2), `error` (3), `response` (4), `info` (5).
-- The sweeper forwards each external-agent outbox entry into the main inbox with the type prefixed `agent_` (`agent_response`, `agent_needs_human`, `agent_error`, `agent_info`) and `source: "external_agent"` — see the next subsection.
+- The sweeper forwards each external-agent outbox entry into the main inbox with the type prefixed `agent_` (`agent_response`, `agent_needs_human`, `agent_error`, `agent_info`) and `from.source: "external_agent"` — see the next subsection.
 
 **Inbox-side notes:**
 
@@ -220,7 +220,7 @@ locally-executed goals.
 
 #### External-Agent Inbox Source
 
-Inbox items with `source: "external_agent"` are forwarded by `external_agent_api.py` from a registered external agent's outbox. They carry these extra fields:
+Inbox items with `from.source: "external_agent"` are forwarded by `external_agent_api.py` from a registered external agent's outbox. They carry these extra fields:
 
 - `type`: prefixed with `agent_` — one of `agent_response`, `agent_needs_human`, `agent_error`, `agent_info`. The prefix lets you distinguish forwarded entries from native inbox types (`goal`, `message`, `event`) at a glance; strip the prefix to see the external agent's intent. These fall into two categories:
   - **Final-response** (sent once, signals task completion): `agent_response` (task done, results attached), `agent_needs_human` (task blocked, human must intervene).
@@ -235,12 +235,12 @@ Inbox items with `source: "external_agent"` are forwarded by `external_agent_api
 
 #### Internal-Agent Inbox Source
 
-Inbox items with `source: "internal_agent"` are stamped by `services/internal_agent_chat.py` when an internal SDK-hosted peer agent sends a reply via the `mcp__internal_agent_routing__send_reply` tool. They carry the same shape as external-agent forwards:
+Inbox items with `from.source: "internal_agent"` are stamped by `services/internal_agent_chat.py` when an internal SDK-hosted peer agent sends a reply via the `mcp__internal_agent_routing__send_reply` tool. They carry the same shape as external-agent forwards:
 
 - `type`: `agent_response` | `agent_needs_human` | `agent_error` | `agent_info` (chosen by the peer agent itself; not auto-prefixed — the peer picks the `agent_*` value directly via the MCP tool — see `services/internal_agent_chat.py:336-339`). These fall into two categories:
   - **Final-response** (sent once per task, signals completion): `agent_response` (task done, results ready) and `agent_needs_human` (task blocked, human must intervene). Both types are mirrored into the main outbox so Telegram / WhatsApp surfaces them.
   - **Transient** (may be sent multiple times while working): `agent_error` (recoverable error, work continues) and `agent_info` (unsolicited status update or intermediate progress exchanged between agents). These are NOT mirrored to the outbox.
-- `source`: literal `"internal_agent"` (stamped by the daemon — `internal_agent_chat.py:402`).
+- `from.source`: literal `"internal_agent"` (stamped by the daemon via `make_from`).
 - `reply_to`: path to the peer's own inbox so the main agent can reply back.
 - `reply_to_id` (optional): the `id` of the original delegate-inbox envelope being responded to. Same correlation semantics as external — matched against `goal.delegated_message_id`.
 - `priority` (optional): integer 1-5 supplied by the peer; defaults to nothing if omitted.
@@ -281,13 +281,24 @@ members across Slack / Telegram / WhatsApp).
 
   | Key | Meaning |
   |-----|---------|
-  | `transport` | `slack` \| `telegram` \| `whatsapp` \| `portal` \| `scheduler` \| `internal_agent` \| `external_agent` |
+  | `source` | **where the message ORIGINATED** (the primary identity): `slack` \| `telegram` \| `whatsapp` \| `github` \| `portal` \| `scheduler` \| `external_agent` \| `internal_agent` \| … |
+  | `transport` | **the delivery middleware** that carried it into the inbox — `webhook` \| `polling_script` \| `portal`. Set **only when distinct** from the source; omitted when the source already says how it arrived (so the two never duplicate). |
   | `channel` | delivery target (chat/DM id). **Bridge-internal — never write it.** |
   | `user_id` | platform user id (identity). **Bridge-internal — never write it.** |
   | `handle` | human-readable @display handle (also shown in the `content` prefix) |
   | `role` | `owner` or `member` — an **identity label only** (no permission gate) |
 
-  Legacy string `from` values are tolerated (read as no identity).
+  Examples: a WhatsApp message → `{source: "whatsapp", transport: "webhook"}`;
+  a GitHub push → `{source: "github", transport: "webhook"}`; a Slack DM →
+  `{source: "slack", transport: "polling_script"}`; a portal command →
+  `{source: "portal"}` (no transport — it would just duplicate the source).
+
+  Legacy string `from` values are tolerated (read as no identity). The former
+  top-level `source` field now lives at `from.source`; readers should use the
+  `message_source(msg)` helper (`services/envelope.py` / `app/shared.py`),
+  which prefers `from.source` and falls back to legacy top-level `source`.
+  (Goals / reminders / scheduler tasks keep their own top-level `source` — only
+  inbox/outbox **message** envelopes were relocated.)
 
 **Outbox fields you write to reply:**
 
@@ -560,8 +571,8 @@ members across Slack / Telegram / WhatsApp).
 | `cycle_type` | Cycle | `goal`, `evolve`, `self-heal`, `dream` | `cycles.json`, `journal.json` |
 | `type` | Inbox | `goal`, `message`, `bash` | `inbox.json`, `inbox_history.json` |
 | `type` | Outbox | `response`, `needs_human`, `error`, `info` | `outbox.json`, `messages/external/<name>/outbox.json` |
-| `type` | Forwarded Inbox (from external agent) | **Final-response:** `agent_response`, `agent_needs_human` — **Transient:** `agent_error`, `agent_info` | `inbox.json` (with `source: "external_agent"`) |
-| `type` | Forwarded Inbox (from internal agent) | **Final-response:** `agent_response`, `agent_needs_human` (both mirrored to outbox) — **Transient:** `agent_error`, `agent_info` | `inbox.json` (with `source: "internal_agent"`) |
+| `type` | Forwarded Inbox (from external agent) | **Final-response:** `agent_response`, `agent_needs_human` — **Transient:** `agent_error`, `agent_info` | `inbox.json` (with `from.source: "external_agent"`) |
+| `type` | Forwarded Inbox (from internal agent) | **Final-response:** `agent_response`, `agent_needs_human` (both mirrored to outbox) — **Transient:** `agent_error`, `agent_info` | `inbox.json` (with `from.source: "internal_agent"`) |
 | `priority` | Inbox envelope | `1`, `2`, `3` (default), `4`, `5` | `inbox.json`, `messages/internal/<name>/inbox.json`, `messages/external/<name>/inbox.json` |
 | `control.<flag>` | Agent Registry | `clear_chat`, `clear_session` (one-shot booleans on internal agents) | `agents.json` |
 | `cycle_category` | Evolution | `reliability`, `observability`, `capability`, `efficiency`, `prompt_evolution`, `memory_consolidation`, `deep_sleep` | `cycles.json`, `journal.json` |

@@ -709,11 +709,12 @@ def _sweep_once() -> None:
                 "type": f"agent_{ext_type}",
                 "content": "\n".join(content_parts),
                 "received_at": forwarded_at,
-                "source": "external_agent",
-                # Structured identity: the external agent is the sender. The
-                # legacy outbox path this used to hold is redundant with the
-                # adjacent reply_to / source fields below.
-                "from": make_from("external_agent", handle=name),
+                # Structured identity: the external agent is the sender
+                # (source); transport="polling_script" — the sweeper polls the
+                # agent's outbox and forwards it into the main inbox.
+                "from": make_from(
+                    "external_agent", transport="polling_script", handle=name
+                ),
                 "reply_to": f"messages/external/{name}/inbox.json",
                 "priority": _FORWARD_PRIORITY.get(ext_type, _FORWARD_PRIORITY_DEFAULT),
             }

@@ -259,12 +259,22 @@ class WebhookHandler(BaseHTTPRequestHandler):
             content_parts.append(f"From: {self.client_address[0]}")
             content = "\n".join(content_parts)
 
+            # transport="webhook" (delivery medium); source = the originating
+            # system from the ?source= query param (e.g. github, ci) when given.
+            # Omit source when unknown — never duplicate "webhook" into source.
+            _src_vals = parse_qs(parsed.query).get("source")
+            from_obj = {"transport": "webhook"}
+            if _src_vals and _src_vals[0]:
+                from_obj["source"] = _src_vals[0]
+
             inbox_item = {
                 "type": "event",
                 "content": content,
                 "timestamp": now,
                 "received_at": now,
-                "source": "webhook",
+                # Structured origin. No user identity / channel — webhook events
+                # are system events, not replyable.
+                "from": from_obj,
                 "priority": 3,
             }
 

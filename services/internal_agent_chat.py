@@ -59,6 +59,7 @@ from pathlib import Path
 
 import json
 
+from envelope import make_from
 from shared import (
     INBOX_FILE,
     MESSAGES_DIR,
@@ -792,7 +793,13 @@ def _build_send_reply_handler(session_name: str, cfg: dict):
             "type": msg_type,
             "content": content,
             "timestamp": _now_iso(),
-            "source": _REPLY_SOURCE,
+            # Structured sender identity (matches external_agent_api forwards):
+            # this internal peer is the sender (source); transport="polling_script"
+            # — the daemon polls per-agent inboxes and forwards the reply. No
+            # channel — replies route back via reply_to / reply_to_id.
+            "from": make_from(
+                _REPLY_SOURCE, transport="polling_script", handle=session_name
+            ),
             "reply_to": "messages/internal/" + session_name + "/inbox.json",
         }
         # When the reply is addressed to a specific inbound message, stamp
@@ -1547,11 +1554,25 @@ class InternalAgentSession:
 
     def _build_user_prompt(self, msgs: list) -> str:
         ordered = sorted(msgs, key=lambda m: str(m.get("timestamp") or ""))
+
+        def _from_str(m: dict) -> str:
+            # `from` may be the structured envelope dict or a legacy string.
+            frm = m.get("from")
+            if isinstance(frm, dict):
+                return str(
+                    frm.get("handle")
+                    or frm.get("source")
+                    or frm.get("transport")
+                    or frm.get("raw")
+                    or "?"
+                )
+            return str(frm or "?")
+
         parts: list[str] = []
         for i, m in enumerate(ordered):
             header = (
                 "[from="
-                + str(m.get("from") or "?")
+                + _from_str(m)
                 + " type="
                 + str(m.get("type") or "message")
                 + " reply_to="

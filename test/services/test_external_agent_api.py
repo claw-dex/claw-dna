@@ -432,11 +432,13 @@ def test_sweep_forwards_outbox_with_priority_and_archives(patch_eaa_paths, froze
     by_type = {m["type"]: m for m in main_inbox}
     assert by_type["agent_needs_human"]["priority"] == 2
     assert by_type["agent_response"]["priority"] == 4
-    assert all(m["source"] == "external_agent" for m in main_inbox)
-    # `from` is now a structured envelope identity (was a legacy string path).
+    # `from` is now a structured envelope identity (was a legacy string path):
+    # source = the external agent (origin), transport = polling_script (sweeper).
     assert all(isinstance(m["from"], dict) for m in main_inbox)
-    assert all(m["from"]["transport"] == "external_agent" for m in main_inbox)
+    assert all(m["from"]["source"] == "external_agent" for m in main_inbox)
+    assert all(m["from"]["transport"] == "polling_script" for m in main_inbox)
     assert all(m["from"]["handle"] == "alpha" for m in main_inbox)
+    assert all("source" not in m for m in main_inbox)  # no top-level source
 
     # needs_human mirrored to main outbox.
     main_outbox = json.loads(

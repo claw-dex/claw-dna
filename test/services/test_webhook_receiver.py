@@ -209,7 +209,9 @@ def test_handle_write_request_persists_inbox_item(
     assert captured["dedup"] is False
     item = captured["items"][0]
     assert item["type"] == "event"
-    assert item["source"] == "webhook"
+    # transport="webhook" (delivery medium); source from the ?source=ci query.
+    assert item["from"]["transport"] == "webhook"
+    assert item["from"]["source"] == "ci"
     assert "POST /hook" in item["content"]
     assert "x-custom: yes" in item["content"].lower()
 

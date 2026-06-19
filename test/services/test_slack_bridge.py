@@ -771,6 +771,47 @@ def test_send_outbox_redirect_channel_for_unaddressed(patch_slack_paths, agent_r
     assert client.sent[0]["channel"] == "CSTATUS"
 
 
+def test_ingest_then_reply_by_id_round_trip(
+    patch_slack_paths, fake_keepass, frozen_now, agent_root
+):
+    """End-to-end: ingest a member's DM (populates origin_map), then an outbox
+    reply with in_reply_to=<that id> delivers only to that member's channel,
+    threaded under their original message."""
+    sb = patch_slack_paths
+    frozen_now(FROZEN)
+    client = FakeSlackClient(names={"U1": "alice", "U2": "bob"})
+    # Owner already known (U1/D1); bob is a member who references the owner.
+    ctx = make_ctx(sb, chat_ids=["D1"], owner_user_id="U1", owner_username="alice")
+
+    # Bob DMs the bot from his own channel D2, mentioning the owner to get in.
+    event = {
+        "channel": "D2",
+        "user": "U2",
+        "text": "hey alice's bot, status?",
+        "channel_type": "im",
+        "ts": "1700000055.000000",
+    }
+    sb._process_incoming(client, event, ctx)
+
+    inbox = json.loads((agent_root / "messages" / "inbox.json").read_text())
+    bob_msg = inbox[-1]
+    assert bob_msg["from"]["channel"] == "D2"
+    assert bob_msg["from"]["role"] == "member"
+    bob_id = bob_msg["id"]
+
+    # Agent replies to bob by id.
+    (agent_root / "messages" / "outbox.json").write_text(
+        json.dumps([{"type": "response", "content": "all good", "in_reply_to": bob_id}])
+    )
+    client.sent.clear()
+    sb.send_outbox_messages(client, ctx)
+
+    # Delivered only to bob's channel, threaded under his message ts.
+    assert len(client.sent) == 1
+    assert client.sent[0]["channel"] == "D2"
+    assert client.sent[0]["thread_ts"] == "1700000055.000000"
+
+
 def test_send_outbox_no_channels(patch_slack_paths, agent_root):
     sb = patch_slack_paths
     (agent_root / "messages" / "outbox.json").write_text(
@@ -1001,7 +1042,7 @@ def test_process_incoming_owner_discovery(
 
     # message written to inbox with source=slack
     inbox = json.loads((agent_root / "messages" / "inbox.json").read_text())
-    assert inbox[-1]["source"] == "slack"
+    assert inbox[-1]["from"]["source"] == "slack"  # source relocated into from
     assert "[Slack @alice]: remember to ship" in inbox[-1]["content"]
 
     # DM gets an ack reply
@@ -1029,12 +1070,14 @@ def test_process_incoming_stamps_from_and_id_and_origin(
     inbox = json.loads((agent_root / "messages" / "inbox.json").read_text())
     item = inbox[-1]
     assert item["from"] == {
-        "transport": "slack",
+        "source": "slack",  # origin
+        "transport": "polling_script",  # the slack bridge polls + delivers
         "channel": "D1",
         "user_id": "U1",
         "handle": "alice",
         "role": "owner",  # first-ever DM → owner
     }
+    assert "source" not in item  # relocated into from.source
     assert item["id"]  # stamped uuid
     # origin map resolves the id back to the user's channel + message ts.
     frm, origin_ref = sb.resolve_origin(ctx["state"]["origin_map"], item["id"])
@@ -1403,7 +1446,7 @@ def test_assistant_owner_discovery_and_ack(
     assert fake_keepass[sb.KEEPASS_SLACK_OWNER_USERID] == "U1"
     # free text queued as a goal → inbox (source slack)
     inbox = json.loads((agent_root / "messages" / "inbox.json").read_text())
-    assert inbox[-1]["source"] == "slack"
+    assert inbox[-1]["from"]["source"] == "slack"  # source relocated into from
     assert "[Slack @alice]: ship the release" in inbox[-1]["content"]
     # thinking status + title set, and an immediate ack posted in-thread
     assert "is thinking…" in set_status.calls

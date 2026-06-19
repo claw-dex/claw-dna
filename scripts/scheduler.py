@@ -492,11 +492,15 @@ def check_and_inject():
                         "content": f"[Scheduled: {task_id}] {content_text}",
                         "timestamp": now.isoformat(),
                         "received_at": now.isoformat(),
-                        "source": "scheduler",
-                        # Structured origin (== envelope.make_from("scheduler",
-                        # role="owner")); inlined to avoid a cross-root import in
+                        # source="scheduler" (origin); transport="polling_script"
+                        # — the scheduler polls its task list and fires due tasks
+                        # into the inbox. Inlined to avoid a cross-root import in
                         # this standalone daemon. Scheduled tasks act for the owner.
-                        "from": {"transport": "scheduler", "role": "owner"},
+                        "from": {
+                            "source": "scheduler",
+                            "transport": "polling_script",
+                            "role": "owner",
+                        },
                         "task_id": task_id,
                     }
                     priority = task.get("priority")
@@ -804,11 +808,15 @@ def run_now_task(task_id):
                 "content": f"[Scheduled: {task_id}] {content_text}",
                 "timestamp": now.isoformat(),
                 "received_at": now.isoformat(),
-                "source": "scheduler",
-                # Structured origin (== envelope.make_from("scheduler",
-                # role="owner")); inlined to avoid a cross-root import in this
-                # standalone daemon. Scheduled tasks act for the owner.
-                "from": {"transport": "scheduler", "role": "owner"},
+                # source="scheduler" (origin); transport="polling_script" — the
+                # scheduler polls its task list and fires due tasks into the
+                # inbox. Inlined to avoid a cross-root import in this standalone
+                # daemon. Scheduled tasks act for the owner.
+                "from": {
+                    "source": "scheduler",
+                    "transport": "polling_script",
+                    "role": "owner",
+                },
                 "task_id": task_id,
             }
             priority = task.get("priority")

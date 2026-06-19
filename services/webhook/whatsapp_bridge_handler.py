@@ -652,8 +652,11 @@ def _process_authorized_message(
 
     # role is an identity label only (no permission gating). WhatsApp has no
     # native threads, so isolation is per-DM (one phone == one channel).
+    # WhatsApp arrives via the webhook receiver, so the delivery middleware
+    # (transport) is distinct from the origin (source).
     from_obj = make_from(
         "whatsapp",
+        transport="webhook",
         channel=from_phone,
         user_id=from_phone,
         handle=from_name,
@@ -665,7 +668,7 @@ def _process_authorized_message(
         "content": content,
         "timestamp": now_iso,
         "received_at": now_iso,
-        "source": "whatsapp",
+        # source now lives in from.source (envelope normalization).
         "from": from_obj,
     }
     # Stamp a stable id so the agent can reply via outbox `in_reply_to`.

@@ -283,13 +283,14 @@ def cmd_send_message(args) -> int:
         "id": msg_id,
         "type": args.type,
         "content": content,
-        "source": args.source,
         "priority": priority,
         "timestamp": now,
         "reply_to": args.reply_to,
     }
     if args.subject:
         envelope["subject"] = args.subject
+    # Build the structured `from`; source now lives in from.source.
+    from_obj: dict = {}
     if getattr(args, "from_", None):
         # Accept a JSON object (structured identity) or a plain string, which
         # parse_from wraps as {"raw": ...} so it degrades gracefully.
@@ -298,7 +299,11 @@ def cmd_send_message(args) -> int:
             parsed = json.loads(raw_from)
         except (ValueError, TypeError):
             parsed = raw_from
-        envelope["from"] = parse_from(parsed)
+        from_obj = parse_from(parsed)
+    if args.source:
+        from_obj.setdefault("source", args.source)
+    if from_obj:
+        envelope["from"] = from_obj
 
     target.parent.mkdir(parents=True, exist_ok=True)
     ok = write_to_inbox([envelope], inbox_file=target, dedup=not args.no_dedup)

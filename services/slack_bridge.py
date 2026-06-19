@@ -1594,8 +1594,11 @@ def _ingest_message(
         # role is an identity label only (no permission gating): the owner is
         # whoever was auto-discovered first; everyone else is a member.
         role = "owner" if user_id and user_id == ctx.get("owner_user_id") else "member"
+        # source="slack" (origin); transport="polling_script" — the slack bridge
+        # polls Slack and writes the message into the inbox.
         from_obj = make_from(
             "slack",
+            transport="polling_script",
             channel=channel,
             user_id=user_id,
             handle=username,
@@ -1606,7 +1609,7 @@ def _ingest_message(
             "content": content,
             "timestamp": now_iso,
             "received_at": now_iso,
-            "source": "slack",
+            # source now lives in from.source (envelope normalization).
             "from": from_obj,
         }
         # Stamp a stable id so the agent can reply to this exact message via

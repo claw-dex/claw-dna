@@ -263,6 +263,21 @@ def _safe_int(value, default=0):
         return default
 
 
+def message_source(msg):
+    """Return a message's source, preferring the new ``from.source`` location.
+
+    Mirrors services/envelope.message_source: falls back to the legacy
+    top-level ``source`` for messages written before the relocation (and for
+    non-message objects like goals/reminders that keep their own ``source``).
+    """
+    if not isinstance(msg, dict):
+        return None
+    frm = msg.get("from")
+    if isinstance(frm, dict) and frm.get("source"):
+        return frm["source"]
+    return msg.get("source")
+
+
 def _truncate_history(history, max_content=500):
     """Return history with content fields truncated for dashboard use."""
     result = []

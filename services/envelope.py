@@ -31,17 +31,24 @@ import hashlib
 import json
 import uuid
 
-# Recognized transports for the structured ``from.transport`` field. Kept as a
-# documentation/validation aid; unknown values still pass through unchanged.
-TRANSPORTS = (
+# ``source`` = where the message ORIGINATED (the meaningful "who/what sent it").
+# ``transport`` = the technical middleware that DELIVERED it into the inbox,
+# recorded only when it is distinct from the source. They must NOT duplicate
+# each other: e.g. a GitHub or WhatsApp message arriving via the webhook
+# receiver is {source: "github"|"whatsapp", transport: "webhook"}, whereas a
+# Slack DM or a portal write needs no transport (the source says it all).
+# Both are documentation aids; unknown values still pass through unchanged.
+SOURCES = (
     "slack",
     "telegram",
     "whatsapp",
+    "github",
     "portal",
     "scheduler",
     "internal_agent",
     "external_agent",
 )
+TRANSPORTS = ("webhook", "polling_script", "portal")
 
 # Bound on the per-bridge id -> origin resolution map so it never grows without
 # limit. Matches the history cap used elsewhere (append_to_history default).
@@ -54,8 +61,9 @@ ORIGIN_MAP_MAX = 500
 
 
 def make_from(
-    transport: str,
+    source: str | None = None,
     *,
+    transport: str | None = None,
     channel: str | None = None,
     user_id: str | None = None,
     handle: str | None = None,
@@ -63,7 +71,13 @@ def make_from(
 ) -> dict:
     """Build a structured ``from`` object, dropping empty values.
 
-    ``transport``  — origin platform / surface (see ``TRANSPORTS``).
+    ``source``     — where the message ORIGINATED (slack, telegram, whatsapp,
+                     github, portal, scheduler, external_agent, …). The primary
+                     identity field.
+    ``transport``  — the delivery middleware, set ONLY when distinct from the
+                     source (e.g. ``"webhook"`` for github/whatsapp arriving via
+                     the webhook receiver). Omit it when the source already says
+                     how the message arrived — the two must not duplicate.
     ``channel``    — delivery target (chat/DM id). Bridge-internal; never shown
                      to the agent.
     ``user_id``    — platform user id (identity, not routing).
@@ -71,7 +85,11 @@ def make_from(
     ``role``       — ``"owner"`` or ``"member"`` (identity label only; not a
                      permission gate).
     """
-    out: dict = {"transport": transport}
+    out: dict = {}
+    if source:
+        out["source"] = str(source)
+    if transport:
+        out["transport"] = str(transport)
     if channel:
         out["channel"] = str(channel)
     if user_id:
@@ -81,6 +99,22 @@ def make_from(
     if role:
         out["role"] = str(role)
     return out
+
+
+def message_source(msg: dict) -> str | None:
+    """Return a message's source, preferring the new ``from.source`` location.
+
+    Falls back to the legacy top-level ``source`` for messages written before
+    the relocation (and for non-message objects like goals/reminders/tasks,
+    which keep their own top-level ``source``). Returns ``None`` for non-dict
+    input. Mirrors ``app.shared.message_source``.
+    """
+    if not isinstance(msg, dict):
+        return None
+    frm = msg.get("from")
+    if isinstance(frm, dict) and frm.get("source"):
+        return frm["source"]
+    return msg.get("source")
 
 
 def parse_from(value) -> dict:

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 import streamlit as st
 
-from app.shared import _badge, _STATUS_COLORS, _TYPE_COLORS
+from app.shared import _badge, _STATUS_COLORS, _TYPE_COLORS, message_source
 
 # ── Status / type icons (tab-specific, not in shared) ────────
 # See prompts/enum.md for complete enum definitions
@@ -117,7 +117,7 @@ def render():
                 "role": "user",
                 "type": item.get("type", "message"),
                 "content": content,
-                "source": item.get("source") or item.get("channel") or "",
+                "source": message_source(item) or item.get("channel") or "",
             }
         )
     for msg in outbox_hist:

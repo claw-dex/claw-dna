@@ -409,7 +409,15 @@ def transform_inbox_entry(entry: dict) -> dict | None:
     if len(content) < 5:
         return None
     msg_type = str(entry.get("type") or "message")
-    source = str(entry.get("source") or "")
+    # source now lives in from.source; fall back to legacy top-level source for
+    # entries written before the relocation. Inlined to keep this standalone
+    # script import-free.
+    _frm = entry.get("from")
+    source = str(
+        (_frm.get("source") if isinstance(_frm, dict) else None)
+        or entry.get("source")
+        or ""
+    )
     ts = str(
         entry.get("timestamp") or entry.get("received_at") or entry.get("date") or ""
     )
