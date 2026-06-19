@@ -493,6 +493,10 @@ def check_and_inject():
                         "timestamp": now.isoformat(),
                         "received_at": now.isoformat(),
                         "source": "scheduler",
+                        # Structured origin (== envelope.make_from("scheduler",
+                        # role="owner")); inlined to avoid a cross-root import in
+                        # this standalone daemon. Scheduled tasks act for the owner.
+                        "from": {"transport": "scheduler", "role": "owner"},
                         "task_id": task_id,
                     }
                     priority = task.get("priority")
@@ -801,6 +805,10 @@ def run_now_task(task_id):
                 "timestamp": now.isoformat(),
                 "received_at": now.isoformat(),
                 "source": "scheduler",
+                # Structured origin (== envelope.make_from("scheduler",
+                # role="owner")); inlined to avoid a cross-root import in this
+                # standalone daemon. Scheduled tasks act for the owner.
+                "from": {"transport": "scheduler", "role": "owner"},
                 "task_id": task_id,
             }
             priority = task.get("priority")

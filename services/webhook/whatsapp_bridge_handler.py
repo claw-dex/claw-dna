@@ -15,7 +15,6 @@ Credentials are read from KeePass at start(). If any are missing, the handler
 logs a warning and self-disables; webhook_receiver keeps serving other paths.
 """
 
-import hashlib
 import json
 import logging
 import os
@@ -32,6 +31,16 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
+from envelope import (
+    dedup_key,
+    ensure_id,
+    make_from,
+    msg_hash,  # re-exported for callers/tests referencing the module attribute
+    record_origin,
+    resolve_handle,
+    resolve_origin,
+    sanitize_origin_map,
+)
 from shared import (
     append_to_history,
     atomic_write_json,
@@ -81,6 +90,9 @@ KEEPASS_WHATSAPP_PHONE_NUMBER_ID = "WHATSAPP_PHONE_NUMBER_ID"
 KEEPASS_WHATSAPP_VERIFY_TOKEN = "WHATSAPP_VERIFY_TOKEN"
 KEEPASS_WHATSAPP_CHAT_ID = "WHATSAPP_CHAT_ID"
 KEEPASS_WHATSAPP_OWNER_USERNAME = "WHATSAPP_OWNER_USERNAME"
+# Optional: phone (WAID) that unaddressed outbox messages (status/FYI with no
+# in_reply_to/to) redirect to instead of the owner. env first, then KeePass.
+KEEPASS_WHATSAPP_UNADDRESSED_CHANNEL = "WHATSAPP_UNADDRESSED_CHANNEL"
 
 GRAPH_API_BASE = "https://graph.facebook.com/v21.0"
 OUTBOX_INTERVAL = 60  # seconds
@@ -192,7 +204,7 @@ def contains_username(text: str, username: str) -> bool:
 
 
 def _validate_state(data: dict) -> dict:
-    default = {"last_message_ts": "", "sent_hashes": []}
+    default = {"last_message_ts": "", "sent_hashes": [], "origin_map": {}}
     if not isinstance(data, dict):
         log.warning(
             "WhatsApp state has unexpected type %s, resetting", type(data).__name__
@@ -220,11 +232,13 @@ def _validate_state(data: dict) -> dict:
                 len(hashes) - len(cleaned),
             )
             data["sent_hashes"] = cleaned
+    # id -> origin resolution map for per-user reply routing (envelope.py).
+    data["origin_map"] = sanitize_origin_map(data.get("origin_map"))
     return data
 
 
 def load_state() -> dict:
-    default = {"last_message_ts": "", "sent_hashes": []}
+    default = {"last_message_ts": "", "sent_hashes": [], "origin_map": {}}
     if STATE_FILE.exists():
         try:
             data = json.loads(STATE_FILE.read_text())
@@ -238,9 +252,7 @@ def save_state(state: dict):
     atomic_write_json(STATE_FILE, state, indent=2)
 
 
-def msg_hash(msg: dict) -> str:
-    key = json.dumps(msg, sort_keys=True, ensure_ascii=False)
-    return hashlib.sha256(key.encode()).hexdigest()[:16]
+# msg_hash / dedup_key are imported from envelope (single canonical impl).
 
 
 # ---------------------------------------------------------------------------
@@ -574,6 +586,8 @@ def _process_authorized_message(
     message_id: str,
     chat_history: dict,
     inbox_items: list,
+    state: dict | None = None,
+    is_owner: bool = False,
 ):
     if text and text.startswith("/"):
         parts = text.split()
@@ -636,17 +650,38 @@ def _process_authorized_message(
     chat_text = effective_text or "(media)"
     append_chat_message(chat_history, from_phone, "user", chat_text)
 
+    # role is an identity label only (no permission gating). WhatsApp has no
+    # native threads, so isolation is per-DM (one phone == one channel).
+    from_obj = make_from(
+        "whatsapp",
+        channel=from_phone,
+        user_id=from_phone,
+        handle=from_name,
+        role="owner" if is_owner else "member",
+    )
+    now_iso = datetime.now(timezone.utc).isoformat()
     inbox_item = {
         "type": "message",
         "content": content,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "received_at": datetime.now(timezone.utc).isoformat(),
+        "timestamp": now_iso,
+        "received_at": now_iso,
         "source": "whatsapp",
+        "from": from_obj,
     }
+    # Stamp a stable id so the agent can reply via outbox `in_reply_to`.
+    msg_id = ensure_id(inbox_item)
     if attachments:
         inbox_item["attachments"] = attachments
 
     inbox_items.append(inbox_item)
+    # Record id -> origin so a reply resolves back to this user's phone.
+    if state is not None:
+        record_origin(
+            state.setdefault("origin_map", {}),
+            msg_id=msg_id,
+            from_obj=from_obj,
+            origin_ref=message_id,
+        )
     log.info(
         f"Received from {from_name} ({from_phone}): {chat_text[:100]}"
         + (f" (+{len(attachments)} attachment(s))" if attachments else "")
@@ -719,6 +754,8 @@ def process_webhook_messages(
                         message_id,
                         chat_history,
                         inbox_items,
+                        state=state,
+                        is_owner=True,
                     )
 
                 elif from_phone in chat_ids:
@@ -732,6 +769,9 @@ def process_webhook_messages(
                         message_id,
                         chat_history,
                         inbox_items,
+                        state=state,
+                        # Owner == first authorized phone (auto-discovery order).
+                        is_owner=bool(chat_ids) and from_phone == chat_ids[0],
                     )
 
                 elif (
@@ -764,6 +804,8 @@ def process_webhook_messages(
                         message_id,
                         chat_history,
                         inbox_items,
+                        state=state,
+                        is_owner=False,
                     )
 
                 else:
@@ -816,56 +858,77 @@ def append_to_inbox_history(items: list):
 # ---------------------------------------------------------------------------
 
 
+def _wa_send(token, phone_number_id, phone, text) -> bool:
+    """Send one WhatsApp message (with a plain-text fallback). True on success."""
+    if wa_send_message(token, phone_number_id, phone, text):
+        return True
+    return bool(
+        wa_send_message(token, phone_number_id, phone, _strip_wa_formatting(text))
+    )
+
+
 def send_outbox_messages(
     token: str,
     phone_number_id: str,
     chat_ids: list[str],
     state: dict,
     chat_history: dict,
+    unaddressed_channel: str | None = None,
 ):
+    """Forward unsent outbox messages to WhatsApp with per-recipient routing.
+
+    Applies the 3-way delivery rule (see slack_bridge.send_outbox_messages).
+    WhatsApp has no threads, so isolation is per-DM (one phone == one channel).
+    """
     outbox = read_outbox_locked()
     if not outbox:
         return
 
+    origin_map = state.get("origin_map", {})
+    owner_channel = chat_ids[0] if chat_ids else None
+    default_channel = unaddressed_channel or owner_channel
+
     sent_count = 0
     for msg in outbox:
-        h = msg_hash(msg)
-        if h in state["sent_hashes"]:
+        key = dedup_key(msg)
+        if key in state["sent_hashes"]:
             continue
 
-        text = _format_outbox_msg(msg)
+        target = msg.get("in_reply_to") or msg.get("to")
+        if target:
+            resolved = resolve_origin(origin_map, str(target))
+            if resolved is None:
+                frm = resolve_handle(origin_map, str(target))
+                if frm is None:
+                    continue  # case 2: another transport — do NOT mark sent
+                resolved = (frm, None)
+            from_obj, _ = resolved
+            destination = (from_obj or {}).get("channel")
+            if not destination:
+                continue
+        elif default_channel:
+            destination = default_channel
+        else:
+            continue  # no owner phone known yet
 
+        text = _format_outbox_msg(msg)
         if len(text) > 4000:
             text = text[:3997] + "..."
 
-        succeeded_phones = []
-        for phone in chat_ids:
-            result = wa_send_message(token, phone_number_id, phone, text)
-            if result:
-                succeeded_phones.append(phone)
-            else:
-                fallback_text = _strip_wa_formatting(text)
-                result2 = wa_send_message(token, phone_number_id, phone, fallback_text)
-                if result2:
-                    succeeded_phones.append(phone)
-
-        if succeeded_phones:
-            state["sent_hashes"].append(h)
+        if _wa_send(token, phone_number_id, destination, text):
+            state["sent_hashes"].append(key)
             sent_count += 1
             log.info(
-                f"Sent to WhatsApp ({len(succeeded_phones)} chat(s)): {msg.get('subject', text[:60])!r}"
+                f"Sent to WhatsApp {destination}: {msg.get('subject', text[:60])!r}"
             )
             _append_outbox_history(msg)
-            for phone in succeeded_phones:
-                append_chat_message(chat_history, phone, "bot", text)
+            append_chat_message(chat_history, destination, "bot", text)
 
     state["sent_hashes"] = state["sent_hashes"][-1000:]
 
     if sent_count:
         save_chat_history(chat_history)
-        log.info(
-            f"Forwarded {sent_count} outbox message(s) to {len(chat_ids)} WhatsApp chat(s)."
-        )
+        log.info(f"Forwarded {sent_count} outbox message(s) to WhatsApp.")
 
 
 def _append_outbox_history(msg: dict):
@@ -966,6 +1029,14 @@ class WhatsAppBridgeHandler:
         self._verify_token = verify_token
         self._owner_username = keepass_get(KEEPASS_WHATSAPP_OWNER_USERNAME)
         self._chat_ids = parse_chat_ids(keepass_get(KEEPASS_WHATSAPP_CHAT_ID))
+        # Optional redirect for unaddressed (status/FYI) outbox messages: env
+        # wins, then KeePass. Resolved once to avoid a per-poll credential read.
+        _unaddressed = (
+            os.environ.get(KEEPASS_WHATSAPP_UNADDRESSED_CHANNEL)
+            or keepass_get(KEEPASS_WHATSAPP_UNADDRESSED_CHANNEL)
+            or None
+        )
+        self._unaddressed_channel = _unaddressed.strip() if _unaddressed else None
         self._state = load_state()
         self._chat_history = load_chat_history()
 
@@ -1114,6 +1185,7 @@ class WhatsAppBridgeHandler:
                                 self._chat_ids,
                                 self._state,
                                 self._chat_history,
+                                self._unaddressed_channel,
                             )
                             try:
                                 save_state(self._state)

@@ -37,6 +37,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -45,6 +46,7 @@ from pathlib import Path
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _SERVICES_DIR = _SCRIPT_DIR.parent / "services"
 sys.path.insert(0, str(_SERVICES_DIR))
+from envelope import parse_from  # noqa: E402
 from shared import (  # noqa: E402
     AGENT_CONTROL_CLEAR_CHAT,
     AGENT_CONTROL_CLEAR_SESSION,
@@ -289,7 +291,14 @@ def cmd_send_message(args) -> int:
     if args.subject:
         envelope["subject"] = args.subject
     if getattr(args, "from_", None):
-        envelope["from"] = args.from_
+        # Accept a JSON object (structured identity) or a plain string, which
+        # parse_from wraps as {"raw": ...} so it degrades gracefully.
+        raw_from = args.from_
+        try:
+            parsed = json.loads(raw_from)
+        except (ValueError, TypeError):
+            parsed = raw_from
+        envelope["from"] = parse_from(parsed)
 
     target.parent.mkdir(parents=True, exist_ok=True)
     ok = write_to_inbox([envelope], inbox_file=target, dedup=not args.no_dedup)

@@ -265,6 +265,52 @@ Inbox items with `source: "internal_agent"` are stamped by `services/internal_ag
 
 ---
 
+### Message Envelope (`from` / `id` / `in_reply_to` / `to`)
+
+**Location:** `/agent/messages/inbox.json`, `/agent/messages/outbox.json`
+
+The inbox/outbox messages follow an email-like envelope so the agent can tell
+who a message came from and reply to exactly that person (owner + owner-granted
+members across Slack / Telegram / WhatsApp).
+
+**Inbox fields stamped by the bridges:**
+
+- `id` — stable unique id (uuid) for the message. Platform-originated messages
+  now always carry one.
+- `from` — structured sender identity (split routing from identity):
+
+  | Key | Meaning |
+  |-----|---------|
+  | `transport` | `slack` \| `telegram` \| `whatsapp` \| `portal` \| `scheduler` \| `internal_agent` \| `external_agent` |
+  | `channel` | delivery target (chat/DM id). **Bridge-internal — never write it.** |
+  | `user_id` | platform user id (identity). **Bridge-internal — never write it.** |
+  | `handle` | human-readable @display handle (also shown in the `content` prefix) |
+  | `role` | `owner` or `member` — an **identity label only** (no permission gate) |
+
+  Legacy string `from` values are tolerated (read as no identity).
+
+**Outbox fields you write to reply:**
+
+- `in_reply_to` — the `id` of the inbox message you are answering. The bridge
+  resolves it back to that user's `from` (channel + user) and delivers **only**
+  to them, on the originating transport. Omit it for unsolicited status/FYI
+  (`type: info`) → goes to the owner only (or a configured redirect channel).
+- `to` — optional friendly `@handle` for addressing someone when you are not
+  replying to a specific message. The system resolves it. **Never** put a raw
+  chat id or user id here — only a handle, or use `in_reply_to`. Note: if that
+  person has messaged on more than one transport, a `to` send may reach them on
+  each; prefer `in_reply_to` (exactly one transport) when answering a message.
+
+**Three reply fields — keep them distinct:**
+
+| Field | Side | Purpose |
+|-------|------|---------|
+| `in_reply_to` | outbox | **NEW** — reply to a human; drives bridge delivery to one user |
+| `reply_to` | inbox | filesystem path for agent↔agent inbox correlation |
+| `reply_to_id` | inbox | correlation on forwarded agent replies; matches `goal.delegated_message_id` |
+
+---
+
 ## Agent Registry Enums
 
 ### Agent Control Flag

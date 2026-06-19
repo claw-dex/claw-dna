@@ -140,7 +140,7 @@ def test_contains_username(patch_whatsapp_paths):
 
 def test_validate_state_resets_when_not_dict(patch_whatsapp_paths):
     out = patch_whatsapp_paths._validate_state(["junk"])
-    assert out == {"last_message_ts": "", "sent_hashes": []}
+    assert out == {"last_message_ts": "", "sent_hashes": [], "origin_map": {}}
 
 
 def test_validate_state_repairs_wrong_types(patch_whatsapp_paths):
@@ -162,12 +162,13 @@ def test_load_state_default_when_missing(patch_whatsapp_paths):
     assert patch_whatsapp_paths.load_state() == {
         "last_message_ts": "",
         "sent_hashes": [],
+        "origin_map": {},
     }
 
 
 def test_save_then_load_state(patch_whatsapp_paths):
     wa = patch_whatsapp_paths
-    state = {"last_message_ts": "ts", "sent_hashes": ["h1"]}
+    state = {"last_message_ts": "ts", "sent_hashes": ["h1"], "origin_map": {}}
     wa.save_state(state)
     assert wa.load_state() == state
 

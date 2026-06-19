@@ -55,7 +55,6 @@ Management:
 """
 
 import fcntl
-import hashlib
 import json
 import logging
 import os
@@ -72,6 +71,16 @@ from pathlib import Path
 
 import requests
 
+from envelope import (
+    dedup_key,
+    ensure_id,
+    make_from,
+    msg_hash,
+    record_origin,
+    resolve_handle,
+    resolve_origin,
+    sanitize_origin_map,
+)
 from shared import append_to_history, atomic_write_json, write_to_inbox
 
 # --- Paths ---
@@ -148,6 +157,10 @@ KEEPASS_SLACK_APP_TOKEN = "SLACK_APP_TOKEN"
 KEEPASS_SLACK_OWNER_USERID = "SLACK_OWNER_USERID"
 KEEPASS_SLACK_OWNER_USERNAME = "SLACK_OWNER_USERNAME"
 KEEPASS_SLACK_CHAT_ID = "SLACK_CHAT_ID"  # comma-separated authorized channel IDs
+# Optional: channel id that unaddressed outbox messages (status/FYI with no
+# in_reply_to/to) are redirected to instead of the owner's DM. Read at startup
+# from env SLACK_UNADDRESSED_CHANNEL first, then this KeePass key.
+KEEPASS_SLACK_UNADDRESSED_CHANNEL = "SLACK_UNADDRESSED_CHANNEL"
 
 OUTBOX_INTERVAL = 60  # How often to check outbox (seconds)
 LOOP_SLEEP = 5  # Main-loop tick (seconds); incoming runs on the Socket Mode thread
@@ -339,7 +352,15 @@ def _default_state() -> dict:
     # outbox_threads: {channel_id: thread_ts} —
     # the Slack thread root for outbox messages, set when the owner sends a new
     # top-level DM. Rotates whenever the owner starts a new conversation.
-    return {"sent_hashes": [], "processed_keys": [], "outbox_threads": {}}
+    # origin_map: {msg_id: {"from": <from dict>, "origin_ref": <slack ts>}} —
+    # the bridge-owned id -> origin resolution map that lets the agent reply to
+    # a specific user via outbox `in_reply_to`. See services/envelope.py.
+    return {
+        "sent_hashes": [],
+        "processed_keys": [],
+        "outbox_threads": {},
+        "origin_map": {},
+    }
 
 
 def _validate_state(data) -> dict:
@@ -392,6 +413,10 @@ def _validate_state(data) -> dict:
                 f"Dropped {len(threads) - len(cleaned)} malformed outbox_threads entries"
             )
         data["outbox_threads"] = cleaned
+
+    # origin_map: sanitize via the shared helper (drops malformed entries,
+    # bounds size). Missing/wrong-typed → {}.
+    data["origin_map"] = sanitize_origin_map(data.get("origin_map"))
     return data
 
 
@@ -438,10 +463,7 @@ def _recover_outbox_thread(client, cid: str, bot_user_id: str) -> str | None:
     return None
 
 
-def msg_hash(msg: dict) -> str:
-    """Stable 16-char hash of an outbox message to detect duplicates."""
-    key = json.dumps(msg, sort_keys=True, ensure_ascii=False)
-    return hashlib.sha256(key.encode()).hexdigest()[:16]
+# msg_hash / dedup_key are imported from envelope (single canonical impl).
 
 
 # ---------------------------------------------------------------------------
@@ -1548,6 +1570,7 @@ def _ingest_message(
     client,
     channel: str,
     username: str,
+    user_id: str,
     text: str,
     attachments: list[dict],
     event: dict,
@@ -1568,19 +1591,42 @@ def _ingest_message(
     with ctx["lock"]:
         chat_history = ctx["chat_history"]
         content = build_inbox_content(username, text, attachments, context)
+        # role is an identity label only (no permission gating): the owner is
+        # whoever was auto-discovered first; everyone else is a member.
+        role = "owner" if user_id and user_id == ctx.get("owner_user_id") else "member"
+        from_obj = make_from(
+            "slack",
+            channel=channel,
+            user_id=user_id,
+            handle=username,
+            role=role,
+        )
         inbox_item = {
             "type": "message",
             "content": content,
             "timestamp": now_iso,
             "received_at": now_iso,
             "source": "slack",
+            "from": from_obj,
         }
+        # Stamp a stable id so the agent can reply to this exact message via
+        # the outbox `in_reply_to` field and the bridge can route it back.
+        msg_id = ensure_id(inbox_item)
         if attachments:
             inbox_item["attachments"] = attachments
 
         if write_to_inbox([inbox_item]):
             append_to_history([inbox_item], INBOX_HISTORY_FILE)
             append_chat_message(chat_history, channel, "user", text or "(media)")
+            # Record id -> origin so an outbox `in_reply_to` resolves back to
+            # this user's channel. origin_ref = the user's message ts, used as
+            # the reply thread root for per-user isolation in shared channels.
+            record_origin(
+                ctx["state"].setdefault("origin_map", {}),
+                msg_id=msg_id,
+                from_obj=from_obj,
+                origin_ref=event.get("ts"),
+            )
             _mark_processed(ctx["state"], channel, event)
             save_state(ctx["state"])
             save_chat_history(chat_history)
@@ -1721,7 +1767,9 @@ def _process_incoming(client, event, ctx, is_mention=False) -> None:
             save_state(ctx["state"])
         return
 
-    wrote = _ingest_message(ctx, client, channel, username, text, attachments, event)
+    wrote = _ingest_message(
+        ctx, client, channel, username, user_id, text, attachments, event
+    )
 
     # Ack in DMs only — channel replies arrive via the outbox, and acking every
     # channel message publicly would be noisy. Sent outside the lock.
@@ -1779,13 +1827,59 @@ def _format_outbox_msg(msg: dict) -> str:
     return "\n".join(lines) if lines else escape_slack(json.dumps(msg, indent=2))
 
 
-def send_outbox_messages(client, ctx: dict) -> None:
-    """Forward unsent outbox messages to all authorized Slack channels.
+def _owner_channel(origin_map: dict, chat_ids: list[str]) -> str | None:
+    """Resolve the owner's delivery channel for unaddressed messages.
 
-    Runs on the main loop. Snapshots the dedup set + channels under the lock,
-    performs the network sends UNLOCKED (so a slow Slack API call never blocks
-    the incoming-event handler thread), then re-acquires the lock to record the
-    sent hashes and chat history.
+    Prefers a channel recorded with ``role == "owner"`` in the origin map
+    (set once the owner has messaged since this feature shipped); falls back
+    to the first authorized chat id (the owner's DM by auto-discovery order).
+
+    *origin_map* must be a snapshot taken under ``ctx["lock"]`` — never the live
+    ``ctx["state"]["origin_map"]`` dict, which the Socket Mode thread mutates
+    concurrently (iterating it live races with ``record_origin``).
+    """
+    for entry in reversed(list(origin_map.values())):
+        frm = (entry or {}).get("from") or {}
+        if frm.get("role") == "owner" and frm.get("channel"):
+            return frm["channel"]
+    return chat_ids[0] if chat_ids else None
+
+
+def _resolve_recipient(origin_map: dict, target: str):
+    """Resolve an outbox target (``in_reply_to`` id or ``to`` handle).
+
+    Returns ``(channel, thread_ts)`` for delivery, or ``None`` when this bridge
+    cannot resolve it (the message belongs to another transport → caller skips
+    without marking it sent).
+    """
+    resolved = resolve_origin(origin_map, target)
+    if resolved is None:
+        frm = resolve_handle(origin_map, target)
+        if frm is None:
+            return None
+        resolved = (frm, None)
+    from_obj, origin_ref = resolved
+    channel = (from_obj or {}).get("channel")
+    if not channel:
+        return None
+    return channel, origin_ref
+
+
+def send_outbox_messages(client, ctx: dict) -> None:
+    """Forward unsent outbox messages to Slack with per-recipient routing.
+
+    Runs on the main loop. Snapshots the dedup set + routing state under the
+    lock, performs the network sends UNLOCKED (so a slow Slack API call never
+    blocks the incoming-event handler thread), then re-acquires the lock to
+    record the sent keys and chat history.
+
+    Each message follows the 3-way delivery rule:
+      1. Addressed (``in_reply_to``/``to``) and resolvable here → deliver to
+         that one user's channel, threaded under their original message.
+      2. Addressed but NOT resolvable here → skip WITHOUT marking sent (it
+         belongs to another transport; unique ids never false-match).
+      3. Unaddressed (status/FYI) → deliver to the owner only, unless a
+         configured redirect channel is set.
     """
     from shared import read_outbox_locked
 
@@ -1797,31 +1891,44 @@ def send_outbox_messages(client, ctx: dict) -> None:
     with lock:
         chat_ids = list(ctx["chat_ids"])
         already_sent = set(ctx["state"]["sent_hashes"])
-        # Copy the outbox thread roots so we can read them while unlocked.
+        # Copy the routing state so we can read it while unlocked.
         outbox_threads = dict(ctx["state"].get("outbox_threads", {}))
-    if not chat_ids:
-        return
+        origin_map = dict(ctx["state"].get("origin_map", {}))
 
-    # Send outside the lock. Each message is sent as a reply under the current
-    # outbox thread root (set when the owner last sent a top-level DM). If no
-    # root is set yet for a channel the message goes top-level.
+    # Use the locked snapshot (above), never the live state dict.
+    owner_channel = _owner_channel(origin_map, chat_ids)
+    # Redirect target for unaddressed messages, resolved once at startup.
+    unaddressed_channel = ctx.get("unaddressed_channel") or owner_channel
+
+    # Send outside the lock.
     results: list[tuple[dict, str, list[str], str]] = []
     for msg in outbox:
-        h = msg_hash(msg)
-        if h in already_sent:
+        key = dedup_key(msg)
+        if key in already_sent:
             continue
-        text = _format_outbox_msg(msg)
-        succeeded = []
-        for cid in chat_ids:
-            root = outbox_threads.get(cid)
-            resp = slack_send(client, cid, text, thread_ts=root)
-            if not resp:
+
+        target = msg.get("in_reply_to") or msg.get("to")
+        if target:
+            recipient = _resolve_recipient(origin_map, str(target))
+            if recipient is None:
+                # Case 2: addressed to another transport — leave for that
+                # bridge; do NOT mark sent.
                 continue
-            succeeded.append(cid)
-        if succeeded:
-            results.append((msg, h, succeeded, text))
+            destination, thread_ts = recipient
+        elif unaddressed_channel:
+            # Case 3: unaddressed → owner (or configured redirect channel),
+            # threaded under that channel's current outbox root if any.
+            destination = unaddressed_channel
+            thread_ts = outbox_threads.get(destination)
+        else:
+            continue  # no owner channel known yet
+
+        text = _format_outbox_msg(msg)
+        resp = slack_send(client, destination, text, thread_ts=thread_ts)
+        if resp:
+            results.append((msg, key, [destination], text))
             log.info(
-                f"Sent to Slack ({len(succeeded)} channel(s)): "
+                f"Sent to Slack channel {destination}: "
                 f"{msg.get('subject', text[:60])!r}"
             )
 
@@ -1831,10 +1938,10 @@ def send_outbox_messages(client, ctx: dict) -> None:
     with lock:
         state = ctx["state"]
         chat_history = ctx["chat_history"]
-        for msg, h, succeeded, text in results:
-            if h in state["sent_hashes"]:
+        for msg, key, succeeded, text in results:
+            if key in state["sent_hashes"]:
                 continue  # another path recorded it while we were sending
-            state["sent_hashes"].append(h)
+            state["sent_hashes"].append(key)
             for cid in succeeded:
                 append_chat_message(chat_history, cid, "bot", text)
         state["sent_hashes"] = state["sent_hashes"][-1000:]
@@ -1842,10 +1949,7 @@ def send_outbox_messages(client, ctx: dict) -> None:
         save_chat_history(chat_history)
         save_state(state)
 
-    log.info(
-        f"Forwarded {len(results)} outbox message(s) to "
-        f"{len(chat_ids)} Slack channel(s)."
-    )
+    log.info(f"Forwarded {len(results)} outbox message(s) to Slack.")
 
 
 # ---------------------------------------------------------------------------
@@ -2018,7 +2122,9 @@ def _handle_assistant_message(client, payload, ctx, say, set_status, set_title) 
             save_state(ctx["state"])
         return
 
-    if _ingest_message(ctx, client, channel, username, text, attachments, payload):
+    if _ingest_message(
+        ctx, client, channel, username, user_id, text, attachments, payload
+    ):
         ack = build_ack_message()
         say(ack)  # also clears the 'thinking' status
         # Update outbox thread root so agent replies land in this assistant thread.
@@ -2197,12 +2303,25 @@ def main():
         save_state(state)
         log.info("Startup: flushed recovered thread roots to disk")
 
+    # Optional redirect for unaddressed (status/FYI) outbox messages: env wins,
+    # then KeePass. Resolved once at startup to avoid a per-poll credential read.
+    unaddressed_channel = (
+        os.environ.get(KEEPASS_SLACK_UNADDRESSED_CHANNEL)
+        or keepass_get(KEEPASS_SLACK_UNADDRESSED_CHANNEL)
+        or None
+    )
+    if unaddressed_channel:
+        unaddressed_channel = unaddressed_channel.strip() or None
+    if unaddressed_channel:
+        log.info(f"Unaddressed outbox messages will route to {unaddressed_channel}")
+
     ctx = {
         "bot_token": bot_token,
         "bot_user_id": bot_user_id,
         "owner_user_id": owner_user_id,
         "owner_username": owner_username,
         "chat_ids": chat_ids,
+        "unaddressed_channel": unaddressed_channel,
         "state": state,
         "chat_history": chat_history,
         "user_name_cache": {},

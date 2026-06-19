@@ -56,6 +56,10 @@ def queue_to_inbox(content, cmd_type, timestamp, priority=3):
         "timestamp": timestamp,
         "received_at": datetime.now(timezone.utc).isoformat(),
         "priority": max(1, min(5, int(priority))),
+        # Structured origin (== envelope.make_from("portal", role="owner")).
+        # The portal operator is the owner; inlined to avoid a cross-root
+        # import from app/ into services/.
+        "from": {"transport": "portal", "role": "owner"},
     }
     with AtomicJSON(inbox_path, default=[]) as inbox:
         inbox.append(body)

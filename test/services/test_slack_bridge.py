@@ -175,10 +175,16 @@ def make_ctx(sb, **over):
         "owner_user_id": None,
         "owner_username": None,
         "chat_ids": [],
-        "state": {"sent_hashes": [], "processed_keys": [], "outbox_threads": {}},
+        "state": {
+            "sent_hashes": [],
+            "processed_keys": [],
+            "outbox_threads": {},
+            "origin_map": {},
+        },
         "chat_history": {},
         "user_name_cache": {},
         "lock": threading.Lock(),
+        "unaddressed_channel": None,
     }
     ctx.update(over)
     return ctx
@@ -297,7 +303,12 @@ def test_validate_state_wrong_types(patch_slack_paths):
 def test_validate_state_non_dict(patch_slack_paths):
     sb = patch_slack_paths
     out = sb._validate_state(["not", "a", "dict"])
-    assert out == {"sent_hashes": [], "processed_keys": [], "outbox_threads": {}}
+    assert out == {
+        "sent_hashes": [],
+        "processed_keys": [],
+        "outbox_threads": {},
+        "origin_map": {},
+    }
 
 
 def test_validate_state_outbox_threads_wrong_type(patch_slack_paths):
@@ -370,6 +381,7 @@ def test_state_round_trip(patch_slack_paths):
         "sent_hashes": ["h1"],
         "processed_keys": ["C1:1.0"],
         "outbox_threads": {"D1": "1700000001.000000"},
+        "origin_map": {},
     }
     sb.save_state(state)
     assert sb.load_state() == state
@@ -381,6 +393,7 @@ def test_load_state_missing_returns_default(patch_slack_paths):
         "sent_hashes": [],
         "processed_keys": [],
         "outbox_threads": {},
+        "origin_map": {},
     }
 
 
@@ -656,7 +669,10 @@ def test_slack_send_swallows_errors(patch_slack_paths):
     assert patch_slack_paths.slack_send(client, "C1", "hi") is None
 
 
-def test_send_outbox_broadcasts_and_dedups(patch_slack_paths, agent_root):
+def test_send_outbox_unaddressed_goes_to_owner_and_dedups(
+    patch_slack_paths, agent_root
+):
+    """Unaddressed (no in_reply_to/to) messages go to the owner channel only."""
     sb = patch_slack_paths
     outbox = [
         {"type": "needs_human", "subject": "Blocked", "content": "need key"},
@@ -665,17 +681,94 @@ def test_send_outbox_broadcasts_and_dedups(patch_slack_paths, agent_root):
     (agent_root / "messages" / "outbox.json").write_text(json.dumps(outbox))
 
     client = FakeSlackClient()
+    # D1 is the owner channel (first chat id); C2 must NOT receive broadcasts.
     ctx = make_ctx(sb, chat_ids=["D1", "C2"])
     sb.send_outbox_messages(client, ctx)
 
-    # 2 messages * 2 channels = 4 sends
-    assert len(client.sent) == 4
+    # 2 messages → owner channel only (no broadcast to C2).
+    assert len(client.sent) == 2
+    assert all(s["channel"] == "D1" for s in client.sent)
     assert len(ctx["state"]["sent_hashes"]) == 2
 
-    # second run is a no-op (already-sent hashes)
+    # second run is a no-op (already-sent keys)
     client.sent.clear()
     sb.send_outbox_messages(client, ctx)
     assert client.sent == []
+
+
+def test_send_outbox_addressed_routes_to_single_user(
+    patch_slack_paths, agent_root, frozen_now
+):
+    """A message with in_reply_to delivers only to that user's channel, threaded."""
+    sb = patch_slack_paths
+    frozen_now(FROZEN)
+    ctx = make_ctx(sb, chat_ids=["D1", "D2"], owner_user_id="U1")
+    # Two users recorded in the origin map (e.g. from prior ingests).
+    sb.record_origin(
+        ctx["state"]["origin_map"],
+        msg_id="mid-alice",
+        from_obj=sb.make_from(
+            "slack", channel="D1", user_id="U1", handle="alice", role="owner"
+        ),
+        origin_ref="1700000001.000000",
+    )
+    sb.record_origin(
+        ctx["state"]["origin_map"],
+        msg_id="mid-bob",
+        from_obj=sb.make_from(
+            "slack", channel="D2", user_id="U2", handle="bob", role="member"
+        ),
+        origin_ref="1700000002.000000",
+    )
+    outbox = [
+        {"type": "response", "content": "hi bob", "in_reply_to": "mid-bob"},
+    ]
+    (agent_root / "messages" / "outbox.json").write_text(json.dumps(outbox))
+
+    client = FakeSlackClient()
+    sb.send_outbox_messages(client, ctx)
+
+    assert len(client.sent) == 1
+    assert client.sent[0]["channel"] == "D2"
+    # Threaded under bob's original message ts for per-user isolation.
+    assert client.sent[0]["thread_ts"] == "1700000002.000000"
+
+
+def test_send_outbox_addressed_to_other_transport_is_skipped(
+    patch_slack_paths, agent_root
+):
+    """An in_reply_to that this bridge cannot resolve is left for another
+    transport — not sent, not marked sent."""
+    sb = patch_slack_paths
+    ctx = make_ctx(sb, chat_ids=["D1"])
+    outbox = [
+        {
+            "type": "response",
+            "content": "for telegram user",
+            "in_reply_to": "tg-id-xyz",
+        },
+    ]
+    (agent_root / "messages" / "outbox.json").write_text(json.dumps(outbox))
+
+    client = FakeSlackClient()
+    sb.send_outbox_messages(client, ctx)
+
+    assert client.sent == []
+    assert ctx["state"]["sent_hashes"] == []
+
+
+def test_send_outbox_redirect_channel_for_unaddressed(patch_slack_paths, agent_root):
+    """When unaddressed_channel is configured, unaddressed messages go there."""
+    sb = patch_slack_paths
+    (agent_root / "messages" / "outbox.json").write_text(
+        json.dumps([{"type": "info", "content": "status"}])
+    )
+    client = FakeSlackClient()
+    ctx = make_ctx(sb, chat_ids=["D1"], unaddressed_channel="CSTATUS")
+    sb.send_outbox_messages(client, ctx)
+
+    assert len(client.sent) == 1
+    assert client.sent[0]["channel"] == "CSTATUS"
 
 
 def test_send_outbox_no_channels(patch_slack_paths, agent_root):
@@ -734,21 +827,33 @@ def test_send_outbox_no_owner_message_goes_toplevel(
     assert [s["thread_ts"] for s in client.sent] == [None, None]
 
 
-def test_send_outbox_per_channel_threads(patch_slack_paths, agent_root, frozen_now):
-    """Each channel independently tracks its own outbox thread root."""
+def test_send_outbox_per_recipient_routing(patch_slack_paths, agent_root, frozen_now):
+    """Two addressed replies route to two different users' channels+threads."""
     sb = patch_slack_paths
     frozen_now(FROZEN)
+    ctx = make_ctx(sb, chat_ids=["D1", "D2"], owner_user_id="U1")
+    sb.record_origin(
+        ctx["state"]["origin_map"],
+        msg_id="m-d1",
+        from_obj=sb.make_from(
+            "slack", channel="D1", user_id="U1", handle="alice", role="owner"
+        ),
+        origin_ref="1700000001.000000",
+    )
+    sb.record_origin(
+        ctx["state"]["origin_map"],
+        msg_id="m-d2",
+        from_obj=sb.make_from(
+            "slack", channel="D2", user_id="U2", handle="bob", role="member"
+        ),
+        origin_ref="1700000002.000000",
+    )
     outbox = [
-        {"type": "info", "content": "m1"},
-        {"type": "info", "content": "m2"},
+        {"type": "response", "content": "reply to alice", "in_reply_to": "m-d1"},
+        {"type": "response", "content": "reply to bob", "in_reply_to": "m-d2"},
     ]
     (agent_root / "messages" / "outbox.json").write_text(json.dumps(outbox))
     client = FakeSlackClient()
-    ctx = make_ctx(sb, chat_ids=["D1", "D2"])
-    ctx["state"]["outbox_threads"] = {
-        "D1": "1700000001.000000",
-        "D2": "1700000002.000000",
-    }
 
     sb.send_outbox_messages(client, ctx)
 
@@ -901,6 +1006,69 @@ def test_process_incoming_owner_discovery(
 
     # DM gets an ack reply
     assert any("Got it!" in s["text"] for s in client.sent)
+
+
+def test_process_incoming_stamps_from_and_id_and_origin(
+    patch_slack_paths, fake_keepass, frozen_now, agent_root
+):
+    """Ingress stamps a structured `from`, a stable `id`, and records the
+    id -> origin mapping for later reply routing."""
+    sb = patch_slack_paths
+    frozen_now(FROZEN)
+    client = FakeSlackClient(names={"U1": "alice"})
+    ctx = make_ctx(sb)
+    event = {
+        "channel": "D1",
+        "user": "U1",
+        "text": "hello",
+        "channel_type": "im",
+        "ts": "1700000009.000000",
+    }
+    sb._process_incoming(client, event, ctx)
+
+    inbox = json.loads((agent_root / "messages" / "inbox.json").read_text())
+    item = inbox[-1]
+    assert item["from"] == {
+        "transport": "slack",
+        "channel": "D1",
+        "user_id": "U1",
+        "handle": "alice",
+        "role": "owner",  # first-ever DM → owner
+    }
+    assert item["id"]  # stamped uuid
+    # origin map resolves the id back to the user's channel + message ts.
+    frm, origin_ref = sb.resolve_origin(ctx["state"]["origin_map"], item["id"])
+    assert frm["channel"] == "D1"
+    assert origin_ref == "1700000009.000000"
+
+
+def test_validate_state_sanitizes_origin_map(patch_slack_paths):
+    sb = patch_slack_paths
+    out = sb._validate_state(
+        {
+            "sent_hashes": [],
+            "processed_keys": [],
+            "outbox_threads": {},
+            "origin_map": {
+                "good": {"from": {"transport": "slack"}, "origin_ref": "1.0"},
+                "bad": "not-a-dict",
+            },
+        }
+    )
+    assert "good" in out["origin_map"]
+    assert "bad" not in out["origin_map"]
+
+
+def test_dedup_key_prefers_id_over_hash(patch_slack_paths):
+    sb = patch_slack_paths
+    with_id = {"type": "info", "content": "x", "id": "abc-123"}
+    assert sb.dedup_key(with_id) == "id:abc-123"
+    # Same id, mutated field → same dedup key (immune to sent:true churn).
+    mutated = dict(with_id, sent=True)
+    assert sb.dedup_key(mutated) == sb.dedup_key(with_id)
+    # No id → falls back to the content hash.
+    no_id = {"type": "info", "content": "x"}
+    assert sb.dedup_key(no_id) == sb.msg_hash(no_id)
 
 
 def test_process_incoming_rejects_unknown_in_channel(

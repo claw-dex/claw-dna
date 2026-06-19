@@ -24,7 +24,6 @@ Management:
 """
 
 import fcntl
-import hashlib
 import json
 import logging
 import os
@@ -42,6 +41,16 @@ from pathlib import Path
 
 import requests
 
+from envelope import (
+    dedup_key,
+    ensure_id,
+    make_from,
+    msg_hash,
+    record_origin,
+    resolve_handle,
+    resolve_origin,
+    sanitize_origin_map,
+)
 from shared import atomic_write_json, write_to_inbox, append_to_history
 
 # --- Paths ---
@@ -117,6 +126,9 @@ def _write_heartbeat():
 KEEPASS_TELEGRAM_BOT_TOKEN = "TELEGRAM_BOT_TOKEN"
 KEEPASS_TELEGRAM_CHAT_ID = "TELEGRAM_CHAT_ID"
 KEEPASS_TELEGRAM_OWNER_USERNAME = "TELEGRAM_OWNER_USERNAME"
+# Optional: chat id that unaddressed outbox messages (status/FYI with no
+# in_reply_to/to) redirect to instead of the owner. env first, then KeePass.
+KEEPASS_TELEGRAM_UNADDRESSED_CHANNEL = "TELEGRAM_UNADDRESSED_CHANNEL"
 TELEGRAM_API = "https://api.telegram.org/bot{token}/{method}"
 POLL_TIMEOUT = 25  # Telegram long-poll timeout (seconds)
 SEND_TIMEOUT = 10  # HTTP timeout for non-polling API calls (sendMessage etc.)
@@ -385,6 +397,8 @@ def _validate_state(data) -> dict:
         "sent_hashes": [],
         "pending_authorizations": {},
         "blocked_chat_ids": [],
+        # id -> origin resolution map for per-user reply routing (envelope.py).
+        "origin_map": {},
     }
     if not isinstance(data, dict):
         log.warning(
@@ -440,6 +454,8 @@ def _validate_state(data) -> dict:
                 migrated.append(entry)
             # else: malformed entry, drop it
         data["blocked_chat_ids"] = migrated
+    # origin_map: sanitize via the shared helper (drops malformed, bounds size).
+    data["origin_map"] = sanitize_origin_map(data.get("origin_map"))
     return data
 
 
@@ -449,6 +465,8 @@ def load_state() -> dict:
         "sent_hashes": [],
         "pending_authorizations": {},
         "blocked_chat_ids": [],
+        # id -> origin resolution map for per-user reply routing (envelope.py).
+        "origin_map": {},
     }
     if STATE_FILE.exists():
         try:
@@ -463,10 +481,7 @@ def save_state(state: dict):
     atomic_write_json(STATE_FILE, state, indent=2)
 
 
-def msg_hash(msg: dict) -> str:
-    """Stable 16-char hash of an outbox message to detect duplicates."""
-    key = json.dumps(msg, sort_keys=True, ensure_ascii=False)
-    return hashlib.sha256(key.encode()).hexdigest()[:16]
+# msg_hash / dedup_key are imported from envelope (single canonical impl).
 
 
 def protect_urls_in_markdown(text: str) -> str:
@@ -1628,6 +1643,8 @@ def _process_authorized_message(
     state: dict | None = None,
     history_key: str | None = None,
     bot_username: str = "",
+    from_user_id: str = "",
+    owner_username: str | None = None,
 ):
     """Process an authorized incoming message (text and/or media) into an inbox item.
 
@@ -1770,17 +1787,48 @@ def _process_authorized_message(
     chat_text = effective_text or "(media)"
     append_chat_message(chat_history, hkey, "user", chat_text)
 
+    # role is an identity label only (no permission gating). Telegram
+    # identifies the owner by username.
+    def _norm(name):
+        return str(name or "").lstrip("@").strip().lower()
+
+    role = (
+        "owner"
+        if owner_username and _norm(from_user) == _norm(owner_username)
+        else "member"
+    )
+    from_obj = make_from(
+        "telegram",
+        channel=from_chat,
+        user_id=from_user_id,
+        handle=from_user,
+        role=role,
+    )
+    now_iso = datetime.now(timezone.utc).isoformat()
     inbox_item = {
         "type": "message",
         "content": content,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "received_at": datetime.now(timezone.utc).isoformat(),
+        "timestamp": now_iso,
+        "received_at": now_iso,
         "source": "telegram",
+        "from": from_obj,
     }
+    # Stamp a stable id so the agent can reply via outbox `in_reply_to`.
+    msg_id = ensure_id(inbox_item)
     if attachments:
         inbox_item["attachments"] = attachments
 
     inbox_items.append(inbox_item)
+    # Record id -> origin so a reply resolves back to this user's chat.
+    # origin_ref = the message_id, used as reply_to_message_id when delivering
+    # (best-effort per-user isolation in shared groups; no native threads).
+    if state is not None:
+        record_origin(
+            state.setdefault("origin_map", {}),
+            msg_id=msg_id,
+            from_obj=from_obj,
+            origin_ref=msg.get("message_id"),
+        )
     log.info(
         f"Received from @{from_user}: {chat_text[:100]}"
         + (f" (+{len(attachments)} attachment(s))" if attachments else "")
@@ -1900,6 +1948,8 @@ def poll_updates(
                     state,
                     history_key,
                     bot_username,
+                    from_user_id=from_user_id,
+                    owner_username=owner_username,
                 )
 
             # ── GROUP CHAT — special auth path ───────────────────────────────────────
@@ -1982,6 +2032,8 @@ def poll_updates(
                     state,
                     history_key,
                     bot_username,
+                    from_user_id=from_user_id,
+                    owner_username=owner_username,
                 )
 
             # ── PRIVATE CHAT — active passcode challenge ─────────────────────────────
@@ -2189,10 +2241,36 @@ def append_to_inbox_history(items: list):
 # ---------------------------------------------------------------------------
 
 
+def _tg_send(token: str, cid: str, text: str, reply_to=None) -> bool:
+    """Send one Telegram message (MarkdownV2, falling back to plain). True on success."""
+    kwargs = {"chat_id": cid, "text": text, "parse_mode": "MarkdownV2"}
+    if reply_to is not None:
+        kwargs["reply_to_message_id"] = reply_to
+    result = tg(token, "sendMessage", **kwargs)
+    if result:
+        return True
+    # Retry without Markdown (preserve backtick-wrapped content as-is).
+    fallback = {"chat_id": cid, "text": _strip_markdown_preserve_code(text)}
+    if reply_to is not None:
+        fallback["reply_to_message_id"] = reply_to
+    return bool(tg(token, "sendMessage", **fallback))
+
+
 def send_outbox_messages(
-    token: str, chat_ids: list[str], state: dict, chat_history: dict
+    token: str,
+    chat_ids: list[str],
+    state: dict,
+    chat_history: dict,
+    unaddressed_channel: str | None = None,
 ):
-    """Forward unsent outbox messages to all authorized Telegram chats."""
+    """Forward unsent outbox messages to Telegram with per-recipient routing.
+
+    Applies the 3-way delivery rule (see slack_bridge.send_outbox_messages):
+      1. Addressed (``in_reply_to``/``to``) and resolvable here → deliver to
+         that one user's chat, quoting their original message.
+      2. Addressed but NOT resolvable here → skip WITHOUT marking sent.
+      3. Unaddressed → owner only (or the configured redirect chat).
+    """
     # Bare-name import to share `sys.modules["shared"]` with the rest of
     # the daemon (and pytest fixtures that monkeypatch on `shared`). Using
     # `services.shared` here would create a duplicate module instance with
@@ -2203,42 +2281,52 @@ def send_outbox_messages(
     if not outbox:
         return
 
+    origin_map = state.get("origin_map", {})
+    # Owner chat = first authorized id (the owner's private chat by discovery
+    # order); the optional redirect overrides it for unaddressed messages.
+    owner_channel = chat_ids[0] if chat_ids else None
+    default_channel = unaddressed_channel or owner_channel
+
     sent_count = 0
     sent_history_batch: list[dict] = []
     for msg in outbox:
-        h = msg_hash(msg)
-        if h in state["sent_hashes"]:
+        key = dedup_key(msg)
+        if key in state["sent_hashes"]:
             continue  # already sent
 
-        text = _format_outbox_msg(msg)
+        target = msg.get("in_reply_to") or msg.get("to")
+        reply_to = None
+        if target:
+            resolved = resolve_origin(origin_map, str(target))
+            if resolved is None:
+                frm = resolve_handle(origin_map, str(target))
+                if frm is None:
+                    continue  # case 2: another transport — do NOT mark sent
+                resolved = (frm, None)
+            from_obj, origin_ref = resolved
+            destination = (from_obj or {}).get("channel")
+            if not destination:
+                continue
+            reply_to = origin_ref
+        elif default_channel:
+            destination = default_channel
+        else:
+            continue  # no owner chat known yet
 
+        text = _format_outbox_msg(msg)
         # Telegram max message length is 4096 chars
         if len(text) > 4000:
             text = text[:3997] + "..."
 
-        succeeded_cids = []
-        for cid in chat_ids:
-            result = tg(
-                token, "sendMessage", chat_id=cid, text=text, parse_mode="MarkdownV2"
-            )
-            if result:
-                succeeded_cids.append(cid)
-            else:
-                # Try without Markdown (preserve backtick-wrapped content as-is)
-                fallback_text = _strip_markdown_preserve_code(text)
-                result2 = tg(token, "sendMessage", chat_id=cid, text=fallback_text)
-                if result2:
-                    succeeded_cids.append(cid)
-
-        if succeeded_cids:
-            state["sent_hashes"].append(h)
+        if _tg_send(token, destination, text, reply_to=reply_to):
+            state["sent_hashes"].append(key)
             sent_count += 1
             log.info(
-                f"Sent to Telegram ({len(succeeded_cids)} chat(s)): {msg.get('subject', text[:60])!r}"
+                f"Sent to Telegram chat {destination}: "
+                f"{msg.get('subject', text[:60])!r}"
             )
             sent_history_batch.append(msg)
-            for cid in succeeded_cids:
-                append_chat_message(chat_history, cid, "bot", text)
+            append_chat_message(chat_history, destination, "bot", text)
 
     # Cap hash list to last 1000 to prevent unbounded growth
     state["sent_hashes"] = state["sent_hashes"][-1000:]
@@ -2249,9 +2337,7 @@ def send_outbox_messages(
 
     if sent_count:
         save_chat_history(chat_history)
-        log.info(
-            f"Forwarded {sent_count} outbox message(s) to {len(chat_ids)} Telegram chat(s)."
-        )
+        log.info(f"Forwarded {sent_count} outbox message(s) to Telegram.")
 
 
 def _format_outbox_msg(msg: dict) -> str:
@@ -2350,6 +2436,18 @@ def main():
     if owner_username:
         log.info(f"Owner username: @{owner_username}")
 
+    # Optional redirect for unaddressed (status/FYI) outbox messages: env wins,
+    # then KeePass. Resolved once at startup to avoid a per-poll credential read.
+    unaddressed_channel = (
+        os.environ.get(KEEPASS_TELEGRAM_UNADDRESSED_CHANNEL)
+        or keepass_get(KEEPASS_TELEGRAM_UNADDRESSED_CHANNEL)
+        or None
+    )
+    if unaddressed_channel:
+        unaddressed_channel = unaddressed_channel.strip() or None
+    if unaddressed_channel:
+        log.info(f"Unaddressed outbox messages will route to {unaddressed_channel}")
+
     chat_ids_raw = keepass_get(KEEPASS_TELEGRAM_CHAT_ID)
     chat_ids = parse_chat_ids(chat_ids_raw)
     if chat_ids:
@@ -2391,7 +2489,9 @@ def main():
                 # 2. Forward outbox messages periodically
                 now = time.time()
                 if chat_ids and (now - last_outbox_check >= OUTBOX_INTERVAL):
-                    send_outbox_messages(token, chat_ids, state, chat_history)
+                    send_outbox_messages(
+                        token, chat_ids, state, chat_history, unaddressed_channel
+                    )
                     try:
                         save_state(state)
                     except Exception as e:

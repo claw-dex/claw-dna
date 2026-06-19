@@ -368,6 +368,7 @@ def test_load_state_returns_default_when_missing(patch_telegram_paths):
         "sent_hashes": [],
         "pending_authorizations": {},
         "blocked_chat_ids": [],
+        "origin_map": {},
     }
 
 
@@ -378,6 +379,7 @@ def test_save_then_load_state_round_trip(patch_telegram_paths):
         "sent_hashes": ["abc"],
         "pending_authorizations": {"u": "data"},
         "blocked_chat_ids": [{"chat_id": "1", "username": "x"}],
+        "origin_map": {},
     }
     tb.save_state(state)
     assert tb.load_state() == state
