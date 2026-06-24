@@ -170,7 +170,7 @@ locally-executed goals.
 
 **Notes:**
 
-- Icons displayed in portal header (see `server.py` line 221)
+- Icons displayed in the portal header (see `server.py` line 221)
 - `waiting_for_human` triggers escalation via CallMeBot if configured
 - Most common states: `idle` (between cycles) and `running` (during cycles)
 

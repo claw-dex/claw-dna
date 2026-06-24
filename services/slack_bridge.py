@@ -1623,13 +1623,15 @@ def _ingest_message(
             append_to_history([inbox_item], INBOX_HISTORY_FILE)
             append_chat_message(chat_history, channel, "user", text or "(media)")
             # Record id -> origin so an outbox `in_reply_to` resolves back to
-            # this user's channel. origin_ref = the user's message ts, used as
-            # the reply thread root for per-user isolation in shared channels.
+            # this user's channel. origin_ref is used as thread_ts when sending
+            # the agent's reply, so it must be the THREAD ROOT ts (thread_ts),
+            # not the individual reply ts. For top-level messages thread_ts is
+            # absent, so we fall back to ts (which IS the thread root).
             record_origin(
                 ctx["state"].setdefault("origin_map", {}),
                 msg_id=msg_id,
                 from_obj=from_obj,
-                origin_ref=event.get("ts"),
+                origin_ref=event.get("thread_ts") or event.get("ts"),
             )
             _mark_processed(ctx["state"], channel, event)
             save_state(ctx["state"])
@@ -1746,6 +1748,11 @@ def _process_incoming(client, event, ctx, is_mention=False) -> None:
         slack_send(client, channel, welcome)
         with lock:
             append_chat_message(ctx["chat_history"], channel, "bot", welcome)
+            _mark_processed(ctx["state"], channel, event)
+            save_state(ctx["state"])
+        # The triggering message was the authorization handshake (@mention of the
+        # owner), not a real request — skip forwarding it to inbox.json.
+        return
 
     # --- Command handling (both slash and keyword/mention text) ---
     # Mark processed first (we have committed to running the command — a long
@@ -1775,17 +1782,23 @@ def _process_incoming(client, event, ctx, is_mention=False) -> None:
         ctx, client, channel, username, user_id, text, attachments, event
     )
 
-    # Ack in DMs only — channel replies arrive via the outbox, and acking every
-    # channel message publicly would be noisy. Sent outside the lock.
-    # The owner's top-level DM ts becomes the outbox thread root so all future
-    # outbox messages (and this ACK) appear as replies to the same conversation.
-    if wrote and is_dm:
-        owner_ts = event.get("ts")
+    # ACK the message to confirm receipt.
+    # - DMs: thread under the owner's message ts; also track it in outbox_threads
+    #   so future agent outbox replies appear as replies to the same conversation.
+    # - Channels: thread under the existing thread root (if the @mention arrived
+    #   inside a thread) or under the message itself (top-level @mention). This
+    #   keeps the ACK scoped to the thread where the user tagged the bot, without
+    #   cluttering the channel's main timeline.
+    if wrote:
+        msg_ts = event.get("ts")
+        ack_thread_ts = event.get("thread_ts") or msg_ts
         ack = build_ack_message()
-        slack_send(client, channel, ack, thread_ts=owner_ts)
+        slack_send(client, channel, ack, thread_ts=ack_thread_ts)
         with lock:
-            if owner_ts:
-                ctx["state"]["outbox_threads"][channel] = owner_ts
+            if is_dm and msg_ts:
+                # Only track the thread root for DMs — outbox_threads drives
+                # owner-DM threading; channel replies use origin_map instead.
+                ctx["state"]["outbox_threads"][channel] = msg_ts
             append_chat_message(ctx["chat_history"], channel, "bot", ack)
             save_chat_history(ctx["chat_history"])
             save_state(ctx["state"])
@@ -2100,6 +2113,11 @@ def _handle_assistant_message(client, payload, ctx, say, set_status, set_title) 
         say(welcome)
         with ctx["lock"]:
             append_chat_message(ctx["chat_history"], channel, "bot", welcome)
+            _mark_processed(ctx["state"], channel, payload)
+            save_state(ctx["state"])
+        # The triggering message was the authorization handshake (@mention of the
+        # owner), not a real request — skip forwarding it to inbox.json.
+        return
 
     # --- Commands answer instantly, in-thread ---
     command, args = parse_command(text)

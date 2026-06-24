@@ -88,9 +88,9 @@ it back to the right user on the right transport and delivers **only** to them:
   - **Caddy** (port 8080) — Web portal powered by Caddy gateway, proxy requests to Streamlit app and other services
   - **Streamlit** (port 8081) — Streamlit app portal at `/app/`, auto-reloads when .py files change
 - The watchdog in bootstrap.sh restarts any crashed service every 10s
-- Server source: /agent/server.py (edit any .py file and Streamlit hot-reloads)
-- Command console: /agent/app/commands_tab.py (protected — do NOT modify; see constitution.md)
-- Gateway config: managed via Caddy admin API (DO NOT edit /agent/Caddyfile directly)
+- Streamlit portal source: `/agent/server.py` (edit this and `app/*.py` cause Streamlit to trigger hot-reloads)
+- Command console: `/agent/app/commands_tab.py` (protected — do NOT modify; see constitution.md)
+- Gateway config: managed via Caddy admin API (DO NOT edit `/agent/Caddyfile` directly)
 - Caddy admin API: <http://localhost:2019> (JSON API for dynamic route configuration). For example:
   - Load current config: `curl http://localhost:2019/config/`
   - Add a route: `curl -X POST http://localhost:2019/config/apps/http/servers/gateway/routes -H 'Content-Type: application/json' -d '{...}'`
@@ -322,7 +322,7 @@ Before finishing, you MUST do ALL of the following:
 
 1. Update /agent/memory/state.json — set cycle_number, status, last_cycle_summary (last_heartbeat and last_cycle_run are set by heartbeat.sh; last_cycle_end is set by cycle_close.py)
 2. Append to /agent/memory/journal.json — see prompts/cycle-close.md Step 3 for the JSON schema
-3. If you modified server.py or app/ files, verify the portal is still up: `curl -s http://localhost:8081/app/_stcore/health`
+3. If you modified `server.py` or `app/*.py` files, verify the portal is still up: `curl -s http://localhost:8081/app/_stcore/health`
 4. Write any questions you have for the user to /agent/messages/outbox.json
 5. Review & update AGENTS.md
    - keep the Directory Structure tree accurate (add/remove/rename files with correct descriptions, stick to first level only)

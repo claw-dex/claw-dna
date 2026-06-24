@@ -12,7 +12,7 @@ If server changes aren't taking effect or you get connection refused:
 bash /agent/scripts/server_restart.sh --verify
 ```
 
-This triggers a Streamlit hot-reload (touches server.py) and verifies health via /_stcore/health.
+This triggers a Streamlit hot-reload (touches `server.py`) and verifies health via /_stcore/health.
 If it doesn't resolve the issue, continue with full triage below.
 
 ## Triage Steps

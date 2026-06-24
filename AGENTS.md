@@ -10,7 +10,7 @@ Agent-specific instructions loaded by the AI coding agent at session start.
 ├── AGENTS.md                    ← This file (agent instructions, directory tree, skills, credentials)
 ├── bootstrap.sh                 ← PID 1 process manager (entrypoint, immutable)
 ├── heartbeat.sh                 ← Heartbeat loop invoked on this script in intervals (immutable)
-├── server.py                    ← Streamlit entry point (hot-reloads on edit, invalid python code will break the portal)
+├── server.py                    ← Streamlit portal entry point (hot-reloads on edit, invalid python code will break the portal)
 ├── Caddyfile                    ← Caddy gateway initial config (DO NOT EDIT — use Caddy API instead)
 ├── system.md                    ← Agent system prompt (read-only, immutable)
 ├── constitution.md              ← Immutable rules (read-only, chmod 444)

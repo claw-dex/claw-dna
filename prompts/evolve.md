@@ -138,7 +138,7 @@ If you override, document why in the cycle-close journal entry.
 
 ### Reliability
 
-Fix bugs in portal, server, or memory system. Add error handling, graceful degradation.
+Fix bugs in portal (server.py or apps/*.py), or memory system (json files or scripts). Add error handling, graceful degradation.
 **Good use:** A tab is crashing, a script has an edge-case bug, memory files are inconsistently structured.
 **Maturity penalty applies when:** No failures in recent cycles (penalty 15).
 
@@ -158,7 +158,7 @@ Build utility scripts (`/agent/scripts/`) or install new tools. Make things futu
 
 Reduce wasted cycles. Optimize hot paths (cycle-start, server load, memory parsing).
 **Good use:** A hot path runs slower than it should (e.g., a cache re-reads on every request, a script takes >10s for a simple task, or a prompt causes the agent to repeat work already done).
-**Maturity penalty applies when:** mtime conversion complete and server.py < 500 lines (penalty 15).
+**Maturity penalty applies when:** mtime conversion complete and `server.py` < 500 lines (penalty 15).
 
 ### Prompt Evolution
 
@@ -173,7 +173,7 @@ Always read a prompt before modifying it. Keep prompts concise — trim, don't p
   per session. Never create additional cycle entries in `cycles.json`. If you discover a
   goal or inbox item while working on an evolve cycle, leave it — the next heartbeat will
   handle it. Creating overlapping cycle entries causes interruptions and lost work.
-- Test changes before finishing. Verify portal health after any server.py edit.
+- Test changes before finishing. Verify portal health after any `server.py` edit.
 - **Run app-check after modifying any file in `app/` or `server.py`:**
 
   ```bash
