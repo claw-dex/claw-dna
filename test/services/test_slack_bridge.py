@@ -591,6 +591,193 @@ def test_fetch_slack_thread_context_skips_empty_text(patch_slack_paths):
     assert "real message" in result
 
 
+# --- Fix 1: attachments + Block Kit extraction ---
+
+
+def test_fetch_slack_thread_context_includes_attachment_text(patch_slack_paths):
+    """Bot messages (e.g. Amazon Q) that carry their content in attachments[].text
+    instead of the top-level text field must be fully extracted."""
+    sb = patch_slack_paths
+    client = FakeSlackClient(
+        history_messages=[
+            {
+                "bot_id": "B_AMAZONQ",
+                "text": "Error Alert: zapp-clearing service 🚨",  # short preview only
+                "attachments": [
+                    {
+                        "text": (
+                            "Total credit transaction amount is not matching with "
+                            "the net settlement summary"
+                        ),
+                        "fallback": "Error Alert: zapp-clearing service 🚨",  # same as text — deduped
+                    }
+                ],
+                "ts": "1.0",
+            }
+        ]
+    )
+    event = {"ts": "9.0"}
+    result = sb.fetch_slack_thread_context(client, "D1", event, "BOT1")
+    # Both the short preview AND the full attachment body must appear.
+    assert "Error Alert: zapp-clearing service" in result
+    assert "Total credit transaction amount is not matching" in result
+    # The fallback duplicates the top-level text — must appear only once.
+    assert result.count("Error Alert: zapp-clearing service") == 1
+
+
+def test_fetch_slack_thread_context_includes_attachment_pretext(patch_slack_paths):
+    """attachments[].pretext is extracted alongside .text."""
+    sb = patch_slack_paths
+    client = FakeSlackClient(
+        history_messages=[
+            {
+                "bot_id": "B1",
+                "text": "",
+                "attachments": [
+                    {"pretext": "Pre-context note", "text": "Main attachment body"}
+                ],
+                "ts": "1.0",
+            }
+        ]
+    )
+    event = {"ts": "9.0"}
+    result = sb.fetch_slack_thread_context(client, "D1", event, "BOT1")
+    assert "Pre-context note" in result
+    assert "Main attachment body" in result
+
+
+def test_fetch_slack_thread_context_falls_back_to_attachment_when_no_text(
+    patch_slack_paths,
+):
+    """When top-level text is empty, content in attachments still yields a message."""
+    sb = patch_slack_paths
+    client = FakeSlackClient(
+        history_messages=[
+            {
+                "bot_id": "B1",
+                "text": "",
+                "attachments": [{"text": "Only in attachment"}],
+                "ts": "1.0",
+            }
+        ]
+    )
+    event = {"ts": "9.0"}
+    result = sb.fetch_slack_thread_context(client, "D1", event, "BOT1")
+    assert "<message>Agent: Only in attachment</message>" in result
+
+
+def test_fetch_slack_thread_context_skips_message_with_no_content_anywhere(
+    patch_slack_paths,
+):
+    """A message with empty text, empty attachments, and no blocks is skipped."""
+    sb = patch_slack_paths
+    client = FakeSlackClient(
+        history_messages=[
+            {"bot_id": "B1", "text": "", "attachments": [{"text": ""}], "ts": "1.0"},
+            {"user": "U1", "text": "real one", "ts": "2.0"},
+        ]
+    )
+    event = {"ts": "9.0"}
+    result = sb.fetch_slack_thread_context(client, "D1", event, "BOT1")
+    lines = [l for l in result.splitlines() if l.strip()]
+    assert len(lines) == 1
+    assert "real one" in result
+
+
+def test_fetch_slack_thread_context_includes_block_kit_section(patch_slack_paths):
+    """Block Kit section blocks with text.text are extracted."""
+    sb = patch_slack_paths
+    client = FakeSlackClient(
+        history_messages=[
+            {
+                "bot_id": "B1",
+                "text": "",
+                "blocks": [
+                    {
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": "Block section content"},
+                    }
+                ],
+                "ts": "1.0",
+            }
+        ]
+    )
+    event = {"ts": "9.0"}
+    result = sb.fetch_slack_thread_context(client, "D1", event, "BOT1")
+    assert "Block section content" in result
+
+
+def test_fetch_slack_thread_context_includes_block_kit_header(patch_slack_paths):
+    """Block Kit header blocks are extracted."""
+    sb = patch_slack_paths
+    client = FakeSlackClient(
+        history_messages=[
+            {
+                "bot_id": "B1",
+                "text": "",
+                "blocks": [
+                    {
+                        "type": "header",
+                        "text": {"type": "plain_text", "text": "Alert Header"},
+                    }
+                ],
+                "ts": "1.0",
+            }
+        ]
+    )
+    event = {"ts": "9.0"}
+    result = sb.fetch_slack_thread_context(client, "D1", event, "BOT1")
+    assert "Alert Header" in result
+
+
+def test_fetch_slack_thread_context_includes_block_kit_context(patch_slack_paths):
+    """Block Kit context block elements are extracted."""
+    sb = patch_slack_paths
+    client = FakeSlackClient(
+        history_messages=[
+            {
+                "bot_id": "B1",
+                "text": "",
+                "blocks": [
+                    {
+                        "type": "context",
+                        "elements": [
+                            {"type": "mrkdwn", "text": "Context element one"},
+                            {"type": "plain_text", "plain_text": "Context element two"},
+                        ],
+                    }
+                ],
+                "ts": "1.0",
+            }
+        ]
+    )
+    event = {"ts": "9.0"}
+    result = sb.fetch_slack_thread_context(client, "D1", event, "BOT1")
+    assert "Context element one" in result
+    assert "Context element two" in result
+
+
+def test_fetch_slack_thread_context_deduplicates_across_sources(patch_slack_paths):
+    """The same text appearing in both top-level text and attachments.fallback
+    is included only once."""
+    sb = patch_slack_paths
+    repeated = "Error Alert: zapp-clearing service"
+    client = FakeSlackClient(
+        history_messages=[
+            {
+                "bot_id": "B1",
+                "text": repeated,
+                "attachments": [{"fallback": repeated, "text": "Extra detail"}],
+                "ts": "1.0",
+            }
+        ]
+    )
+    event = {"ts": "9.0"}
+    result = sb.fetch_slack_thread_context(client, "D1", event, "BOT1")
+    assert result.count(repeated) == 1
+    assert "Extra detail" in result
+
+
 # ---------------------------------------------------------------------------
 # Heartbeat / ack
 # ---------------------------------------------------------------------------
@@ -831,14 +1018,18 @@ def test_ingest_then_reply_by_id_round_trip(
     sb = patch_slack_paths
     frozen_now(FROZEN)
     client = FakeSlackClient(names={"U1": "alice", "U2": "bob"})
-    # Owner already known (U1/D1); bob is a member who references the owner.
-    ctx = make_ctx(sb, chat_ids=["D1"], owner_user_id="U1", owner_username="alice")
+    # Owner already known (U1/D1); bob's channel D2 is pre-authorized so his
+    # message goes straight to inbox (no owner-mention welcome handshake that
+    # would exit early before writing to inbox).
+    ctx = make_ctx(
+        sb, chat_ids=["D1", "D2"], owner_user_id="U1", owner_username="alice"
+    )
 
-    # Bob DMs the bot from his own channel D2, mentioning the owner to get in.
+    # Bob sends a regular DM that should be ingested.
     event = {
         "channel": "D2",
         "user": "U2",
-        "text": "hey alice's bot, status?",
+        "text": "can you check the deployment status?",
         "channel_type": "im",
         "ts": "1700000055.000000",
     }
@@ -1233,6 +1424,121 @@ def test_process_incoming_ignores_unaddressed_channel_message(
     assert not (agent_root / "messages" / "inbox.json").exists()
     # gate returns before recording the dedup key
     assert ctx["state"]["processed_keys"] == []
+
+
+# --- Fix 2: duplicate ACK prevention for channel @mentions ---
+
+
+def test_process_incoming_message_event_skips_direct_bot_mention(
+    patch_slack_paths, fake_keepass, agent_root
+):
+    """When Slack fires both app_mention and message events for the same @bot
+    mention, the message-event path (is_mention=False) must return early so
+    only the app_mention handler sends the ACK.
+
+    Without this fix both handlers race through the dedup pre-check and each
+    sends its own ACK, producing the duplicate 'Got it!' the user sees.
+    """
+    sb = patch_slack_paths
+    client = FakeSlackClient(names={"U1": "alice"})
+    ctx = make_ctx(sb, owner_user_id="U1", chat_ids=["C5"])
+    event = {
+        "channel": "C5",
+        "user": "U1",
+        # Message contains a direct @BOT1 mention — triggers the duplicate-ACK bug.
+        "text": "<@BOT1> check this service",
+        "channel_type": "channel",
+        "ts": "10.0",
+    }
+
+    # Simulate the message event handler (is_mention=False).
+    sb._process_incoming(client, event, ctx, is_mention=False)
+
+    # Must be silently skipped: no ACK, no inbox write, no dedup mark.
+    assert client.sent == []
+    assert not (agent_root / "messages" / "inbox.json").exists()
+    assert ctx["state"]["processed_keys"] == []
+
+
+def test_process_incoming_app_mention_still_processes_same_event(
+    patch_slack_paths, fake_keepass, frozen_now, agent_root
+):
+    """The app_mention path (is_mention=True) for the identical event must still
+    go through normally — only the message-event path is short-circuited."""
+    sb = patch_slack_paths
+    frozen_now(FROZEN)
+    client = FakeSlackClient(names={"U1": "alice"})
+    ctx = make_ctx(sb, owner_user_id="U1", chat_ids=["C5"])
+    event = {
+        "channel": "C5",
+        "user": "U1",
+        "text": "<@BOT1> check this service",
+        "channel_type": "channel",
+        "ts": "10.0",
+    }
+
+    # Simulate the app_mention handler (is_mention=True).
+    sb._process_incoming(client, event, ctx, is_mention=True)
+
+    # ACK sent exactly once and inbox written.
+    assert sum(1 for s in client.sent if "Got it!" in s["text"]) == 1
+    inbox = json.loads((agent_root / "messages" / "inbox.json").read_text())
+    assert len(inbox) == 1
+    assert "check this service" in inbox[0]["content"]
+
+
+def test_process_incoming_no_duplicate_ack_when_both_handlers_fire(
+    patch_slack_paths, fake_keepass, frozen_now, agent_root
+):
+    """Calling both the message handler (is_mention=False) and the app_mention
+    handler (is_mention=True) for the same event produces exactly one ACK and
+    one inbox entry — not two."""
+    sb = patch_slack_paths
+    frozen_now(FROZEN)
+    client = FakeSlackClient(names={"U1": "alice"})
+    ctx = make_ctx(sb, owner_user_id="U1", chat_ids=["C5"])
+    event = {
+        "channel": "C5",
+        "user": "U1",
+        "text": "<@BOT1> check this service repo",
+        "channel_type": "channel",
+        "ts": "11.0",
+    }
+
+    # Both Slack event handlers fire for the same @mention event.
+    sb._process_incoming(client, event, ctx, is_mention=False)  # message event
+    sb._process_incoming(client, event, ctx, is_mention=True)  # app_mention event
+
+    ack_count = sum(1 for s in client.sent if "Got it!" in s["text"])
+    assert ack_count == 1, f"Expected 1 ACK, got {ack_count}"
+
+    inbox = json.loads((agent_root / "messages" / "inbox.json").read_text())
+    assert len(inbox) == 1, f"Expected 1 inbox entry, got {len(inbox)}"
+
+
+def test_process_incoming_message_event_still_handles_owner_mention_for_authz(
+    patch_slack_paths, fake_keepass, agent_root
+):
+    """The message-event path must still process messages that mention the owner
+    (for new-channel authorization) even when is_mention=False. Only direct
+    @BOT mentions are skipped."""
+    sb = patch_slack_paths
+    client = FakeSlackClient(names={"U2": "bob"})
+    # No chat_ids yet — bob references the owner to authorize the channel.
+    ctx = make_ctx(sb, owner_user_id="OWN1", owner_username="gosu", chat_ids=[])
+    event = {
+        "channel": "C_NEW",
+        "user": "U2",
+        # References owner (not bot) — no app_mention event fires for this.
+        "text": "hey gosu can you help me with something?",
+        "channel_type": "channel",
+        "ts": "5.0",
+    }
+
+    sb._process_incoming(client, event, ctx, is_mention=False)
+
+    # Channel must be authorized even though this came via the message path.
+    assert "C_NEW" in ctx["chat_ids"]
 
 
 def test_process_incoming_command_routed(patch_slack_paths, fake_keepass, agent_root):

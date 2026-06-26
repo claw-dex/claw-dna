@@ -605,9 +605,46 @@ def fetch_slack_thread_context(
         # Skip the current message (it's the one the user just sent).
         if msg.get("ts") == current_ts:
             continue
-        msg_text = (msg.get("text") or "").strip()
+
+        # Build full message text: combine the top-level text field with any
+        # additional content from legacy attachments and Block Kit blocks.
+        # Bot messages (e.g. Amazon Q, GitHub, etc.) often put their rich
+        # content in attachments/blocks while the top-level `text` field only
+        # contains a short notification preview.
+        parts: list[str] = []
+
+        # 1. Top-level text field
+        top_text = (msg.get("text") or "").strip()
+        if top_text:
+            parts.append(top_text)
+
+        # 2. Legacy attachments — each may have pretext, text, or fallback.
+        for att in msg.get("attachments") or []:
+            for field in ("pretext", "text", "fallback"):
+                att_text = (att.get(field) or "").strip()
+                if att_text and att_text not in parts:
+                    parts.append(att_text)
+
+        # 3. Block Kit blocks — extract text from section/header/context blocks.
+        for block in msg.get("blocks") or []:
+            block_type = block.get("type", "")
+            if block_type in ("section", "header"):
+                bt = block.get("text") or {}
+                block_text = (bt.get("text") or bt.get("plain_text") or "").strip()
+                if block_text and block_text not in parts:
+                    parts.append(block_text)
+            elif block_type == "context":
+                for elem in block.get("elements") or []:
+                    elem_text = (
+                        elem.get("text") or elem.get("plain_text") or ""
+                    ).strip()
+                    if elem_text and elem_text not in parts:
+                        parts.append(elem_text)
+
+        msg_text = "\n".join(parts).strip()
         if not msg_text:
             continue
+
         # Determine role: bot/app messages are "Agent", humans are "User".
         if msg.get("bot_id") or msg.get("user") == bot_user_id:
             label = "Agent"
@@ -1711,7 +1748,14 @@ def _process_incoming(client, event, ctx, is_mention=False) -> None:
     # being forwarded to the agent inbox. DMs are always processed.
     if not is_dm and not is_mention:
         bot_mentioned = bool(bot_user_id) and (f"<@{bot_user_id}>" in raw_text)
-        if not bot_mentioned and not _mentions_owner(raw_text, ctx):
+        if bot_mentioned:
+            # Slack fires both `app_mention` and `message` events for the same
+            # @bot mention. Let the app_mention handler own it exclusively —
+            # processing here too causes duplicate ACKs (race between the two
+            # handlers both passing the dedup pre-check before either marks
+            # the event processed).
+            return
+        if not _mentions_owner(raw_text, ctx):
             return
 
     # Fast, network-free dedup pre-check.

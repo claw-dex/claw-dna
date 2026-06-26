@@ -29,6 +29,7 @@ def render():
     with st.expander("Upload files", icon=":material/upload:"):
         subdir = st.text_input(
             "Subdirectory (optional)",
+            value="upload/",
             placeholder="e.g. data/input",
             help="Leave empty to upload to the workspace root.",
         )
@@ -87,6 +88,7 @@ def render():
             )
             big_subdir = st.text_input(
                 "Subdirectory (optional)",
+                value="upload/",
                 placeholder="e.g. data/input",
                 help="Leave empty to upload to the workspace root.",
                 key="workspace_big_subdir",
