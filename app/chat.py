@@ -362,6 +362,14 @@ class ClaudeChat:
             system_prompt=_build_system_prompt(self._chat_history),
             permission_mode="bypassPermissions",
             include_partial_messages=True,
+            # Recent claude-agent-sdk versions default newer models (Opus
+            # 4.7+) to `display: "omitted"` for extended-thinking output,
+            # which silently drops ThinkingBlock content from the stream
+            # entirely (no ThinkingBlock is ever constructed — see
+            # message_parser.py). Explicitly request summarized thinking
+            # text so the portal's "Thinking..." expander keeps working
+            # regardless of which model the session resolves to.
+            thinking={"type": "adaptive", "display": "summarized"},
             cwd="/agent",
             add_dirs=["/home/agent", "/home/agent/.claude", "/agent/.claude"],
             setting_sources=["user", "project"],  # Load Skills from filesystem
@@ -444,7 +452,12 @@ class ClaudeChat:
                             "input": block.input,
                         }
                     )
-                elif isinstance(block, ThinkingBlock):
+                elif isinstance(block, ThinkingBlock) and block.thinking:
+                    # Guard against empty-string ThinkingBlocks: some
+                    # thinking-display configs (or a session without an
+                    # explicit `thinking` option) can yield a ThinkingBlock
+                    # with `thinking=""` — skip it rather than showing a
+                    # blank "Thinking..." expander.
                     events.append({"type": "thinking", "text": block.thinking})
             streamed_any = False
         elif isinstance(msg, SystemMessage):
@@ -812,6 +825,123 @@ def _drain_streaming_events(session) -> None:
             st.session_state.chat_stream_text += f"\n\n**Error:** {ev['error']}"
 
 
+# Event types that carry no visible content in the live chat bubble (see
+# `_chat_stream_fragment`'s render loop, which only branches on
+# "tool_use_group" / "thinking"). The SDK interleaves a SystemMessage
+# ("status") between every consecutive tool call — one per tool, e.g.
+# tool, status, tool, status, tool — so treating them as run-breakers would
+# defeat the grouping almost entirely. They must stay transparent: skipped
+# from the grouped output (nothing renders them anyway) and *not* counted
+# as a break between tool_use runs.
+_TRANSPARENT_EVENT_TYPES = {"system", "result", "error"}
+
+
+def _group_tool_events(events: list[dict]) -> list[dict]:
+    """Collapse consecutive ``tool_use`` events into a single grouped event.
+
+    Long tool-call sequences (10+ in a row) otherwise render as one
+    `st.caption` line each, flooding the chat UI with near-empty lines.
+    This merges each *consecutive* run of ``tool_use`` events into one
+    ``tool_use_group`` event carrying ``names``: an ordered list of
+    ``(tool_name, count)`` pairs for that run. ``text``/``thinking`` events
+    pass through unchanged and act as a break between runs, so interleaved
+    tool calls (e.g. tool, thinking, tool) still show as two separate
+    groups rather than merging across the thinking step. Events in
+    `_TRANSPARENT_EVENT_TYPES` (system/result/error) are dropped entirely
+    and do NOT break a run — see that constant's docstring for why.
+    """
+    grouped: list[dict] = []
+    run: list[dict] = []
+
+    def _flush() -> None:
+        if not run:
+            return
+        counts: dict[str, int] = {}
+        order: list[str] = []
+        for ev in run:
+            name = ev.get("name", "?")
+            if name not in counts:
+                order.append(name)
+            counts[name] = counts.get(name, 0) + 1
+        grouped.append(
+            {
+                "type": "tool_use_group",
+                "names": [(n, counts[n]) for n in order],
+                # Preserve the individual calls (name + input), in original
+                # order, so the expander can list each invocation's params —
+                # the count-collapsed `names` above is only for the summary
+                # label.
+                "calls": list(run),
+            }
+        )
+        run.clear()
+
+    for ev in events:
+        ev_type = ev.get("type")
+        if ev_type == "tool_use":
+            run.append(ev)
+        elif ev_type in _TRANSPARENT_EVENT_TYPES:
+            continue
+        else:
+            _flush()
+            grouped.append(ev)
+    _flush()
+    return grouped
+
+
+def _format_tool_group_label(names: list[tuple]) -> str:
+    """Render a `tool_use_group`'s ``names`` as e.g. ``Read ×3, Bash ×2``."""
+    return ", ".join(f"{n} ×{c}" if c > 1 else n for n, c in names)
+
+
+# Ordered param keys to surface per tool, so the expander detail reads like
+# a natural function call (e.g. `Edit("path", "old", "new")`) instead of a
+# raw dict dump. Tools not listed here fall back to all input values, in
+# whatever order the SDK provided them.
+_TOOL_PARAM_KEYS: dict[str, list[str]] = {
+    "Read": ["file_path"],
+    "Write": ["file_path", "content"],
+    "Edit": ["file_path", "old_string", "new_string"],
+    "Bash": ["command"],
+    "BashOutput": ["bash_id"],
+    "KillShell": ["shell_id"],
+    "Grep": ["pattern", "path"],
+    "Glob": ["pattern", "path"],
+    "WebFetch": ["url", "prompt"],
+    "WebSearch": ["query"],
+    "TodoWrite": ["todos"],
+    "Skill": ["skill", "args"],
+}
+
+_TOOL_PARAM_MAX_LEN = 60
+
+
+def _format_tool_call(name: str, tool_input: dict | None) -> str:
+    """Render one tool invocation as e.g. ``Read("path/to/file.md")``.
+
+    Picks known param keys in a sensible order per tool (falls back to raw
+    input values for unrecognized tools), truncates long values so a single
+    huge file write / bash heredoc doesn't blow up the expander.
+    """
+    tool_input = tool_input if isinstance(tool_input, dict) else {}
+    keys = _TOOL_PARAM_KEYS.get(name)
+    values = (
+        [tool_input[k] for k in keys if k in tool_input]
+        if keys
+        else list(tool_input.values())
+    )
+
+    def _render_value(value) -> str:
+        text = value if isinstance(value, str) else json.dumps(value, default=str)
+        text = text.replace("\n", "\\n")
+        if len(text) > _TOOL_PARAM_MAX_LEN:
+            text = text[: _TOOL_PARAM_MAX_LEN - 1] + "…"
+        return json.dumps(text)
+
+    args = ", ".join(_render_value(v) for v in values)
+    return f"{name}({args})"
+
+
 def _commit_streaming_buffer() -> bool:
     """Flush `chat_stream_text` / `chat_stream_events` into `chat_messages`
     and disk, then clear the streaming buffers.
@@ -823,15 +953,18 @@ def _commit_streaming_buffer() -> bool:
     full_text = st.session_state.chat_stream_text
     events = st.session_state.chat_stream_events
     if not full_text and events:
-        tool_names = [
-            ev.get("name", "?") for ev in events if ev.get("type") == "tool_use"
+        tool_groups = [
+            ev["names"]
+            for ev in _group_tool_events(events)
+            if ev["type"] == "tool_use_group"
         ]
         had_thinking = any(ev.get("type") == "thinking" for ev in events)
         bits: list[str] = []
         if had_thinking:
             bits.append("_(thinking only)_")
-        if tool_names:
-            bits.append("Used tools: " + ", ".join(tool_names))
+        if tool_groups:
+            label = ", ".join(_format_tool_group_label(names) for names in tool_groups)
+            bits.append("Used tools: " + label)
         if bits:
             full_text = " ".join(bits)
     committed = False
@@ -895,9 +1028,18 @@ def _chat_stream_fragment():
     if st.session_state.get("chat_streaming"):
         with st.chat_message("assistant"):
             st.markdown(st.session_state.chat_stream_text or "Processing...")
-            for ev in st.session_state.chat_stream_events:
-                if ev["type"] == "tool_use":
-                    st.caption(f"Used tool: {ev['name']}")
+            for ev in _group_tool_events(st.session_state.chat_stream_events):
+                if ev["type"] == "tool_use_group":
+                    label = "tools" if len(ev["names"]) > 1 else "tool"
+                    with st.expander(
+                        f"Used {label}: {_format_tool_group_label(ev['names'])}"
+                    ):
+                        st.markdown(
+                            "\n".join(
+                                f"- {_format_tool_call(c.get('name', '?'), c.get('input'))}"
+                                for c in ev["calls"]
+                            )
+                        )
                 elif ev["type"] == "thinking":
                     with st.expander("Thinking..."):
                         st.markdown(ev["text"])

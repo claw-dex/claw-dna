@@ -218,6 +218,48 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# Snippet length written to the turn-timeout inbox notification.  Long enough
+# to identify the task (e.g., a PR URL), short enough to keep envelopes tidy.
+_TIMEOUT_SNIPPET_LEN = 300
+
+
+def _notify_main_inbox_on_timeout(
+    agent_name: str,
+    ids: list[str],
+    prompt_snippet: str,
+    timeout_seconds: int,
+) -> None:
+    """Write a turn-timeout notification to the main agent's inbox.
+
+    Called when an internal-agent SDK turn exceeds TURN_TIMEOUT_SECONDS.
+    The notification lets the next heartbeat see what was being processed and
+    decide whether to re-queue the task or escalate to the user.
+
+    Errors are swallowed — a notification failure must never crash the turn
+    handler itself.
+    """
+    snippet = (prompt_snippet or "").strip()
+    if len(snippet) > _TIMEOUT_SNIPPET_LEN:
+        snippet = snippet[:_TIMEOUT_SNIPPET_LEN] + "…"
+    envelope: dict = {
+        "type": "message",
+        "source": "internal_agent_chat",
+        "subject": f"[{agent_name}] turn timed out after {timeout_seconds}s",
+        "content": (
+            f"Internal agent '{agent_name}' did not complete its turn within "
+            f"{timeout_seconds}s.\n"
+            f"Message IDs: {', '.join(ids)}\n"
+            f"Task snippet: {snippet!r}\n\n"
+            "The task was not completed. Consider re-queuing the review or "
+            "escalating to the user if this is a time-sensitive task."
+        ),
+        "agent": agent_name,
+        "timed_out_ids": ids,
+        "timestamp": _now_iso(),
+    }
+    write_to_inbox([envelope], inbox_file=INBOX_FILE, dedup=False)
+
+
 def _agent_dir(name: str) -> Path:
     return INTERNAL_DIR / name
 
@@ -834,15 +876,21 @@ def _build_send_reply_handler(session_name: str, cfg: dict):
             if not locked_json_rw(_rw, json_file=target, default=[]):
                 return _err("locked_json_rw failed; see service logs")
 
-        # Mirror agent_needs_human into the main outbox so the existing
-        # human-notification channels (Telegram / WhatsApp / etc.) pick
-        # them up — same behaviour as external_agent_api.py:708-731. The
-        # primary delivery has already succeeded; a failed mirror is
-        # surfaced but does NOT fail the tool call.
+        # Mirror agent_needs_human and agent_response into the main outbox so
+        # the existing human-notification channels (Telegram / WhatsApp / etc.)
+        # and the main agent pick them up — same behaviour as
+        # external_agent_api.py:708-731.  agent_error and agent_info are
+        # delivered to the target inbox only.  The primary delivery has already
+        # succeeded; a failed mirror is surfaced but does NOT fail the tool call.
+        _MIRROR_TYPE_MAP = {
+            "agent_needs_human": "needs_human",
+            "agent_response": "response",
+        }
         mirrored = False
-        if msg_type in ("agent_needs_human", "agent_response"):
+        if msg_type in _MIRROR_TYPE_MAP:
+            outbox_type = _MIRROR_TYPE_MAP[msg_type]
             mirror_env = {
-                "type": "needs_human",
+                "type": outbox_type,
                 "subject": "[from internal agent " + session_name + "]",
                 "content": ("[from internal agent " + session_name + "] " + content),
                 "timestamp": envelope["timestamp"],
@@ -851,12 +899,13 @@ def _build_send_reply_handler(session_name: str, cfg: dict):
                 mirrored = True
             else:
                 log.warning(
-                    "[%s] write_to_outbox failed for needs_human mirror",
+                    "[%s] write_to_outbox failed for %s mirror",
                     session_name,
+                    outbox_type,
                 )
                 surface_error(
                     "internal_agent_chat",
-                    "write_to_outbox failed for needs_human mirror",
+                    "write_to_outbox failed for " + outbox_type + " mirror",
                     context=session_name,
                 )
 
@@ -909,6 +958,16 @@ class InternalAgentSession:
     def __init__(self, name: str, cfg: dict):
         self.name = name
         self.cfg = cfg
+
+        # Per-agent turn timeout — agents that run long tasks (e.g. E2E QA
+        # flows) can override the global TURN_TIMEOUT_SECONDS by setting
+        # "timeout_seconds" in their agents.json entry.
+        raw_timeout = cfg.get("timeout_seconds")
+        self._turn_timeout: int = (
+            int(raw_timeout)
+            if isinstance(raw_timeout, (int, float)) and raw_timeout > 0
+            else TURN_TIMEOUT_SECONDS
+        )
 
         self._loop: asyncio.AbstractEventLoop | None = None
         self._sdk: ClaudeSDKClient | None = None
@@ -1033,6 +1092,18 @@ class InternalAgentSession:
             model=model,
             permission_mode="bypassPermissions",
             include_partial_messages=False,
+            # Recent claude-agent-sdk versions default extended-thinking
+            # output to a degraded/empty form unless a `thinking` config is
+            # set explicitly (see app/chat.py for the portal-chat repro of
+            # this same regression). Set it here too so reasoning quality
+            # isn't silently affected for internal agents (e.g.
+            # myspec-reviewer on opus). Note: this service is headless and
+            # today only persists `TextBlock` content to chat_history.json
+            # (see `_invoke_sdk_once` / `_append_assistant_record`) — it does
+            # not read or store `ThinkingBlock` at all, so this change does
+            # not yet surface thinking text anywhere; it only restores
+            # normal reasoning behavior under the hood.
+            thinking={"type": "adaptive", "display": "summarized"},
             cwd="/agent",
             add_dirs=["/home/agent", "/home/agent/.claude", "/agent/.claude"],
             setting_sources=["user", "project"],
@@ -1241,14 +1312,39 @@ class InternalAgentSession:
     def _pop_and_group_inbox(self) -> dict:
         """Atomically empty inbox.json; archive every popped item; return
         {reply_to_key: [stamped_msgs]} for processing.
+
+        Messages with a ``not_before`` field set to a future ISO-8601 timestamp
+        are left in the inbox and silently skipped until that time arrives.
+        This allows callers (e.g. the webhook handler) to schedule a delivery
+        with a built-in delay without needing an external scheduler.
         """
+        now = datetime.now(timezone.utc)
         popped_holder: dict = {"items": []}
 
         def _rw(items):
             if not isinstance(items, list):
                 items = []
-            popped_holder["items"] = items
-            return []
+            ready = []
+            deferred = []
+            for item in items:
+                if not isinstance(item, dict):
+                    ready.append(item)  # validator will surface the error below
+                    continue
+                nb_raw = item.get("not_before")
+                if nb_raw:
+                    try:
+                        nb_dt = datetime.fromisoformat(str(nb_raw))
+                        if nb_dt.tzinfo is None:
+                            nb_dt = nb_dt.replace(tzinfo=timezone.utc)
+                        if nb_dt > now:
+                            deferred.append(item)
+                            continue
+                    except (ValueError, TypeError):
+                        pass  # unparseable not_before → treat as immediately ready
+                ready.append(item)
+            popped_holder["items"] = ready
+            # Write deferred items back so they are retried on the next sweep.
+            return deferred
 
         if not locked_json_rw(_rw, json_file=_inbox_path(self.name), default=[]):
             return {}
@@ -1329,23 +1425,26 @@ class InternalAgentSession:
 
     async def _invoke_sdk_once(
         self, prompt: str, ids: list[str]
-    ) -> tuple[str | None, list[str], float | None, int | None, bool, bool]:
+    ) -> tuple[str | None, list[str], float | None, int | None, bool, bool, list[str]]:
         """Run a single SDK turn against ``self._sdk``.
 
         Returns ``(runner_error, text_parts, cost_usd, duration_ms,
-        sdk_is_error, timed_out)``. ``runner_error`` is the stringified
-        exception text from the SDK loop (e.g. "Cannot write to terminated
-        process") if the SDK raised, otherwise ``None``. ``text_parts`` is
-        the assistant text accumulated so far — even on error, it carries
-        any partial output up to the failure point.
+        sdk_is_error, timed_out, thinking_parts)``. ``runner_error`` is the
+        stringified exception text from the SDK loop (e.g. "Cannot write to
+        terminated process") if the SDK raised, otherwise ``None``.
+        ``text_parts`` is the assistant text accumulated so far — even on
+        error, it carries any partial output up to the failure point.
+        ``thinking_parts`` collects each non-empty ``ThinkingBlock.thinking``
+        seen during the turn, in order, for the caller to merge/persist.
         """
-        AssistantMessage, _, _, ResultMessage, TextBlock, _, _, _, _ = (
+        AssistantMessage, _, _, ResultMessage, TextBlock, ThinkingBlock, _, _, _ = (
             _import_claude_sdk()
         )
 
         chunk_q: queue.Queue = queue.Queue()
         done = asyncio.Event()
         text_parts: list[str] = []
+        thinking_parts: list[str] = []
 
         sdk = self._sdk
         assert sdk is not None
@@ -1358,6 +1457,8 @@ class InternalAgentSession:
                         for block in msg.content:
                             if isinstance(block, TextBlock) and block.text:
                                 text_parts.append(block.text)
+                            elif isinstance(block, ThinkingBlock) and block.thinking:
+                                thinking_parts.append(block.thinking)
                     elif isinstance(msg, ResultMessage):
                         sid = getattr(msg, "session_id", None)
                         if sid:
@@ -1379,7 +1480,7 @@ class InternalAgentSession:
         task = asyncio.create_task(_runner())
         timed_out = False
         try:
-            await asyncio.wait_for(done.wait(), timeout=TURN_TIMEOUT_SECONDS)
+            await asyncio.wait_for(done.wait(), timeout=self._turn_timeout)
         except asyncio.TimeoutError:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -1399,7 +1500,15 @@ class InternalAgentSession:
                 cost = ev.get("cost")
                 duration_ms = ev.get("duration_ms")
                 sdk_is_error = bool(ev.get("is_error")) or sdk_is_error
-        return runner_error, text_parts, cost, duration_ms, sdk_is_error, timed_out
+        return (
+            runner_error,
+            text_parts,
+            cost,
+            duration_ms,
+            sdk_is_error,
+            timed_out,
+            thinking_parts,
+        )
 
     async def _run_turn_for_group(self, reply_to_key: str, msgs: list) -> None:
         prompt = self._build_user_prompt(msgs)
@@ -1429,6 +1538,7 @@ class InternalAgentSession:
         duration_ms: int | None = None
         sdk_is_error = False
         timed_out = False
+        thinking_parts: list[str] = []
         # Track whether the in-loop retry already triggered a reconnect for
         # this turn. The trailing reconnect at the end of the function
         # (after the assistant record is written) is a belt-and-suspenders
@@ -1440,10 +1550,11 @@ class InternalAgentSession:
         while True:
             attempts += 1
             # NOTE: the second invocation's text_parts/cost/duration_ms/
-            # sdk_is_error/timed_out fully replace the first attempt's by
-            # design — we never concatenate partial output across attempts
-            # because there's no streaming buffer for operators to tell
-            # mid-output truncation apart from a complete reply.
+            # sdk_is_error/timed_out/thinking_parts fully replace the first
+            # attempt's by design — we never concatenate partial output
+            # across attempts because there's no streaming buffer for
+            # operators to tell mid-output truncation apart from a complete
+            # reply.
             (
                 runner_error,
                 text_parts,
@@ -1451,6 +1562,7 @@ class InternalAgentSession:
                 duration_ms,
                 sdk_is_error,
                 timed_out,
+                thinking_parts,
             ) = await self._invoke_sdk_once(prompt, ids)
             if (
                 runner_error is not None
@@ -1473,12 +1585,12 @@ class InternalAgentSession:
         if timed_out:
             # Prefer the underlying SDK exception over a generic "timed out"
             # marker — the SDK subprocess may have died which is itself why
-            # we ran past TURN_TIMEOUT_SECONDS.
+            # we ran past self._turn_timeout.
             if runner_error is not None:
                 log.error(
                     "[%s] turn timed out after %ds (runner error: %s)",
                     self.name,
-                    TURN_TIMEOUT_SECONDS,
+                    self._turn_timeout,
                     runner_error,
                 )
                 surface_error(
@@ -1489,14 +1601,14 @@ class InternalAgentSession:
                 assistant_text = "[error] " + runner_error
             else:
                 log.error(
-                    "[%s] turn timed out after %ds", self.name, TURN_TIMEOUT_SECONDS
+                    "[%s] turn timed out after %ds", self.name, self._turn_timeout
                 )
                 surface_error(
                     "internal_agent_chat",
                     "turn timeout",
                     context=self.name + ":ids=" + ",".join(ids),
                 )
-                assistant_text = f"[error] turn timed out after {TURN_TIMEOUT_SECONDS}s"
+                assistant_text = f"[error] turn timed out after {self._turn_timeout}s"
             # Any partial `text_parts` is intentionally dropped — without a
             # streaming buffer there's no way for an operator to distinguish
             # mid-output truncation from a complete reply, so we surface
@@ -1510,6 +1622,23 @@ class InternalAgentSession:
                 duration_ms=None,
                 is_error=True,
             )
+            # Notify the main agent's inbox so the next heartbeat can see
+            # what timed out and decide whether to re-queue or escalate.
+            # Errors are swallowed — notification failure must not crash the
+            # turn handler.
+            try:
+                _notify_main_inbox_on_timeout(
+                    agent_name=self.name,
+                    ids=ids,
+                    prompt_snippet=prompt,
+                    timeout_seconds=self._turn_timeout,
+                )
+            except Exception as _notify_err:
+                log.warning(
+                    "[%s] failed to notify main inbox of turn timeout: %s",
+                    self.name,
+                    _notify_err,
+                )
             # The SDK subprocess may be wedged after a timeout — recreate
             # the client so the next inbox drain starts from a clean state.
             # `self._session_id` is preserved so the SDK resumes the same
@@ -1517,7 +1646,7 @@ class InternalAgentSession:
             # reconnected this turn (avoids double-counting thrash entries).
             if not reconnected_in_loop:
                 await self._reconnect_after_error(
-                    runner_error or f"turn timeout after {TURN_TIMEOUT_SECONDS}s"
+                    runner_error or f"turn timeout after {self._turn_timeout}s"
                 )
             return
 
@@ -1527,11 +1656,16 @@ class InternalAgentSession:
         response_text = "".join(text_parts).strip()
         if not response_text:
             response_text = "(no response)"
+        # Merge every ThinkingBlock seen this turn into one persisted blob —
+        # the portal renders all of a turn's thinking as a single collapsed
+        # row rather than one row per block.
+        thinking_text = "\n\n".join(p for p in thinking_parts if p).strip() or None
 
         self._append_assistant_record(
             ids=ids,
             merged_reply_to=merged_reply_to,
             assistant_text=response_text,
+            thinking_text=thinking_text,
             session_id=self._session_id,
             cost_usd=cost,
             duration_ms=duration_ms,
@@ -1650,8 +1784,17 @@ class InternalAgentSession:
         cost_usd,
         duration_ms,
         is_error: bool,
+        thinking_text: str | None = None,
     ) -> None:
-        """Append the assistant's final response after the SDK turn ends."""
+        """Append the assistant's final response after the SDK turn ends.
+
+        ``thinking_text`` is the merge of every ``ThinkingBlock`` seen during
+        the turn (already joined by the caller) — ``None``/absent when the
+        turn produced no thinking output (or on the timeout path, which
+        intentionally drops partial content). Persisted as its own field so
+        the portal can render it collapsed under the response rather than
+        inline with the reply text.
+        """
         asst_rec = {
             "role": "assistant",
             "ts": _now_iso(),
@@ -1662,6 +1805,7 @@ class InternalAgentSession:
             "cost_usd": cost_usd,
             "duration_ms": duration_ms,
             "is_error": is_error,
+            "thinking": thinking_text,
         }
 
         def _rw(items):
@@ -1904,12 +2048,15 @@ class Fleet:
                 except Exception as exc:
                     log.warning("Stop %s failed: %s", name, exc)
                 self._sessions.pop(name, None)
+                # Clear any backoff state so re-activation starts fresh.
+                self._start_failures.pop(name, None)
 
-        # Drop backoff state for any agent no longer wanted, including
-        # those that only ever failed to start (never landed in
-        # _sessions). Without this, removed agents leak entries here.
+        # Also clean up backoff entries for agents that were removed *before*
+        # they ever landed in _sessions (i.e. they only ever failed to start).
+        # Without this, their entries leak in _start_failures forever.
         for name in list(self._start_failures.keys()):
             if name not in wanted:
+                log.debug("Cleaning up stale backoff entry for removed agent %s", name)
                 self._start_failures.pop(name, None)
 
         # Start new sessions
@@ -1957,9 +2104,9 @@ class Fleet:
                     exc,
                     exc_info=True,
                 )
-                # Only surface the first failure to server_errors.json;
-                # subsequent retries while still broken would otherwise
-                # spam the operator-visible error log every sweep tick.
+                # Only surface the first failure — subsequent retries are
+                # already logged at ERROR level; surfacing every retry would
+                # spam the portal and drown out distinct failure events.
                 if new_count == 1:
                     surface_error("internal_agent_chat", exc, context="start:" + name)
 

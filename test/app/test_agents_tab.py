@@ -27,6 +27,12 @@ def patch_agents_tab(monkeypatch, agent_root: Path, patch_shared_paths):
     monkeypatch.setattr(at, "_BASE", agent_root)
     monkeypatch.setattr(at, "_AGENTS_FILE", agent_root / "memory" / "agents.json")
     monkeypatch.setattr(at, "_EXTERNAL_DIR", agent_root / "messages" / "external")
+    monkeypatch.setattr(
+        at, "_SERVER_ERRORS_FILE", agent_root / "memory" / "server_errors.json"
+    )
+    monkeypatch.setattr(
+        at, "GOALS_PATH", str(agent_root / "memory" / "goal.json")
+    )
     # Chat helpers come from `services.shared` — redirect CHAT_DIR there
     # so the unified /agent/memory/chat/<name>/ layout points at agent_root.
     monkeypatch.setattr(patch_shared_paths, "CHAT_DIR", agent_root / "memory" / "chat")
@@ -297,3 +303,298 @@ def test_clear_flag_preserves_unrelated_control_keys(patch_agents_tab, monkeypat
     ctl = agents[0]["control"]
     assert ctl["future_flag"] == "keep-me"
     assert ctl[at.AGENT_CONTROL_CLEAR_SESSION] is True
+
+
+# ── _ts ─────────────────────────────────────────────────────────────────
+
+
+def test_ts_prefers_ts_key(patch_agents_tab):
+    at = patch_agents_tab
+    item = {"ts": "2026-01-01", "timestamp": "2025-01-01"}
+    assert at._ts(item) == "2026-01-01"
+
+
+def test_ts_falls_through_to_timestamp(patch_agents_tab):
+    at = patch_agents_tab
+    assert at._ts({"timestamp": "2026-02-02"}) == "2026-02-02"
+
+
+def test_ts_falls_through_to_received_at(patch_agents_tab):
+    at = patch_agents_tab
+    assert at._ts({"received_at": "2026-03-03"}) == "2026-03-03"
+
+
+def test_ts_falls_through_to_processed_at(patch_agents_tab):
+    at = patch_agents_tab
+    assert at._ts({"processed_at": "2026-04-04"}) == "2026-04-04"
+
+
+def test_ts_returns_empty_when_no_keys_present(patch_agents_tab):
+    assert patch_agents_tab._ts({}) == ""
+
+
+def test_ts_skips_non_string_values(patch_agents_tab):
+    at = patch_agents_tab
+    # int value for `ts` should be skipped, fallback to `timestamp`.
+    assert at._ts({"ts": 12345, "timestamp": "2026-05-05"}) == "2026-05-05"
+
+
+# ── _caddy_url ──────────────────────────────────────────────────────────
+
+
+def test_caddy_url_maps_agent_path(patch_agents_tab):
+    at = patch_agents_tab
+    assert at._caddy_url("/agent/memory/chat/planner/chat_history.json") == (
+        "/_/agent/memory/chat/planner/chat_history.json"
+    )
+
+
+def test_caddy_url_percent_encodes_special_chars(patch_agents_tab):
+    at = patch_agents_tab
+    url = at._caddy_url("/agent/memory/chat/my agent (test)/history.json")
+    assert "%20" in url or "+" in url  # space encoded
+    assert "%28" in url  # open paren encoded
+    assert "%29" in url  # close paren encoded
+    assert url.startswith("/_")
+
+
+def test_caddy_url_passes_through_non_agent_paths(patch_agents_tab):
+    at = patch_agents_tab
+    assert at._caddy_url("/tmp/some/path") == "/tmp/some/path"
+
+
+# ── _from_label ─────────────────────────────────────────────────────────
+
+
+def test_from_label_dict_prefers_handle(patch_agents_tab):
+    at = patch_agents_tab
+    env = {"from": {"handle": "@user", "source": "portal", "transport": "ws"}}
+    assert at._from_label(env) == "@user"
+
+
+def test_from_label_dict_falls_to_source(patch_agents_tab):
+    at = patch_agents_tab
+    env = {"from": {"source": "portal", "transport": "ws"}}
+    assert at._from_label(env) == "portal"
+
+
+def test_from_label_dict_falls_to_transport(patch_agents_tab):
+    at = patch_agents_tab
+    env = {"from": {"transport": "telegram"}}
+    assert at._from_label(env) == "telegram"
+
+
+def test_from_label_dict_falls_to_raw(patch_agents_tab):
+    at = patch_agents_tab
+    env = {"from": {"raw": "unknown-sender"}}
+    assert at._from_label(env) == "unknown-sender"
+
+
+def test_from_label_string(patch_agents_tab):
+    at = patch_agents_tab
+    assert at._from_label({"from": "alice"}) == "alice"
+
+
+def test_from_label_missing_returns_none(patch_agents_tab):
+    at = patch_agents_tab
+    assert at._from_label({}) is None
+
+
+def test_from_label_empty_string_returns_none(patch_agents_tab):
+    at = patch_agents_tab
+    assert at._from_label({"from": ""}) is None
+
+
+# ── _load_agent_goals ───────────────────────────────────────────────────
+
+
+def _seed_goals(at_mod, goals):
+    """Write a goal.json file in the patched GOALS_PATH location."""
+    goal_path = Path(at_mod.GOALS_PATH)
+    goal_path.parent.mkdir(parents=True, exist_ok=True)
+    goal_path.write_text(json.dumps(goals))
+
+
+def test_load_agent_goals_filters_by_delegated_to_name(patch_agents_tab):
+    at = patch_agents_tab
+    _seed_goals(at, [
+        {
+            "id": "g1",
+            "goal": "do A",
+            "status": "pending",
+            "delegated_to": {"name": "planner", "type": "internal"},
+        },
+        {
+            "id": "g2",
+            "goal": "do B",
+            "status": "pending",
+            "delegated_to": {"name": "other-agent", "type": "internal"},
+        },
+        {
+            "id": "g3",
+            "goal": "do C",
+            "status": "pending",
+            "delegated_to": {"name": "planner", "type": "internal"},
+        },
+    ])
+    out = at._load_agent_goals("planner")
+    assert [g["id"] for g in out] == ["g1", "g3"]
+
+
+def test_load_agent_goals_ignores_non_dict_delegated_to(patch_agents_tab):
+    at = patch_agents_tab
+    _seed_goals(at, [
+        {
+            "id": "g1",
+            "goal": "do A",
+            "status": "pending",
+            "delegated_to": "planner",  # string, not dict
+        },
+        {
+            "id": "g2",
+            "goal": "do B",
+            "status": "pending",
+            "delegated_to": {"name": "planner", "type": "internal"},
+        },
+    ])
+    out = at._load_agent_goals("planner")
+    assert [g["id"] for g in out] == ["g2"]
+
+
+def test_load_agent_goals_sorts_by_status_then_created_at(patch_agents_tab):
+    at = patch_agents_tab
+    _seed_goals(at, [
+        {
+            "id": "old-pending",
+            "goal": "old",
+            "status": "pending",
+            "created_at": "2026-01-01T00:00:00Z",
+            "delegated_to": {"name": "bot"},
+        },
+        {
+            "id": "new-pending",
+            "goal": "new",
+            "status": "pending",
+            "created_at": "2026-06-01T00:00:00Z",
+            "delegated_to": {"name": "bot"},
+        },
+        {
+            "id": "in-progress",
+            "goal": "active",
+            "status": "in_progress",
+            "created_at": "2026-03-01T00:00:00Z",
+            "delegated_to": {"name": "bot"},
+        },
+        {
+            "id": "completed",
+            "goal": "done",
+            "status": "completed",
+            "created_at": "2026-05-01T00:00:00Z",
+            "delegated_to": {"name": "bot"},
+        },
+    ])
+    out = at._load_agent_goals("bot")
+    ids = [g["id"] for g in out]
+    # in_progress (0) → pending (1, newest first) → completed (2)
+    assert ids == ["in-progress", "new-pending", "old-pending", "completed"]
+
+
+def test_load_agent_goals_returns_empty_for_empty_name(patch_agents_tab):
+    at = patch_agents_tab
+    _seed_goals(at, [
+        {"id": "g1", "status": "pending", "delegated_to": {"name": "bot"}},
+    ])
+    assert at._load_agent_goals("") == []
+
+
+def test_load_agent_goals_handles_missing_goal_file(patch_agents_tab):
+    assert patch_agents_tab._load_agent_goals("bot") == []
+
+
+def test_load_agent_goals_skips_non_dict_entries(patch_agents_tab):
+    at = patch_agents_tab
+    _seed_goals(at, [
+        "not a dict",
+        42,
+        {"id": "g1", "status": "pending", "delegated_to": {"name": "bot"}},
+    ])
+    out = at._load_agent_goals("bot")
+    assert [g["id"] for g in out] == ["g1"]
+
+
+# ── _load_agent_errors ──────────────────────────────────────────────────
+
+
+def _seed_errors(at_mod, errors):
+    """Write a server_errors.json file in the patched path."""
+    path = at_mod._SERVER_ERRORS_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(errors))
+
+
+def test_load_agent_errors_matches_by_context_prefix(patch_agents_tab):
+    at = patch_agents_tab
+    _seed_errors(at, [
+        {"context": "planner: turn timeout", "timestamp": "2026-06-01T10:00:00Z"},
+        {"context": "other: crash", "timestamp": "2026-06-01T09:00:00Z"},
+        {"context": "planner: SDK error", "timestamp": "2026-06-01T11:00:00Z"},
+    ])
+    out = at._load_agent_errors("planner")
+    assert len(out) == 2
+    assert all("planner" in e["context"] for e in out)
+
+
+def test_load_agent_errors_matches_by_tab_field(patch_agents_tab):
+    at = patch_agents_tab
+    _seed_errors(at, [
+        {"tab": "planner", "error": "render crash", "timestamp": "2026-06-01T10:00:00Z"},
+        {"tab": "other", "error": "unrelated", "timestamp": "2026-06-01T09:00:00Z"},
+    ])
+    out = at._load_agent_errors("planner")
+    assert len(out) == 1
+    assert out[0]["error"] == "render crash"
+
+
+def test_load_agent_errors_combines_context_and_tab_matches(patch_agents_tab):
+    at = patch_agents_tab
+    _seed_errors(at, [
+        {"context": "planner: timeout", "timestamp": "2026-06-01T10:00:00Z"},
+        {"tab": "planner", "error": "render", "timestamp": "2026-06-01T11:00:00Z"},
+        {"context": "other: x", "tab": "other", "timestamp": "2026-06-01T09:00:00Z"},
+    ])
+    out = at._load_agent_errors("planner")
+    assert len(out) == 2
+
+
+def test_load_agent_errors_sorted_newest_first(patch_agents_tab):
+    at = patch_agents_tab
+    _seed_errors(at, [
+        {"context": "bot: a", "timestamp": "2026-01-01T00:00:00Z"},
+        {"context": "bot: c", "timestamp": "2026-06-01T00:00:00Z"},
+        {"context": "bot: b", "timestamp": "2026-03-01T00:00:00Z"},
+    ])
+    out = at._load_agent_errors("bot")
+    timestamps = [e["timestamp"] for e in out]
+    assert timestamps == sorted(timestamps, reverse=True)
+
+
+def test_load_agent_errors_returns_empty_for_empty_name(patch_agents_tab):
+    at = patch_agents_tab
+    _seed_errors(at, [
+        {"context": "bot: err", "timestamp": "2026-06-01T00:00:00Z"},
+    ])
+    assert at._load_agent_errors("") == []
+
+
+def test_load_agent_errors_handles_missing_file(patch_agents_tab):
+    assert patch_agents_tab._load_agent_errors("bot") == []
+
+
+def test_load_agent_errors_skips_non_dict_entries(patch_agents_tab):
+    at = patch_agents_tab
+    _seed_errors(at, [
+        "not a dict",
+        {"context": "bot: err", "timestamp": "2026-06-01T00:00:00Z"},
+    ])
+    out = at._load_agent_errors("bot")
+    assert len(out) == 1

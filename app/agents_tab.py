@@ -18,10 +18,17 @@ and lets the operator inspect or interact with one agent at a time:
 * **🛠️ Actions** — send-message, clear-chat, clear-session. All three
   go through the same shared helpers as `scripts/interact_with_agent.py`
   so behavior matches the CLI exactly.
+* **🏥 Health** — per-agent error history sourced from `server_errors.json`.
+  Shows total error count, errors in the last 24h, last error timestamp, and
+  an expandable log of every entry.  Service-level turn timeouts (logged by
+  the internal_agent_chat daemon) appear here so recurring SDK failures are
+  visible without grepping log files.  Tab label shows `(N)` when errors
+  exist for the selected agent.
 """
 
 from __future__ import annotations
 
+import os
 import sys
 import urllib.parse
 import uuid
@@ -61,33 +68,106 @@ _GOAL_STATUS_ORDER = {"in_progress": 0, "pending": 1, "completed": 2, "failed": 
 _BASE = Path("/agent")
 _AGENTS_FILE = _BASE / "memory" / "agents.json"
 _EXTERNAL_DIR = _BASE / "messages" / "external"
+_SERVER_ERRORS_FILE = _BASE / "memory" / "server_errors.json"
 
 _PORTAL_SOURCE = "portal"  # `from` field on send-message envelopes
 _REPLY_TO = "messages/inbox.json"  # main inbox path string
+
+# Threshold constants for agent health panel
+_HEALTH_RECENT_HOURS = 24  # errors within this window are "recent"
+_HEALTH_WARNING_COUNT = 3  # ≥ this many errors in 24h triggers warning
+
+# ─── mtime-based loader caches ───────────────────────────────────────────
+# Each dict maps a file path string to (result, mtime) so the 10-second
+# _render_chat_fragment refresh loop reads disk only when a file changes.
+
+_AGENTS_CACHE: dict = {}  # {str(path): (result, mtime)}
+_CHAT_CACHE: dict = {}  # {str(path): (result, mtime)}
+
+# Goal and error lists are cached by (path, mtime) so repeated calls within a
+# single portal render (render() + _render_health() both call
+# _load_agent_errors()) share one disk read instead of two.
+# Keyed by str(path) — same pattern as _AGENTS_CACHE — so test fixtures
+# that redirect the module-level path constants to a temp sandbox each get
+# their own cache entry (prevents mtimes from different paths colliding).
+_GOALS_CACHE: dict = {}  # {str(path): (all_goals_list, mtime)}
+_ERRORS_CACHE: dict = {}  # {str(path): (all_errors_list, mtime)}
+# _synthesize_external_chat reads 4 JSON files per agent on every 10s fragment
+# tick.  Cache key: agent name → (result, tuple[4 mtimes]).  A cache miss
+# only fires when at least one of the four files has changed since last read.
+_EXTERNAL_CHAT_CACHE: dict = {}  # {name: (result, tuple[mtime, ...])}
+# must be ≥ 0 (exact mtime equality — standard pattern across all loader caches)
+_EXTERNAL_CHAT_CACHE_MIN_MTIME: float = 0.0
 
 
 # ─── data loaders ────────────────────────────────────────────────────────
 
 
+def _file_mtime(path: Path) -> float:
+    """Return path's mtime, or 0.0 if the file doesn't exist / can't be stat'd."""
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
 def _load_agents() -> list[dict]:
-    """Return every internal/external agent entry, sorted by name."""
-    raw = read_json_file(_AGENTS_FILE, default=[])
+    """Return every internal/external agent entry, sorted by name.
+
+    Mtime-cached: avoids re-reading agents.json on every 10s fragment tick.
+    Cache key includes the path string so tests can safely redirect _AGENTS_FILE
+    to a temp directory without hitting stale results from a previous path.
+    """
+    path = _AGENTS_FILE
+    path_str = str(path)
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = 0.0
+    cached = _AGENTS_CACHE.get(path_str)
+    if cached is not None:
+        result, c_mtime = cached
+        if c_mtime == mtime:
+            return result
+    raw = read_json_file(path, default=[])
     if not isinstance(raw, list):
-        return []
-    out = [
-        a
-        for a in raw
-        if isinstance(a, dict)
-        and a.get("type") in {"internal", "external"}
-        and isinstance(a.get("name"), str)
-        and a.get("name")
-    ]
-    return sorted(out, key=lambda a: a.get("name") or "")
+        result = []
+    else:
+        out = [
+            a
+            for a in raw
+            if isinstance(a, dict)
+            and a.get("type") in {"internal", "external"}
+            and isinstance(a.get("name"), str)
+            and a.get("name")
+        ]
+        result = sorted(out, key=lambda a: a.get("name") or "")
+    _AGENTS_CACHE[path_str] = (result, mtime)
+    return result
 
 
 def _load_internal_chat(name: str) -> list[dict]:
-    records = read_json_file(chat_history_path(name), default=[])
-    return records if isinstance(records, list) else []
+    """Return chat history for *name*, mtime-cached.
+
+    chat_history.json is read every 10s by _render_chat_fragment — mtime
+    caching eliminates disk reads between daemon writes (i.e. when no new
+    message has arrived or been processed since the last tick).
+    """
+    path = chat_history_path(name)
+    path_str = str(path)
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = 0.0
+    cached = _CHAT_CACHE.get(path_str)
+    if cached is not None:
+        result, c_mtime = cached
+        if c_mtime == mtime:
+            return result
+    records = read_json_file(path, default=[])
+    result = records if isinstance(records, list) else []
+    _CHAT_CACHE[path_str] = (result, mtime)
+    return result
 
 
 def _ts(item: dict) -> str:
@@ -105,19 +185,32 @@ def _synthesize_external_chat(agent: dict) -> list[dict]:
     Inbox = messages the *main* agent sent to the external agent → `user`.
     Outbox = messages the external agent sent back to main → `assistant`.
     Includes both the live and history files so old turns survive sweeps.
+
+    Mtime-cached on the 4 source files: the 10-second _render_chat_fragment
+    tick re-uses the cached result as long as none of the 4 files has changed.
+    Cache key: agent name → (result, tuple[4 mtimes]).
     """
     name = agent.get("name") or ""
     if not name:
         return []
     base = _EXTERNAL_DIR / name
-    files: list[tuple[Path, str]] = [
+    file_specs: list[tuple[Path, str]] = [
         (base / "inbox.json", "user"),
         (base / "inbox_history.json", "user"),
         (base / "outbox.json", "assistant"),
         (base / "outbox_history.json", "assistant"),
     ]
+    # Compute current mtimes for all 4 files (0.0 if missing)
+    current_mtimes = tuple(_file_mtime(path) for path, _ in file_specs)
+    # Cache hit: return stored result when all 4 mtimes are unchanged
+    cached = _EXTERNAL_CHAT_CACHE.get(name)
+    if cached is not None:
+        result, cached_mtimes = cached
+        if cached_mtimes == current_mtimes:
+            return result
+    # Cache miss: read all 4 files and compute transcript
     records: list[dict] = []
-    for path, role in files:
+    for path, role in file_specs:
         items = read_json_file(path, default=[])
         if not isinstance(items, list):
             continue
@@ -137,6 +230,7 @@ def _synthesize_external_chat(agent: dict) -> list[dict]:
                 }
             )
     records.sort(key=lambda r: r.get("ts") or "")
+    _EXTERNAL_CHAT_CACHE[name] = (records, current_mtimes)
     return records
 
 
@@ -145,12 +239,39 @@ def _load_agent_goals(name: str) -> list[dict]:
 
     A goal is considered delegated to this agent iff `delegated_to.name`
     matches. Non-dict `delegated_to` values are ignored.
+
+    Uses mtime-based caching: the full goal list is cached on goal.json's mtime
+    so repeated calls within one portal render (render() calls this for label
+    computation) re-use the cached list instead of re-reading from disk.
+    Previously read_json_file(GOALS_PATH) ran on every invocation regardless
+    of whether goal.json had changed.
     """
     if not name:
         return []
-    raw = read_json_file(Path(GOALS_PATH), default=[])
-    if not isinstance(raw, list):
-        return []
+
+    path = Path(GOALS_PATH)
+    path_str = str(path)
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = 0.0
+
+    cached = _GOALS_CACHE.get(path_str)
+    if cached is not None:
+        all_goals, c_mtime = cached
+        if c_mtime == mtime:
+            raw = all_goals
+        else:
+            raw = None
+    else:
+        raw = None
+
+    if raw is None:
+        raw = read_json_file(path, default=[])
+        if not isinstance(raw, list):
+            raw = []
+        _GOALS_CACHE[path_str] = (raw, mtime)
+
     out = []
     for g in raw:
         if not isinstance(g, dict):
@@ -163,6 +284,57 @@ def _load_agent_goals(name: str) -> list[dict]:
     # status bucket — the status sort preserves the desc-by-time order.
     out.sort(key=lambda g: g.get("created_at") or "", reverse=True)
     out.sort(key=lambda g: _GOAL_STATUS_ORDER.get(g.get("status") or "pending", 99))
+    return out
+
+
+def _load_agent_errors(name: str) -> list[dict]:
+    """Return server_errors.json entries associated with *name*.
+
+    Matches entries where the ``context`` field starts with ``<name>:``
+    (service-level errors logged by the internal_agent_chat daemon) or
+    where ``tab`` == ``name`` (direct tab rendering errors).  Returns
+    entries newest-first.
+
+    Uses mtime-based caching: the full error list is cached on
+    server_errors.json's mtime.  render() calls _load_agent_errors() once
+    for the tab label, then _render_health() calls it again — without
+    caching that was two read_json_file calls per render.  With caching the
+    second call is a single dict.get() + one os.stat(), saving a disk read.
+    """
+    if not name:
+        return []
+
+    path = _SERVER_ERRORS_FILE
+    path_str = str(path)
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = 0.0
+
+    cached = _ERRORS_CACHE.get(path_str)
+    if cached is not None:
+        all_errors, c_mtime = cached
+        if c_mtime == mtime:
+            raw = all_errors
+        else:
+            raw = None
+    else:
+        raw = None
+
+    if raw is None:
+        raw = read_json_file(path, default=[])
+        if not isinstance(raw, list):
+            raw = []
+        _ERRORS_CACHE[path_str] = (raw, mtime)
+
+    prefix = f"{name}:"
+    out = [
+        e
+        for e in raw
+        if isinstance(e, dict)
+        and (str(e.get("context", "")).startswith(prefix) or e.get("tab") == name)
+    ]
+    out.sort(key=lambda e: e.get("timestamp") or "", reverse=True)
     return out
 
 
@@ -263,6 +435,16 @@ def _render_chat(history: list[dict], source_path: str | None = None) -> None:
                 st.caption(ts)
             content = msg.get("content") or ""
             st.markdown(str(content) if content else "_(no content)_")
+            thinking = msg.get("thinking")
+            if thinking:
+                # One turn may emit several ThinkingBlocks; the daemon
+                # already merges them into a single string before
+                # persisting (see `_run_turn_for_group` /
+                # `_append_assistant_record` in internal_agent_chat.py),
+                # so this is always one collapsed row per assistant turn,
+                # not one per block.
+                with st.expander("Thinking..."):
+                    st.markdown(str(thinking))
 
 
 def _render_inbox(agent: dict) -> None:
@@ -518,6 +700,120 @@ def _handle_clear_flag(name: str, flag: str, label: str) -> None:
         st.warning(f"{name!r} not found in agents.json — has it just been removed?")
 
 
+def _render_health(agent: dict) -> None:
+    """Render the Health tab for a selected agent.
+
+    Shows per-agent errors from server_errors.json — including service-level
+    turn timeouts logged by the internal_agent_chat daemon — so the operator
+    can spot recurring issues at a glance without grepping log files.
+    """
+    name = agent.get("name") or ""
+    errors = _load_agent_errors(name)
+
+    now = datetime.now(timezone.utc)
+    recent = [
+        e
+        for e in errors
+        if e.get("timestamp")
+        and (
+            now - datetime.fromisoformat(e["timestamp"].replace("Z", "+00:00"))
+        ).total_seconds()
+        / 3600
+        < _HEALTH_RECENT_HOURS
+    ]
+
+    # ── Summary metrics ──────────────────────────────────────────────
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        total = len(errors)
+        st.metric("Total errors (all time)", total)
+    with c2:
+        recent_count = len(recent)
+        delta_color = "normal" if recent_count == 0 else "inverse"
+        st.metric(
+            f"Errors (last {_HEALTH_RECENT_HOURS}h)",
+            recent_count,
+            delta=("⚠ active" if recent_count >= _HEALTH_WARNING_COUNT else None),
+            delta_color=delta_color,
+        )
+    with c3:
+        if errors:
+            last_ts = errors[0].get("timestamp", "")
+            if last_ts:
+                try:
+                    last_dt = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+                    delta_secs = (now - last_dt).total_seconds()
+                    if delta_secs < 3600:
+                        ago = f"{int(delta_secs // 60)}m ago"
+                    elif delta_secs < 86400:
+                        ago = f"{int(delta_secs // 3600)}h ago"
+                    else:
+                        ago = f"{int(delta_secs // 86400)}d ago"
+                    st.metric("Last error", ago)
+                except Exception:
+                    st.metric("Last error", last_ts[:10])
+        else:
+            st.metric("Last error", "—")
+
+    # ── Health status banner ────────────────────────────────────────
+    if not errors:
+        st.success(f"No errors logged for **{name}**.")
+        return
+
+    if recent_count >= _HEALTH_WARNING_COUNT:
+        st.warning(
+            f"{recent_count} error(s) in the last {_HEALTH_RECENT_HOURS}h — "
+            "consider restarting the agent or checking the service log."
+        )
+    elif recent_count > 0:
+        st.info(
+            f"{recent_count} error(s) in the last {_HEALTH_RECENT_HOURS}h "
+            "(below warning threshold)."
+        )
+    else:
+        st.success(f"No recent errors for **{name}** (last {_HEALTH_RECENT_HOURS}h).")
+
+    # ── Error log table ─────────────────────────────────────────────
+    st.subheader("Error log")
+    st.caption(
+        f"Showing {len(errors)} entries from server_errors.json filtered for `{name}`. "
+        "Entries expire after the log reaches 20 items."
+    )
+
+    for err in errors:
+        ts = err.get("timestamp", "")
+        error_msg = err.get("error", "unknown")
+        error_type = err.get("error_type", "")
+        context = err.get("context", "")
+        source_type = err.get("source_type", "")
+
+        # Compute age
+        age_str = ""
+        if ts:
+            try:
+                err_dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                delta_secs = (now - err_dt).total_seconds()
+                if delta_secs < 3600:
+                    age_str = f"{int(delta_secs // 60)}m ago"
+                elif delta_secs < 86400:
+                    age_str = f"{int(delta_secs // 3600)}h ago"
+                else:
+                    age_str = f"{int(delta_secs // 86400)}d ago"
+            except Exception:
+                age_str = ts[:10]
+
+        is_recent = err in recent
+        icon = "🔴" if is_recent else "⚪"
+        label = f"{icon} `{ts[:16]}` ({age_str}) — **{error_msg}**" + (
+            f" [{source_type}]" if source_type else ""
+        )
+        with st.expander(label, expanded=is_recent):
+            if error_type:
+                st.caption(f"Type: `{error_type}`")
+            if context:
+                st.caption(f"Context: `{context}`")
+
+
 # ─── top-level render ────────────────────────────────────────────────────
 
 
@@ -554,9 +850,20 @@ def render() -> None:
 
     delegated_goals = _load_agent_goals(name)
     goal_label = f"🎯 Goals ({len(delegated_goals)})" if delegated_goals else "🎯 Goals"
-    chat_tab, inbox_tab, goals_tab, config_tab, actions_tab = st.tabs(
-        ["💬 Chat", "📥 Inbox", goal_label, "⚙️ Config", "🛠️ Actions"]
-    )
+    agent_errors = _load_agent_errors(name)
+    health_label = f"🏥 Health ({len(agent_errors)})" if agent_errors else "🏥 Health"
+
+    tab_labels = [
+        "💬 Chat",
+        "📥 Inbox",
+        goal_label,
+        "⚙️ Config",
+        "🛠️ Actions",
+        health_label,
+    ]
+
+    tabs = st.tabs(tab_labels)
+    chat_tab, inbox_tab, goals_tab, config_tab, actions_tab, health_tab = tabs
     with chat_tab:
         # Chat transcript polls on a 10s cadence via st.fragment, independent
         # of the global 60s portal tick.
@@ -569,3 +876,5 @@ def render() -> None:
         _render_config(agent)
     with actions_tab:
         _render_actions(agent)
+    with health_tab:
+        _render_health(agent)
