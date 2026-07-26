@@ -259,11 +259,17 @@ core.*
 
 # OS / Editor
 .DS_Store
-Thumbs.db
 *.swp
 *.swo
 *~
 .idea/
+
+# DB
+*.db
+*.sqlite3
+*.sqlite3-journal
+*.mv
+*.mv2
 
 # Agent
 /memory/
