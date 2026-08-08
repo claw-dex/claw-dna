@@ -3,7 +3,7 @@
 #  Seed install — run during Docker image build, and re-run inside a live
 #  container by the claw-update-dna skill whenever this file changes.
 #  Every step must therefore be idempotent.
-#  Installs: agent-browser CLI, long-term memory deps (LanceDB + fastembed)
+#  Installs: agent-browser CLI, GitHub CLI, long-term memory deps (LanceDB + fastembed)
 # ══════════════════════════════════════════════════════════════
 set -e
 # Non-fatal installer errors are suppressed; results reported at the end
@@ -33,9 +33,8 @@ su -c "agent-browser install" agent || ok_agent_browser=false
 
 # ── GitHub CLI ────────────────────────────────────────────────
 echo "==> Installing GitHub CLI"
-chmod +x "$SCRIPT_DIR/install_gh.sh"
 ok_gh=true
-"$SCRIPT_DIR/install_gh.sh" || ok_gh=false
+bash "$SCRIPT_DIR/install_gh.sh" || ok_gh=false
 
 # ── Long-term memory (LanceDB + fastembed) ────────────────────
 # Syncs the Python deps and pre-downloads the ~130 MB bge-small ONNX weights,
