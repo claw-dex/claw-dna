@@ -1,6 +1,6 @@
 #!/bin/bash
 # ── GitHub CLI (gh) — Debian/Ubuntu install ──────────────────
-set -e
+set -eo pipefail
 
 echo "Starting install GitHub CLI"
 curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
