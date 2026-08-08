@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-memory_ingest.py — Ingest agent memory into long-term semantic store (memvid SDK).
+memory_ingest.py — Ingest agent memory into long-term semantic store (LanceDB).
 
 Parses journal.json, journal_archive.json, and messages/inbox_history.json
 (sibling of the memory dir), chunks them into semantically meaningful pieces,
-and ingests into a .mv2 index via the `memvid_sdk` Python package (hybrid
-lexical + semantic search with bge-small embeddings). cycles.json is no longer
+and ingests them into a LanceDB table via scripts/memory_store.py (hybrid
+BM25 + semantic search over bge-small embeddings). cycles.json is no longer
 ingested — cycle metadata is redundant with journal entries.
 
 Usage:
@@ -13,16 +13,16 @@ Usage:
     uv run python scripts/memory_ingest.py --build --dry-run                # Preview chunks
     uv run python scripts/memory_ingest.py --append-json CYCLE_JSON         # Append one JSON entry
     uv run python scripts/memory_ingest.py --append-text "Some note to remember"  # Ingest raw text
-    uv run python scripts/memory_ingest.py --append-file /path/to/doc.pdf   # Ingest a file
+    uv run python scripts/memory_ingest.py --append-file /path/to/notes.md  # Ingest a text file
 
 Modes:
-    --build           Parse all memory files and rebuild the .mv2 index from scratch
+    --build           Parse all memory files and rebuild the index from scratch
     --append-json JSON   Append a single entry — journal, cycle, or goal (JSON string or @file.json path)
     --append-text TEXT   Ingest raw text directly (with optional --title and --tags)
-    --append-file PATH   Ingest a file directly (PDF, DOCX, TXT, MD, etc.)
+    --append-file PATH   Ingest a text file directly (.txt, .md, .json, …)
 
 Optional:
-    --mv2 PATH        Path to the .mv2 file (default: /agent/memory/long_term_memory.mv2)
+    --db PATH         Path to the LanceDB store (default: /agent/memory/long_term_memory.lancedb)
     --memory PATH     Path to the memory directory (default: /agent/memory)
     --title TEXT      Title for --append-text / --append-file entries (default: auto-generated)
     --tags TAG…       Tags for --append-text / --append-file (space-separated, each in quotes)
@@ -30,104 +30,54 @@ Optional:
     --json            Output results as JSON
     --quiet           Suppress progress output
 
+Ingest is idempotent: each chunk gets a deterministic id derived from its
+source and content, so re-appending an unchanged record replaces it instead of
+creating a duplicate.
+
 Exit codes: 0 = success, 1 = error
 """
 
 import itertools
 import json
 import os
+import shutil
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-try:
-    import memvid_sdk
-except ImportError:
-    memvid_sdk = None
+from scripts import memory_store as store
+from scripts.memory_store import BUILD_BATCH_SIZE, DEFAULT_DB, MEMORY
 
-
-def _require_sdk():
-    """Fail fast with a clear error when memvid_sdk is unavailable."""
-    if memvid_sdk is None:
-        print(
-            "ERROR: memvid_sdk not installed (not available on this runtime). "
-            "Install from https://github.com/0xGosu/memvid-sdk",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-
-MEMORY = Path("/agent/memory")
-DEFAULT_MV2 = MEMORY / "long_term_memory.mv2"
-# Local embedding model — uses fastembed (compiled into the Rust SDK binary).
-# Requires the SDK to be built with `-F fastembed` (see seed/install_memvid.sh).
-# Set to None to disable embedding and use lex-only indexing.
-ENABLE_EMBEDDING = True
-EMBED_MODEL = "bge-small"  # BAAI/bge-small-en-v1.5 via fastembed — ~3x faster than bge-base with modest recall trade-off
-
-# Rebuild commits in batches of this size. Each put_many call commits at the
-# FFI boundary, so smaller batches mean more frequent flushes and bounded
-# in-flight memory; larger batches mean fewer FFI crossings.
-BUILD_BATCH_SIZE = 50
-
-# Enable vector compression only once the .mv2 grows past this size.
-# Below the threshold, uncompressed vectors (~270 KB/doc) give the best
-# search quality; above it, compression (~20 KB/doc, 16x savings) keeps
-# the file from growing unbounded.
-COMPRESSION_THRESHOLD_MB = 25
-
-
-def _should_compress(mv2_path) -> bool:
-    """Return True when the .mv2 is large enough to warrant compression."""
-    try:
-        p = Path(mv2_path)
-        return p.exists() and p.stat().st_size > COMPRESSION_THRESHOLD_MB * 1024 * 1024
-    except OSError:
-        return False
-
-
-# Supported extensions for file ingestion (used by --append-file)
+# Supported extensions for file ingestion (used by --append-file).
+# Text-like formats only: extraction of PDF/DOCX/XLSX/PPTX and media is not
+# available in-process. Convert those to text first, then --append-file the
+# result (or pipe it through --append-text).
 INGESTIBLE_EXTENSIONS = frozenset(
     {
-        ".pdf",
-        ".docx",
-        ".xlsx",
-        ".pptx",
         ".txt",
         ".md",
+        ".markdown",
+        ".rst",
         ".html",
-        ".jpg",
-        ".jpeg",
-        ".mp3",
-        ".mp4",
+        ".htm",
+        ".json",
+        ".jsonl",
+        ".csv",
+        ".tsv",
+        ".log",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".ini",
+        ".cfg",
+        ".py",
+        ".sh",
+        ".sql",
     }
 )
 
-
-def _open_or_create(mv2: Path):
-    """Open an existing .mv2 for write, or create a new one if missing."""
-    _require_sdk()
-    if mv2.exists():
-        return memvid_sdk.use(
-            "basic",
-            str(mv2),
-            mode="open",
-            enable_vec=True,
-            enable_lex=True,
-        )
-    mv2.parent.mkdir(parents=True, exist_ok=True)
-    return memvid_sdk.create(str(mv2), enable_vec=True, enable_lex=True)
-
-
-def _put_kwargs(compress: bool) -> dict:
-    """Shared kwargs for every `Memvid.put` call."""
-    kwargs: dict = {
-        "enable_embedding": ENABLE_EMBEDDING,
-        "vector_compression": compress,
-    }
-    if EMBED_MODEL is not None:
-        kwargs["embedding_model"] = EMBED_MODEL
-    return kwargs
+# Refuse to slurp an arbitrarily large file into one chunk.
+MAX_FILE_BYTES = 5 * 1024 * 1024
 
 
 def load_json(path: Path):
@@ -148,7 +98,7 @@ def parse_args(argv):
         "append_json": None,
         "append_text": None,
         "append_file": None,
-        "mv2": str(DEFAULT_MV2),
+        "db": str(DEFAULT_DB),
         "memory": str(MEMORY),
         "title": None,
         "tags": [],
@@ -166,7 +116,7 @@ def parse_args(argv):
             "--append-json",
             "--append-text",
             "--append-file",
-            "--mv2",
+            "--db",
             "--memory",
             "--title",
         ) and i + 1 >= len(args):
@@ -183,9 +133,9 @@ def parse_args(argv):
         elif a == "--append-file":
             i += 1
             result["append_file"] = args[i]
-        elif a == "--mv2":
+        elif a == "--db":
             i += 1
-            result["mv2"] = args[i]
+            result["db"] = args[i]
         elif a == "--memory":
             i += 1
             result["memory"] = args[i]
@@ -397,7 +347,7 @@ def transform_inbox_entry(entry: dict) -> dict | None:
     """Convert a single inbox message dict into an ingest chunk.
 
     Shared by rebuild (transform_inbox) and live ingestion
-    (cycle_close._inbox_chunks_for_memvid → append_many) so both paths
+    (cycle_close._inbox_chunks_for_ltm → append_many) so both paths
     produce identical records. The timestamp always comes from the entry —
     never datetime.now() — so rebuilds preserve original message times.
 
@@ -535,22 +485,34 @@ def gather_all_chunks(memory_dir: Path) -> list:
 
 
 # ---------------------------------------------------------------------------
-# Build — ingest chunks via memvid SDK
+# Build — ingest chunks into LanceDB
 # ---------------------------------------------------------------------------
 
 
-def _cleanup_staging(staging: Path, err: BaseException, quiet: bool) -> None:
-    """Remove the partial staging .mv2 after a failed/aborted build.
+def _cleanup_staging(
+    staging: Path, err: BaseException, quiet: bool, db_file: Path | None = None
+) -> None:
+    """Remove the partial staging database after a failed/aborted build.
 
-    The canonical .mv2 was never opened by the rebuild (we built into the
-    staging file), so there is nothing to restore — only the partial staging
-    file needs to be cleaned up. Best-effort: cleanup failures are reported
-    to stderr but never mask the original exception (the caller re-raises).
+    The rebuild writes only into the staging directory, so in the normal
+    failure case the canonical store is untouched and only the partial staging
+    directory needs removing.
+
+    The exception is an interruption *during* the two-rename swap: the
+    canonical name can be gone while its contents sit under ``.backup``. Blindly
+    deleting staging then would leave the backup as the only copy — and the next
+    rebuild starts by deleting the backup. So restore it first.
+
+    Best-effort: cleanup failures are reported to stderr but never mask the
+    original exception (the caller re-raises).
     """
     err_label = f"{type(err).__name__}: {err}"
+    if db_file is not None:
+        _restore_backup_if_orphaned(db_file, quiet)
+    store.clear_compact_stamp(staging)
     try:
         if staging.exists():
-            staging.unlink()
+            shutil.rmtree(staging, ignore_errors=True)
         if not quiet:
             print(
                 f"[INGEST] Rebuild failed ({err_label}) — removed partial "
@@ -565,18 +527,38 @@ def _cleanup_staging(staging: Path, err: BaseException, quiet: bool) -> None:
         )
 
 
-def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
-    """Full rebuild: stream chunks from memory files and ingest into .mv2.
+def _restore_backup_if_orphaned(db_file: Path, quiet: bool) -> None:
+    """Put the previous store back if a swap left the canonical name missing."""
+    _staging, backup = store.staging_paths(db_file)
+    if db_file.exists() or not backup.exists():
+        return
+    try:
+        os.replace(backup, db_file)
+        if not quiet:
+            print(
+                f"[INGEST] Swap was interrupted — restored {backup.name} → "
+                f"{db_file.name}",
+                file=sys.stderr,
+            )
+    except OSError as e:
+        print(
+            f"[INGEST] CRITICAL: swap was interrupted and restoring "
+            f"{backup.name} failed ({e}). The previous index is intact at "
+            f"{backup}; move it back manually.",
+            file=sys.stderr,
+        )
+
+
+def build(memory_dir, db_path, dry_run=False, quiet=False, json_mode=False):
+    """Full rebuild: stream chunks from memory files and ingest into LanceDB.
 
     Uses :func:`iter_all_chunks` as a generator so peak memory is bounded by
-    one source JSON file + one BUILD_BATCH_SIZE batch of transformed chunks,
-    rather than materializing every source list + every transformed chunk +
-    the full request list simultaneously.
+    one source JSON file + one BUILD_BATCH_SIZE batch of transformed chunks
+    plus their embeddings, rather than materializing every source list + every
+    transformed chunk + the full row list simultaneously.
     """
-    if not dry_run:
-        _require_sdk()
     mem_dir = Path(memory_dir)
-    mv2_file = Path(mv2_path)
+    db_file = Path(db_path)
 
     if dry_run:
         # Stream-print as the generator yields. No full chunk list is ever
@@ -617,7 +599,7 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
         return
 
     # Real build. Peek the first chunk to detect "no chunks to ingest" before
-    # we touch the staging file — keeping the original error path intact.
+    # we touch the staging directory — keeping the original error path intact.
     chunk_iter = iter_all_chunks(mem_dir)
     try:
         first = next(chunk_iter)
@@ -626,102 +608,97 @@ def build(memory_dir, mv2_path, dry_run=False, quiet=False, json_mode=False):
         sys.exit(1)
     chunk_iter = itertools.chain([first], chunk_iter)
 
-    # Build into a staging file so the canonical .mv2 stays openable by other
-    # processes (live inbox ingest, recall, append-*) for the full duration
-    # of the rebuild. Only after the new index is sealed do we swap names.
-    staging = mv2_file.with_suffix(mv2_file.suffix + ".rebuild")
-    backup = mv2_file.with_suffix(mv2_file.suffix + ".backup")
+    # Build into a staging directory so the canonical store stays openable by
+    # other processes (live inbox ingest, recall, append-*) for the full
+    # duration of the rebuild. Only after the new index is finalized do we swap.
+    staging, backup = store.staging_paths(db_file)
 
-    mv2_file.parent.mkdir(parents=True, exist_ok=True)
+    db_file.parent.mkdir(parents=True, exist_ok=True)
 
-    # Stale staging file from a previously crashed/killed rebuild — drop it.
-    staging.unlink(missing_ok=True)
+    # Stale staging dir from a previously crashed/killed rebuild — drop it.
+    if staging.exists():
+        shutil.rmtree(staging, ignore_errors=True)
+    store.clear_compact_stamp(staging)
 
     ok = 0
     try:
-        mem = memvid_sdk.create(str(staging), enable_vec=True, enable_lex=True)
+        tbl = store.create_table(staging)
         if not quiet:
-            print(f"[INGEST] Building into staging file {staging}")
+            print(f"[INGEST] Building into staging store {staging}")
 
-        opts: dict = {
-            "enable_embedding": ENABLE_EMBEDDING,
-            # Rebuilds always compress: staging starts at 0 bytes, so a
-            # size-threshold check would never trigger here even when the
-            # canonical index is large. Use the SDK default zstd level (3).
-            "compression_level": 3,
-        }
-        if EMBED_MODEL is not None:
-            opts["embedding_model"] = EMBED_MODEL
-
-        # Stream the generator in BUILD_BATCH_SIZE slices. Only one batch
-        # of request dicts exists at a time; it's dropped before the next
-        # batch is pulled from the generator. put_many is all-or-nothing
-        # per call at the FFI boundary: it returns a frame_id per request
-        # or raises. Let failures propagate — swapping an empty/partial
-        # staging index over a healthy canonical would be worse than
-        # aborting the rebuild and leaving canonical untouched.
+        # Stream the generator in BUILD_BATCH_SIZE slices. Only one batch of
+        # rows (and their embeddings) exists at a time. The staging table
+        # starts empty and `seen` tracks ids across batches, so add_chunks can
+        # skip its dedup scan and the rebuild stays linear.
+        seen: set = set()
         batch_n = 0
         while True:
             batch_chunks = list(itertools.islice(chunk_iter, BUILD_BATCH_SIZE))
             if not batch_chunks:
                 break
             batch_n += 1
-            requests = [
-                {
-                    "title": ch["title"],
-                    "label": ch["label"],
-                    "text": ch["text"],
-                    "tags": list(ch.get("tags") or []),
-                    "metadata": dict(ch.get("metadata") or {}),
-                }
-                for ch in batch_chunks
-            ]
-            # Drop the chunk-dict references now that we've copied them into
-            # request dicts — the SDK call won't need them again.
+            fresh = []
+            for ch in batch_chunks:
+                cid = store.row_id(ch)
+                if cid in seen:
+                    continue
+                seen.add(cid)
+                fresh.append(ch)
             batch_chunks = None
-            frame_ids = mem.put_many(requests, opts=opts)
-            ok += len(frame_ids)
-            requests = None
+            if not fresh:
+                continue
+            added, failed = store.add_chunks(tbl, fresh, quiet=quiet, dedup=False)
+            if failed:
+                raise RuntimeError(
+                    f"batch {batch_n}: {failed} chunk(s) failed to write"
+                )
+            ok += added
+            fresh = None
             if not quiet and not json_mode:
                 print(
                     f"[INGEST] Committed batch {batch_n} "
                     f"(running total: {ok} chunks)"
                 )
 
-        # Terminal finalize before swap. seal() forces a final commit +
-        # index flush so the staging .mv2 is fully searchable on close.
-        # If seal raises, the staging index isn't trustworthy — propagate
-        # so cleanup runs and the canonical stays untouched.
-        mem.seal()
+        # Terminal finalize before swap: build the search indexes and compact
+        # the many small write batches into fewer fragments. If this raises,
+        # the staging index isn't trustworthy — propagate so cleanup runs and
+        # the canonical store stays untouched.
+        store.ensure_indexes(tbl, quiet=quiet)
+        # Nothing else can hold this staging store, and it has no history worth
+        # keeping, so prune every superseded version rather than the default
+        # 15-minute window. This is what turns 40 append batches into a handful
+        # of files.
+        store.compact(tbl, retention=timedelta(0), quiet=quiet)
         if not quiet:
-            print(f"[INGEST] Committed {ok} frames to staging index")
+            print(f"[INGEST] Wrote {ok} rows to staging index")
 
-        # Atomic swap: rename the canonical .mv2 to .backup (if it exists),
-        # then rename the freshly-built staging file into its place. Both
+        # Atomic swap: rename the canonical store to .backup (if it exists),
+        # then rename the freshly-built staging directory into its place. Both
         # renames are atomic on POSIX; the canonical name is briefly absent
         # between the two calls but never half-written.
-        if mv2_file.exists():
-            os.replace(mv2_file, backup)
-            if not quiet:
-                print(f"[INGEST] Renamed {mv2_file.name} → {backup.name}")
-        os.replace(staging, mv2_file)
+        store.promote_staging(db_file)
+        # The promoted store was just fully compacted, so start its clock now
+        # rather than letting the next write compact a store that has nothing
+        # to reclaim.
+        store.mark_compacted(db_file)
         if not quiet:
-            print(f"[INGEST] Promoted staging → {mv2_file.name}")
+            print(f"[INGEST] Promoted staging → {db_file.name}")
     except BaseException as e:
         # Catch BaseException so KeyboardInterrupt / SystemExit also trigger
-        # cleanup before propagating. The canonical .mv2 was never opened
-        # by the rebuild, so we only need to drop the partial staging file.
-        _cleanup_staging(staging, e, quiet)
+        # cleanup before propagating. The canonical store was never opened
+        # by the rebuild, so we only need to drop the partial staging dir.
+        _cleanup_staging(staging, e, quiet, db_file)
         raise
 
-    size_kb = mv2_file.stat().st_size / 1024 if mv2_file.exists() else 0
+    size_kb = store.dir_size(db_file) / 1024
 
     if json_mode:
         print(
             json.dumps(
                 {
                     "mode": "build",
-                    "mv2": str(mv2_file),
+                    "db": str(db_file),
                     "total_chunks": ok,
                     "ingested": ok,
                     "failed": 0,
@@ -765,17 +742,69 @@ def _detect_and_transform(entry: dict) -> dict | None:
     return transform_journal_entry(entry)
 
 
-def append_json(mv2_path, entry_source, quiet=False, json_mode=False):
-    """Append a single JSON entry to the existing .mv2 index (journal, cycle, or goal).
-
-    No explicit commit is issued — the SDK auto-checkpoints internally
-    (every ~1000 puts or when the WAL reaches 75% capacity), so manual
-    commits would only cause unnecessary segment-catalog rewrites.
-    """
-    mv2 = Path(mv2_path)
-    if not mv2.exists():
-        print(f"ERROR: {mv2} not found. Run --build first.", file=sys.stderr)
+def _open_for_append(db_path: Path):
+    """Open the store for writing, or exit 1 telling the user to build first."""
+    tbl = store.open_table(db_path)
+    if tbl is None:
+        print(f"ERROR: {db_path} not found. Run --build first.", file=sys.stderr)
         sys.exit(1)
+    return tbl
+
+
+def _write_one(tbl, chunk: dict, what: str) -> None:
+    """Write a single chunk, exiting 1 with a uniform message on failure."""
+    ok, fail = store.add_chunks(tbl, [chunk], quiet=False)
+    if ok != 1 or fail:
+        print(f"ERROR: {what} write failed", file=sys.stderr)
+        sys.exit(1)
+    store.maintain(tbl)
+
+
+def _write_split(tbl, chunk: dict, what: str) -> int:
+    """Write a chunk, splitting text too long for the embedding model.
+
+    The embedder truncates at 512 tokens, so a long document stored as one row
+    would only be semantically searchable by its opening paragraphs. Each piece
+    becomes its own row, tagged with its position so the pieces stay traceable
+    back to the source. Returns the number of rows written.
+    """
+    pieces = store.split_text(chunk["text"])
+    if len(pieces) <= 1:
+        _write_one(tbl, chunk, what)
+        return 1
+
+    total = len(pieces)
+    rows = []
+    for i, piece in enumerate(pieces, 1):
+        part = dict(chunk)
+        part["text"] = piece
+        part["title"] = f"{chunk['title']} [{i}/{total}]"
+        part["tags"] = list(chunk.get("tags") or []) + [f"part:{i}/{total}"]
+        meta = dict(chunk.get("metadata") or {})
+        meta["part"] = f"{i}/{total}"
+        part["metadata"] = meta
+        rows.append(part)
+
+    ok, fail = store.add_chunks(tbl, rows, quiet=False)
+    if ok != total or fail:
+        print(
+            f"ERROR: {what} write failed ({ok}/{total} pieces written)", file=sys.stderr
+        )
+        sys.exit(1)
+    store.maintain(tbl)
+    return ok
+
+
+def append_json(db_path, entry_source, quiet=False, json_mode=False):
+    """Append a single JSON entry to the existing store (journal, cycle, or goal).
+
+    Writes are idempotent: an unchanged entry replaces its previous row rather
+    than adding a duplicate.
+    """
+    db_file = Path(db_path)
+    # Open first: a missing store is the actionable root cause and should be
+    # reported ahead of any complaint about the entry itself.
+    tbl = _open_for_append(db_file)
 
     # Parse the entry from JSON string or @file
     if entry_source.startswith("@"):
@@ -800,19 +829,7 @@ def append_json(mv2_path, entry_source, quiet=False, json_mode=False):
         print("ERROR: Entry produced no ingestible chunk.", file=sys.stderr)
         sys.exit(1)
 
-    mem = _open_or_create(mv2)
-    try:
-        mem.put(
-            title=ch["title"],
-            label=ch["label"],
-            text=ch["text"],
-            tags=ch["tags"],
-            metadata=dict(ch.get("metadata") or {}),
-            **_put_kwargs(_should_compress(mv2)),
-        )
-    except Exception as e:
-        print(f"ERROR: memvid put failed: {e}", file=sys.stderr)
-        sys.exit(1)
+    _write_one(tbl, ch, "append")
 
     cycle = entry.get("cycle_number", "?")
     if json_mode:
@@ -822,73 +839,53 @@ def append_json(mv2_path, entry_source, quiet=False, json_mode=False):
                     "mode": "append",
                     "cycle": cycle,
                     "title": ch["title"],
-                    "mv2": str(mv2),
+                    "db": str(db_file),
                 },
                 indent=2,
             )
         )
     elif not quiet:
-        print(f"[INGEST] Appended cycle {cycle} to {mv2.name}")
+        print(f"[INGEST] Appended cycle {cycle} to {db_file.name}")
 
 
 # ---------------------------------------------------------------------------
-# Append Many — batched ingest with a single open + many puts + ONE commit
+# Append Many — batched ingest: one open, one embed pass, one write
 # ---------------------------------------------------------------------------
 
 
-def append_many(mv2_path, chunks: list, *, quiet: bool = True) -> tuple:
-    """Ingest multiple chunks via a single ``put_many`` FFI call.
+def store_ready(db_path) -> bool:
+    """True when the store exists and holds a usable memories table.
 
-    Routes the entire batch through the SDK's Rust-side bulk path
-    (~100x faster than a Python ``for`` + ``put`` loop) which commits
-    once at the end. The SDK's auto-checkpoint (every ~1000 puts or 75%
-    WAL full) handles durability between calls; no manual ``commit()``
-    is issued here.
+    Directory existence alone isn't enough: an empty or half-removed
+    `.lancedb/` would otherwise look built forever and every append would
+    silently no-op.
+    """
+    return store.open_table(db_path) is not None
 
-    The caller is responsible for ensuring the `.mv2` exists — a missing
-    file is treated as a no-op so we don't trigger a hidden full rebuild
-    inside an unrelated code path.
+
+def append_many(db_path, chunks: list, *, quiet: bool = True) -> tuple:
+    """Ingest multiple chunks in a single batched write.
+
+    Embeds the whole batch in one fastembed call and writes it in one
+    transaction, which is far cheaper than a per-chunk loop.
+
+    The caller is responsible for ensuring the store exists — a missing store
+    is treated as a no-op so we don't trigger a hidden full rebuild inside an
+    unrelated code path.
 
     Returns ``(ok, fail)`` counts.
     """
-    mv2 = Path(mv2_path)
-    # Short-circuit before _require_sdk so callers (and tests) can invoke
-    # this with empty input on runtimes without memvid_sdk installed —
-    # there's nothing to do and no reason to fail.
-    if not mv2.exists() or not chunks:
+    if not chunks:
         return (0, 0)
-    _require_sdk()
-    mem = _open_or_create(mv2)
-    requests = [
-        {
-            "title": ch["title"],
-            "label": ch["label"],
-            "text": ch["text"],
-            "tags": list(ch.get("tags") or []),
-            "metadata": dict(ch.get("metadata") or {}),
-        }
-        for ch in chunks
-    ]
-    opts: dict = {
-        "enable_embedding": ENABLE_EMBEDDING,
-        # Mirror the per-chunk vector_compression flag the loop used:
-        # 3 = SDK default zstd level when compressed, 0 = uncompressed.
-        "compression_level": 3 if _should_compress(mv2) else 0,
-    }
-    if EMBED_MODEL is not None:
-        opts["embedding_model"] = EMBED_MODEL
-    try:
-        # put_many is all-or-nothing at the FFI boundary: returns a
-        # frame_id per request, or raises. Partial success surfaces only
-        # via the except branch.
-        frame_ids = mem.put_many(requests, opts=opts)
-    except Exception as e:
-        if not quiet:
-            print(f"WARN: put_many failed: {e}", file=sys.stderr)
-        return (0, len(requests))
-    ok = len(frame_ids)
-    fail = len(requests) - ok
-    return (ok, fail)
+    tbl = store.open_table(db_path)
+    if tbl is None:
+        return (0, 0)
+    result = store.add_chunks(tbl, chunks, quiet=quiet)
+    # Amortised upkeep: this is the batched end-of-cycle path, so it's the
+    # natural place to absorb the unindexed tail and reclaim the disk left
+    # behind by previous cycles' writes.
+    store.maintain(tbl, quiet=quiet)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -896,38 +893,23 @@ def append_many(mv2_path, chunks: list, *, quiet: bool = True) -> tuple:
 # ---------------------------------------------------------------------------
 
 
-def append_inbox_message(mv2_path, message: dict, quiet: bool = True) -> bool:
-    """Ingest a single inbox message into the .mv2 using the shared chunk
+def append_inbox_message(db_path, message: dict, quiet: bool = True) -> bool:
+    """Ingest a single inbox message into the store using the shared chunk
     schema. The message's own timestamp field is used (never datetime.now()),
     so live ingestion and rebuild produce identical records.
 
-    The SDK auto-checkpoints internally; no explicit commit is issued.
-
     Returns True on success, False if the message was skipped (too short /
-    not a dict) or the put failed.
+    not a dict), the store is missing, or the write failed.
     """
-    _require_sdk()
-    mv2 = Path(mv2_path)
-    if not mv2.exists():
-        return False
     chunk = transform_inbox_entry(message)
     if chunk is None:
         return False
-    mem = _open_or_create(mv2)
-    try:
-        mem.put(
-            title=chunk["title"],
-            label=chunk["label"],
-            text=chunk["text"],
-            tags=chunk["tags"],
-            metadata=chunk["metadata"],
-            **_put_kwargs(_should_compress(mv2)),
-        )
-        return True
-    except Exception as e:
-        if not quiet:
-            print(f"WARN: inbox put failed: {e}", file=sys.stderr)
+    tbl = store.open_table(db_path)
+    if tbl is None:
         return False
+    ok, _fail = store.add_chunks(tbl, [chunk], quiet=quiet)
+    store.maintain(tbl, quiet=quiet)
+    return ok == 1
 
 
 # ---------------------------------------------------------------------------
@@ -935,15 +917,10 @@ def append_inbox_message(mv2_path, message: dict, quiet: bool = True) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def append_text(mv2_path, text, title=None, tags=None, quiet=False, json_mode=False):
-    """Ingest raw text directly into the .mv2 index.
-
-    The SDK auto-checkpoints internally; no explicit commit is issued.
-    """
-    mv2 = Path(mv2_path)
-    if not mv2.exists():
-        print(f"ERROR: {mv2} not found. Run --build first.", file=sys.stderr)
-        sys.exit(1)
+def append_text(db_path, text, title=None, tags=None, quiet=False, json_mode=False):
+    """Ingest raw text directly into the store."""
+    db_file = Path(db_path)
+    tbl = _open_for_append(db_file)
 
     if not text or len(text.strip()) < 5:
         print("ERROR: Text is too short (min 5 characters).", file=sys.stderr)
@@ -957,19 +934,17 @@ def append_text(mv2_path, text, title=None, tags=None, quiet=False, json_mode=Fa
         "date": datetime.now(timezone.utc).isoformat(),
     }
 
-    mem = _open_or_create(mv2)
-    try:
-        mem.put(
-            title=title,
-            label="text",
-            text=text,
-            tags=all_tags,
-            metadata=metadata,
-            **_put_kwargs(_should_compress(mv2)),
-        )
-    except Exception as e:
-        print(f"ERROR: memvid put failed: {e}", file=sys.stderr)
-        sys.exit(1)
+    parts = _write_split(
+        tbl,
+        {
+            "title": title,
+            "label": "text",
+            "text": text,
+            "tags": all_tags,
+            "metadata": metadata,
+        },
+        "append-text",
+    )
 
     if json_mode:
         print(
@@ -978,45 +953,81 @@ def append_text(mv2_path, text, title=None, tags=None, quiet=False, json_mode=Fa
                     "mode": "append-text",
                     "title": title,
                     "text_len": len(text),
+                    "parts": parts,
                     "tags": all_tags,
-                    "mv2": str(mv2),
+                    "db": str(db_file),
                 },
                 indent=2,
             )
         )
     elif not quiet:
-        print(f"[INGEST] Appended text ({len(text)} chars) to {mv2.name}")
+        suffix = f" as {parts} pieces" if parts > 1 else ""
+        print(f"[INGEST] Appended text ({len(text)} chars){suffix} to {db_file.name}")
 
 
 # ---------------------------------------------------------------------------
-# Append File — ingest a file directly
+# Append File — ingest a text file directly
 # ---------------------------------------------------------------------------
 
 
-def append_file(
-    mv2_path, filepath, title=None, tags=None, quiet=False, json_mode=False
-):
-    """Ingest a file directly into the .mv2 index.
+def read_text_file(fpath: Path) -> str:
+    """Read a text file for ingestion, or exit 1 with a clear reason.
 
-    The SDK auto-checkpoints internally; no explicit commit is issued.
+    Binary formats (PDF, DOCX, XLSX, PPTX, images, audio, video) are not
+    supported: extracting them would need a document-conversion dependency the
+    agent does not carry. Convert to text first, then ingest the result.
     """
-    mv2 = Path(mv2_path)
-    if not mv2.exists():
-        print(f"ERROR: {mv2} not found. Run --build first.", file=sys.stderr)
+    ext = fpath.suffix.lower()
+    if ext not in INGESTIBLE_EXTENSIONS:
+        print(f"ERROR: Unsupported file type: {ext or '(none)'}", file=sys.stderr)
+        print(
+            f"  Supported: {', '.join(sorted(INGESTIBLE_EXTENSIONS))}",
+            file=sys.stderr,
+        )
+        print(
+            "  For PDF/DOCX/XLSX/PPTX or media, convert to text first "
+            "and ingest the result.",
+            file=sys.stderr,
+        )
         sys.exit(1)
+
+    try:
+        size = fpath.stat().st_size
+    except OSError as e:
+        print(f"ERROR: Cannot stat {fpath}: {e}", file=sys.stderr)
+        sys.exit(1)
+    if size > MAX_FILE_BYTES:
+        print(
+            f"ERROR: File too large ({size / 1024 / 1024:.1f} MB, "
+            f"limit {MAX_FILE_BYTES // 1024 // 1024} MB): {fpath}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        text = fpath.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        print(f"ERROR: Cannot read {fpath}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if len(text.strip()) < 5:
+        print(f"ERROR: {fpath.name} has no ingestible text.", file=sys.stderr)
+        sys.exit(1)
+    return text
+
+
+def append_file(db_path, filepath, title=None, tags=None, quiet=False, json_mode=False):
+    """Ingest a text file directly into the store."""
+    db_file = Path(db_path)
+    tbl = _open_for_append(db_file)
 
     fpath = Path(filepath)
     if not fpath.exists():
         print(f"ERROR: File not found: {fpath}", file=sys.stderr)
         sys.exit(1)
 
+    text = read_text_file(fpath)
     ext = fpath.suffix.lower()
-    if ext not in INGESTIBLE_EXTENSIONS:
-        print(f"ERROR: Unsupported file type: {ext}", file=sys.stderr)
-        print(
-            f"  Supported: {', '.join(sorted(INGESTIBLE_EXTENSIONS))}", file=sys.stderr
-        )
-        sys.exit(1)
 
     title = title or fpath.name
     tags = tags or []
@@ -1027,18 +1038,17 @@ def append_file(
         "date": datetime.now(timezone.utc).isoformat(),
     }
 
-    mem = _open_or_create(mv2)
-    try:
-        mem.put(
-            title=title,
-            file=str(fpath),
-            tags=all_tags,
-            metadata=metadata,
-            **_put_kwargs(_should_compress(mv2)),
-        )
-    except Exception as e:
-        print(f"ERROR: memvid put failed: {e}", file=sys.stderr)
-        sys.exit(1)
+    parts = _write_split(
+        tbl,
+        {
+            "title": title,
+            "label": "file",
+            "text": text,
+            "tags": all_tags,
+            "metadata": metadata,
+        },
+        "append-file",
+    )
 
     try:
         size_kb = fpath.stat().st_size / 1024
@@ -1053,14 +1063,19 @@ def append_file(
                     "filepath": str(fpath),
                     "title": title,
                     "size_kb": round(size_kb, 1),
+                    "parts": parts,
                     "tags": all_tags,
-                    "mv2": str(mv2),
+                    "db": str(db_file),
                 },
                 indent=2,
             )
         )
     elif not quiet:
-        print(f"[INGEST] Ingested {fpath.name} ({size_kb:.1f} KB) into {mv2.name}")
+        suffix = f" as {parts} pieces" if parts > 1 else ""
+        print(
+            f"[INGEST] Ingested {fpath.name} ({size_kb:.1f} KB){suffix} "
+            f"into {db_file.name}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1078,21 +1093,21 @@ def main():
     if opts["build"]:
         build(
             opts["memory"],
-            opts["mv2"],
+            opts["db"],
             dry_run=opts["dry_run"],
             quiet=opts["quiet"],
             json_mode=opts["json_mode"],
         )
     elif opts["append_json"]:
         append_json(
-            opts["mv2"],
+            opts["db"],
             opts["append_json"],
             quiet=opts["quiet"],
             json_mode=opts["json_mode"],
         )
     elif opts["append_text"]:
         append_text(
-            opts["mv2"],
+            opts["db"],
             opts["append_text"],
             title=opts["title"],
             tags=opts["tags"],
@@ -1101,7 +1116,7 @@ def main():
         )
     elif opts["append_file"]:
         append_file(
-            opts["mv2"],
+            opts["db"],
             opts["append_file"],
             title=opts["title"],
             tags=opts["tags"],
@@ -1123,7 +1138,7 @@ def main():
             file=sys.stderr,
         )
         print(
-            "       uv run python scripts/memory_ingest.py --append-file /path/to/file.pdf",
+            "       uv run python scripts/memory_ingest.py --append-file /path/to/notes.md",
             file=sys.stderr,
         )
         sys.exit(1)

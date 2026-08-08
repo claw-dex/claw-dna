@@ -27,7 +27,9 @@ def patched(monkeypatch, agent_root):
     monkeypatch.setattr(cs, "MEMORY", agent_root / "memory")
     monkeypatch.setattr(cs, "MESSAGES", agent_root / "messages")
     monkeypatch.setattr(
-        cs, "LONG_TERM_MEMORY_MV2_PATH", agent_root / "memory" / "long_term_memory.mv2"
+        cs,
+        "LONG_TERM_MEMORY_DB_PATH",
+        agent_root / "memory" / "long_term_memory.lancedb",
     )
     monkeypatch.setattr(cs, "SCRIPTS", agent_root / "scripts")
     monkeypatch.setattr(cs, "DREAM_DIR", agent_root / "memory" / "dream")

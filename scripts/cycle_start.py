@@ -32,7 +32,7 @@ from collections import Counter
 
 MEMORY = Path("/agent/memory")
 MESSAGES = Path("/agent/messages")
-LONG_TERM_MEMORY_MV2_PATH = MEMORY / "long_term_memory.mv2"
+LONG_TERM_MEMORY_DB_PATH = MEMORY / "long_term_memory.lancedb"
 SCRIPTS = Path("/agent/scripts")
 DREAM_DIR = MEMORY / "dream"
 
@@ -750,7 +750,7 @@ def _check_constitution() -> list:
     return issues
 
 
-# ── Long-Term Memory (memvid) ──────────────────────────────────────────────────
+# ── Long-Term Memory (LanceDB) ────────────────────────────────────────────────
 
 
 def _build_recall_queries(inbox, goals) -> list:
@@ -786,7 +786,7 @@ def _memory_cycle_number(hit: dict) -> int | None:
 
     Ingest writes the cycle to `metadata["cycle"]` (string) and also as a
     `cycle:<N>` tag. Prefer metadata; fall back to the tag for older entries
-    where metadata may be absent on the SDK hit.
+    where metadata may be absent on the hit.
     """
     meta = hit.get("metadata") or {}
     raw = meta.get("cycle") if isinstance(meta, dict) else None
@@ -807,10 +807,10 @@ def _fetch_old_memories(limit: int = 20, inbox=None, goals=None) -> list:
     """Fetch memories from long-term semantic memory across the full history.
 
     Issues all recall() queries in parallel (one per inbox message + most recent
-    in-progress/pending goal), dedupes hits by frame_id (fallback: title+snippet),
+    in-progress/pending goal), dedupes hits by row id (fallback: title+snippet),
     and trims to `limit` after merging.
     """
-    if not LONG_TERM_MEMORY_MV2_PATH.exists():
+    if not LONG_TERM_MEMORY_DB_PATH.exists():
         return []
     queries = _build_recall_queries(inbox, goals)
     if not queries:
@@ -820,7 +820,7 @@ def _fetch_old_memories(limit: int = 20, inbox=None, goals=None) -> list:
     except Exception:
         return []
 
-    # Run all recall queries concurrently — each is an independent SDK call.
+    # Run all recall queries concurrently — each is an independent store query.
     # max_workers=min(len(queries), 5) avoids creating excess threads for large inboxes.
     def _safe_recall(q: str) -> list:
         try:
@@ -835,8 +835,8 @@ def _fetch_old_memories(limit: int = 20, inbox=None, goals=None) -> list:
     seen_keys: set = set()
     for hits in per_query_hits:
         for h in hits:
-            fid = h.get("frame_id")
-            key = ("fid", fid) if fid else ("ts", h.get("title"), h.get("snippet"))
+            rid = h.get("id")
+            key = ("id", rid) if rid else ("ts", h.get("title"), h.get("snippet"))
             if key in seen_keys:
                 continue
             seen_keys.add(key)
@@ -855,8 +855,8 @@ def _list_recent_dream_files(hours: int = 24) -> list:
     Each item: {"path": str, "kind": "learning"|"topic", "mtime": ISO str}.
     Sorted by mtime desc.
 
-    Pairs with `_fetch_old_memories` (which recalls across the full memvid
-    history) — together they cover the recent-file and semantic-recall views.
+    Pairs with `_fetch_old_memories` (which recalls across the full long-term
+    memory) — together they cover the recent-file and semantic-recall views.
 
     Does NOT touch dream/remark.json (internal dream-process state).
     """
@@ -1875,7 +1875,7 @@ def main():
     old_memories = _fetch_old_memories(limit=20, inbox=inbox, goals=goals)
 
     # Step 3c: List dream learning/topic files updated in the last 24h.
-    # Pairs with old_memories (full-history memvid recall) for a complete memory window.
+    # Pairs with old_memories (full-history semantic recall) for a complete memory window.
     recent_dream_files = _list_recent_dream_files(hours=24)
 
     # Step 4: Output

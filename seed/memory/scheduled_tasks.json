@@ -24,7 +24,7 @@
     "schedule_type": "cron",
     "schedule": "0 12 * * 0",
     "type": "goal",
-    "content": "Archive old logs, clean temporary files, and remove Linux core dump files (e.g. /agent/core.* ELF core dumps from memvid/PyO3 Rust panics) which can be hundreds of MB each and have no recovery value.",
+    "content": "Archive old logs, clean temporary files, and remove Linux core dump files (e.g. /agent/core.* ELF core dumps from native extensions) which can be hundreds of MB each and have no recovery value.",
     "enabled": true,
     "last_run": null,
     "priority": 3

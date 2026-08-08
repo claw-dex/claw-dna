@@ -100,28 +100,28 @@
   {
     "id": "memory_ingest",
     "name": "Long-Term Memory Ingest",
-    "description": "Bulk-ingests journal, cycle, and goal data into a memvid .mv2 semantic memory index; supports incremental append and raw text/file ingestion",
+    "description": "Bulk-ingests journal and inbox data into a LanceDB semantic memory store (hybrid BM25 + bge-small vectors); supports idempotent incremental append and raw text/file ingestion",
     "category": "memory",
     "enabled": true
   },
   {
     "id": "memory_recall",
     "name": "Long-Term Memory Recall",
-    "description": "Queries the memvid .mv2 semantic memory index; retrieves past cycle experiences, related historical work, and chronological timeline browsing",
+    "description": "Queries the LanceDB semantic memory store with hybrid BM25 + vector search; retrieves past cycle experiences, related historical work, and chronological timeline browsing",
     "category": "memory",
     "enabled": true
   },
   {
     "id": "memory_ask",
     "name": "Memory Q&A",
-    "description": "RAG-powered natural-language Q&A over memvid .mv2 long-term memory; retrieves adaptive context then synthesizes answers via Claude",
+    "description": "RAG-powered natural-language Q&A over LanceDB long-term memory; retrieves relevance-filtered context then synthesizes answers via Claude",
     "category": "memory",
     "enabled": true
   },
   {
     "id": "memory_inspect",
     "name": "Long-Term Memory Inspector",
-    "description": "Read-only diagnostics for the memvid .mv2 index: on-disk footprint (file + sibling artifacts), frame/entry counts, source/label/tag/preview-length distributions, timestamp span, and a comparison against source JSON files (journal, journal archive, inbox history) to spot inflation from auto-chunking or stale records",
+    "description": "Read-only diagnostics for the LanceDB memory store: on-disk footprint (store directory + rebuild/backup siblings), row counts, index health and embedding-dimension alignment, source/label/tag/text-length distributions, timestamp span, and a comparison against source JSON files (journal, journal archive, inbox history) to spot stale or duplicated records",
     "category": "memory",
     "enabled": true
   },

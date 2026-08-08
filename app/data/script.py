@@ -19,6 +19,7 @@ _SCRIPT_CATEGORIES = {
     "memory_ask.py": "Memory",
     "memory_recall.py": "Memory",
     "memory_ingest.py": "Memory",
+    "memory_inspect.py": "Memory",
     "sync_memory_files.py": "Memory",
     "journal_archive.py": "Memory",
     "health_check.sh": "Diagnostics",

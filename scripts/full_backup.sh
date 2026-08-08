@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Full agent backup — creates a single timestamped zip of all critical directories.
-# long_term_memory.mv2 is excluded (rebuild via: uv run python scripts/memory_ingest.py)
+# long_term_memory.lancedb is excluded (rebuild via: uv run python scripts/memory_ingest.py --build)
 set -euo pipefail
 
 TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
@@ -15,14 +15,15 @@ echo "[1/4] Cleaning temp/rebuild/backup files from /agent/memory/ ..."
 
 find /agent/memory -maxdepth 1 -name "*.backup" -delete -print 2>/dev/null || true
 find /agent/memory -maxdepth 1 -name "*.tmp" -delete -print 2>/dev/null || true
-find /agent/memory -maxdepth 1 -name ".*.mv2.rebuild.*" -delete -print 2>/dev/null || true
+rm -rf /agent/memory/long_term_memory.lancedb.rebuild /agent/memory/long_term_memory.lancedb.backup 2>/dev/null || true
 
-# Exclude long_term_memory.mv2 — rebuilt via memory_ingest skill
-if [ -f /agent/memory/long_term_memory.mv2 ]; then
-  echo "  Removing long_term_memory.mv2 (rebuild via memory_ingest)"
-  rm -f /agent/memory/long_term_memory.mv2
+# Exclude long_term_memory.lancedb — rebuilt via the memory-ingest skill.
+# It is a directory, not a file, so remove it recursively.
+if [ -d /agent/memory/long_term_memory.lancedb ]; then
+  echo "  Removing long_term_memory.lancedb/ (rebuild via memory_ingest)"
+  rm -rf /agent/memory/long_term_memory.lancedb
 else
-  echo "  long_term_memory.mv2 already absent, skipping."
+  echo "  long_term_memory.lancedb already absent, skipping."
 fi
 
 # ── Phase 2: Individual zip archives ─────────────────────────────────────────
@@ -205,5 +206,5 @@ echo "[4/4] Backup complete."
 echo "  Archive : $FINAL_ZIP"
 echo "  Size    : $SIZE"
 echo ""
-echo "  To rebuild long_term_memory.mv2 after restore:"
-echo "    cd /agent && uv run python scripts/memory_ingest.py"
+echo "  To rebuild long_term_memory.lancedb after restore:"
+echo "    cd /agent && uv run python scripts/memory_ingest.py --build"

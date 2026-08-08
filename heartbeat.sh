@@ -322,11 +322,33 @@ build_task_prompt() {
     local mode="$1"
 
     # ── STATIC PREFIX (cache-friendly: identical across cycles for a given mode) ──
-    echo "CRITICAL: ONE cycle per heartbeat. Run cycle_start.py exactly once at the start"
-    echo "and cycle_close.py exactly once at the end. Never create additional cycle entries"
-    echo "in cycles.json. If you discover new goals or inbox items, leave them for the next"
-    echo "heartbeat. Overlapping cycles cause interruptions and lost work."
-    echo ""
+    cat <<'CYCLE_RULES'
+CRITICAL: ONE cycle per heartbeat. Run cycle_start.py exactly once at the start
+and cycle_close.py exactly once at the end. Never create additional cycle entries
+in cycles.json. If you discover new goals or inbox items, leave them for the next
+heartbeat. Overlapping cycles cause interruptions and lost work.
+
+## Altering Cycle Start/Close Behavior
+
+Since modifying `scripts/cycle_start.py` and `scripts/cycle_close.py` directly is prohibited by the Hard Rules in the Constitution, any modifications or additions to the behaviors executed at cycle start or cycle close must be done by:
+
+1. Creating a new custom script containing the new behavior (optional if you just want to modify behavior via prompt).
+2. Modifying the appropriate prompt file(s) in `prompts/` (such as `prompts/goal.md`, `prompts/evolve.md`, `prompts/dream.md`, `prompts/cycle-close.md`, etc.) to invoke the new script during the cycle start or close sequence instead of modifying the core cycle scripts directly.
+
+## End-of-Cycle Requirements (MANDATORY)
+
+Before finishing, you MUST do ALL of the following:
+
+1. Update /agent/memory/state.json — set cycle_number, status, last_cycle_summary (last_heartbeat and last_cycle_run are set by heartbeat.sh; last_cycle_end is set by cycle_close.py)
+2. Append to /agent/memory/journal.json — see prompts/cycle-close.md Step 3 for the JSON schema
+3. If you modified `server.py` or `app/*.py` files, verify the portal is still up: `curl -s http://localhost:8081/app/_stcore/health`
+4. Write any questions you have for the user to /agent/messages/outbox.json
+5. Review & update AGENTS.md
+   - keep the Directory Structure tree accurate (add/remove/rename files with correct descriptions, stick to first level only)
+   - add/update mandatory instructions that user explicitly said you must follow
+   - add any new capabilities you have gained and update any changes to your operational parameters (e.g., new public URL, new services, etc.)
+
+CYCLE_RULES
 
     case "$mode" in
         bootstrap)

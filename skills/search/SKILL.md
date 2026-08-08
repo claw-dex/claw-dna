@@ -103,7 +103,7 @@ uv run python scripts/search.py --rebuild-all
 | `.jsonl` | one doc per non-empty line |
 | Plain text / Markdown / code | paragraph split (≥3 paragraphs) or 30-line chunks |
 
-Binary files (`*.npy`, `*.db`, `*.kdbx`, `*.mv2`, images, fonts, archives) are skipped automatically. `.gitignore` is respected everywhere.
+Binary files (`*.npy`, `*.db`, `*.kdbx`, `*.lance`/`*.lancedb` stores, images, fonts, archives) are skipped automatically. `.gitignore` is respected everywhere.
 
 ## How `--dir` interacts with `.gitignore`
 

@@ -35,7 +35,7 @@ If unsure which side you are on, check whether `/agent/backup/agent_full_backup_
 
 | Directory | Notes |
 |-----------|-------|
-| `/agent/memory/` | All JSON memory files; excludes `long_term_memory.mv2` (auto-rebuilt by `cycle_close.py` on the next cycle close, in a detached background process, from the restored JSON files) |
+| `/agent/memory/` | All JSON memory files; excludes `long_term_memory.lancedb/` (auto-rebuilt by `cycle_close.py` on the next cycle close, in a detached background process, from the restored JSON files) |
 | `/agent/messages/` | inbox/outbox queues and history |
 | `/agent/web/` | Static files |
 | `/agent/workspace/` | Working files and cached data |
@@ -57,7 +57,7 @@ Before creating any zip, the script deletes:
 
 - `*.backup` files in `/agent/memory/`
 - `*.tmp` files in `/agent/memory/`
-- `.*.mv2.rebuild.*` hidden rebuild artifacts
+- `long_term_memory.lancedb.rebuild/` and `.backup/` leftover store directories
 
 ### What gets excluded from zips
 
@@ -262,7 +262,9 @@ When the suite is green and the agent is healthy (`service_manager.py health` cl
 
 ### Semantic memory index — auto-rebuilt by `cycle_close.py`
 
-The backup intentionally omits `long_term_memory.mv2`. Do **not** run `memory_ingest.py --build` by hand — `cycle_close.py` detects the missing `.mv2` on the next cycle close and rebuilds it from the restored JSON files (`journal.json`, `journal_archive.json`, `messages/inbox_history.json`) in a detached background subprocess (see `scripts/cycle_close.py:_flush_memvid_buffer` and `_dispatch_memvid_flush_bg`). The cycle that triggers the rebuild does not need to wait for it; durability follows ~5–10s later, and progress is logged to `/agent/memory/.memvid_flush.log`.
+The backup intentionally omits `long_term_memory.lancedb/`. Do **not** run `memory_ingest.py --build` by hand — `cycle_close.py` detects the missing store on the next cycle close and rebuilds it from the restored JSON files (`journal.json`, `journal_archive.json`, `messages/inbox_history.json`) in a detached background subprocess (see `scripts/cycle_close.py:_flush_ltm_buffer` and `_dispatch_ltm_flush_bg`). The cycle that triggers the rebuild does not need to wait for it; durability follows ~5–10s later, and progress is logged to `/agent/memory/.ltm_flush.log`.
+
+The rebuild embeds every record locally with fastembed, which needs the `BAAI/bge-small-en-v1.5` weights in the fastembed cache. On a fresh container run `bash seed/install_memory_deps.sh` first so the ~130 MB download happens once, outside a cycle.
 
 ```bash
 uv run python scripts/memory_ingest.py --build

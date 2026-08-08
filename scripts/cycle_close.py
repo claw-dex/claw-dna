@@ -9,11 +9,11 @@ Automates the repetitive boilerplate from cycle-close.md:
   4. Normalizes cycles.json schema (inlined — no subprocess)
   5. Archives inbox.json items to inbox_history.json, then clears inbox.json
   6. Auto-backs up memory files if last backup >1h old (inlined — no subprocess)
-  7. Dispatches the long-term-memory (memvid) flush in a detached background
-     process so the script returns immediately. The .mv2 becomes durable a
-     few seconds after "Done." prints. Logs to /agent/memory/.memvid_flush.log.
-     Use --no-bg-memvid to flush inline (e.g., when a downstream caller needs
-     the .mv2 fully written before exit).
+  7. Dispatches the long-term-memory flush in a detached background process
+     so the script returns immediately. The store becomes durable a few
+     seconds after "Done." prints. Logs to /agent/memory/.ltm_flush.log.
+     Use --no-bg-ltm to flush inline (e.g., when a downstream caller needs
+     the store fully written before exit).
   8. Reports what was written
 
 Usage:
@@ -49,8 +49,8 @@ Optional flags:
                           state.current_goal is the dynamic in-flight task and
                           is NOT consulted here.
     --no-normalize        Skip cycles.json normalization after writing
-    --no-bg-memvid        Run the memvid flush inline instead of in a detached
-                            background process (default: background)
+    --no-bg-ltm           Run the long-term-memory flush inline instead of in a
+                            detached background process (default: background)
     --dry-run             Print what would be written, but write nothing
 
 Exit codes: 0 = success, 1 = error (missing required args, write failure)
@@ -172,8 +172,8 @@ def _run_normalize_inlined(cycles_path: Path, verbose: bool = True) -> int:
 # ── Inbox archiving ─────────────────────────────────────────────────────────
 
 
-def _inbox_chunks_for_memvid(items: list) -> list:
-    """Convert archived inbox messages into memvid chunks (no I/O).
+def _inbox_chunks_for_ltm(items: list) -> list:
+    """Convert archived inbox messages into ingest chunks (no I/O).
 
     Returns a list of chunk dicts ready for ``memory_ingest.append_many``.
     Skipped messages (too short / not a dict) are silently dropped to mirror
@@ -184,7 +184,7 @@ def _inbox_chunks_for_memvid(items: list) -> list:
     try:
         from scripts.memory_ingest import transform_inbox_entry
     except Exception as e:
-        print(f"  ⚠ inbox memvid — import skipped: {e}")
+        print(f"  ⚠ inbox ltm — import skipped: {e}")
         return []
     out = []
     for msg in items:
@@ -235,7 +235,7 @@ def _archive_inbox(
 
     When ``cycle_number`` is provided, each archived item gets ``cycle_number``
     stamped on it (if absent) before being written to ``inbox_history.json`` and
-    converted to a memvid chunk, so the value is preserved on both the rebuild
+    converted to an ingest chunk, so the value is preserved on both the rebuild
     path (read back from inbox_history.json) and the live append path.
 
     All inbox read/partition/rewrite happens under an exclusive lock on
@@ -278,7 +278,7 @@ def _archive_inbox(
 
                 # Stamp the closing cycle number onto each archived message so
                 # the value travels into both inbox_history.json and the
-                # memvid chunk (transform_inbox_entry reads entry["cycle_number"]).
+                # ingest chunk (transform_inbox_entry reads entry["cycle_number"]).
                 if cycle_number is not None:
                     for m in to_archive:
                         if isinstance(m, dict) and "cycle_number" not in m:
@@ -301,7 +301,7 @@ def _archive_inbox(
         return -1
 
     # From here, inbox.json no longer contains the archived items. Append
-    # them to history and ingest into memvid (best-effort, non-fatal).
+    # them to history and ingest into long-term memory (best-effort, non-fatal).
     history = []
     if history_path.exists():
         try:
@@ -319,10 +319,10 @@ def _archive_inbox(
     history.extend(to_archive)
     write_atomic(history_path, history)
 
-    # Buffer the archived items for the single end-of-cycle memvid commit.
+    # Buffer the archived items for the single end-of-cycle long-term-memory write.
     # If no buffer is provided, fall through silently — main() owns the flush.
     if ingest_buffer is not None:
-        ingest_buffer.extend(_inbox_chunks_for_memvid(to_archive))
+        ingest_buffer.extend(_inbox_chunks_for_ltm(to_archive))
 
     return len(to_archive)
 
@@ -341,7 +341,7 @@ def parse_args(argv):
         "actions": [],
         "status": "completed",
         "no_normalize": False,
-        "no_bg_memvid": False,
+        "no_bg_ltm": False,
         "dry_run": False,
         "help": False,
     }
@@ -379,8 +379,8 @@ def parse_args(argv):
             continue
         elif a == "--no-normalize":
             result["no_normalize"] = True
-        elif a == "--no-bg-memvid":
-            result["no_bg_memvid"] = True
+        elif a == "--no-bg-ltm":
+            result["no_bg_ltm"] = True
         elif a == "--dry-run":
             result["dry_run"] = True
         i += 1
@@ -520,11 +520,11 @@ def _sync_auto_memory() -> None:
         print(f"  ⚠ auto memory sync failed (non-fatal): {e}")
 
 
-# ── Long-term memory (memvid via memory_ingest.py) ───────────────────────────
+# ── Long-term memory (LanceDB via memory_ingest.py) ─────────────────────────
 
 
-def _entry_chunks_for_memvid(entry: dict) -> list:
-    """Convert a cycle/journal/goal entry into memvid chunks (no I/O).
+def _entry_chunks_for_ltm(entry: dict) -> list:
+    """Convert a cycle/journal/goal entry into ingest chunks (no I/O).
 
     Routes through ``memory_ingest._detect_and_transform`` so the chunk
     schema matches the rebuild path exactly. Returns ``[]`` on import
@@ -535,85 +535,106 @@ def _entry_chunks_for_memvid(entry: dict) -> list:
     try:
         from scripts.memory_ingest import _detect_and_transform
     except Exception as e:
-        print(f"  ⚠ memvid — import skipped: {e}")
+        print(f"  ⚠ ltm — import skipped: {e}")
         return []
     try:
         chunk = _detect_and_transform(entry)
     except Exception as e:
-        print(f"  ⚠ memvid — transform failed: {e}")
+        print(f"  ⚠ ltm — transform failed: {e}")
         return []
     return [chunk] if chunk is not None else []
 
 
-def _flush_memvid_buffer(chunks: list) -> None:
-    """Write all buffered chunks to the .mv2 via a single ``put_many`` call.
+def _flush_ltm_buffer(chunks: list) -> None:
+    """Write all buffered chunks to the store in a single batched write.
 
     cycle_close batches every record it would ingest (inbox messages +
     journal entry) into a single buffer and flushes them here at the end
     of the cycle. Cycle records are not buffered — cycles.json is excluded
     from long-term memory.
 
-    The SDK auto-checkpoints internally (every ~1000 puts or when the
-    WAL reaches 75% capacity), so no manual commit is issued here.
-    Segment-catalog rewrites only happen when the SDK decides — typically
-    every few hundred cycles rather than every cycle — which keeps the
-    .mv2 from growing unboundedly fast.
+    ``append_many`` embeds the whole batch in one pass and writes it in one
+    transaction, then rebuilds the search indexes once enough rows have
+    accumulated outside them.
 
-    On first run the .mv2 doesn't exist; we run a one-shot ``build()`` from
+    On first run the store doesn't exist; we run a one-shot ``build()`` from
     the source JSON files (journal/journal_archive/inbox_history). Steps 1,
     3, and 5 of ``main()`` have already flushed those files to disk, so
     build() ingests this cycle's records via the source JSON. The buffered
     chunks are therefore **intentionally discarded** on this branch —
-    re-ingesting them would create duplicates.
+    re-ingesting them would be redundant.
     """
     try:
-        from scripts.memory_ingest import DEFAULT_MV2, append_many, build
+        from scripts.memory_ingest import (
+            DEFAULT_DB,
+            append_many,
+            build,
+            store_ready,
+        )
     except Exception as e:
-        print(f"  ⚠ memvid — import skipped: {e}")
+        print(f"  ⚠ ltm — import skipped: {e}")
         return
 
-    if not DEFAULT_MV2.exists():
+    # Ask the store, not the filesystem: an empty or half-removed .lancedb/
+    # directory exists but holds no table, and treating that as "already built"
+    # would make every future flush a silent no-op.
+    try:
+        ready = store_ready(DEFAULT_DB)
+    except Exception as e:
+        print(f"  ⚠ ltm — store unreadable ({e}); skipping ingest")
+        return
+
+    if not ready:
         try:
-            build(MEMORY, DEFAULT_MV2, quiet=True)
+            build(MEMORY, DEFAULT_DB, quiet=True)
             print(
-                f"  ✓ memvid — built new {DEFAULT_MV2.name} "
+                f"  ✓ ltm — built new {DEFAULT_DB.name} "
                 f"(this cycle's records included via source JSON)"
             )
             return
         except SystemExit as e:
-            print(f"  ⚠ memvid — build failed (exit {e.code}); skipping ingest")
+            print(f"  ⚠ ltm — build failed (exit {e.code}); skipping ingest")
             return
         except Exception as e:
-            print(f"  ⚠ memvid — build failed: {e}; skipping ingest")
+            print(f"  ⚠ ltm — build failed: {e}; skipping ingest")
             return
 
     if not chunks:
         return
 
     try:
-        ok, fail = append_many(DEFAULT_MV2, chunks, quiet=True)
-        msg = f"  ✓ memvid — batched {ok} chunk(s) (auto-checkpoint)"
+        ok, fail = append_many(DEFAULT_DB, chunks, quiet=True)
+        if ok == 0:
+            # chunks is non-empty here, so writing nothing means the store
+            # refused the batch. Say so — a success marker would hide the loss.
+            print(f"  ⚠ ltm — wrote 0 of {len(chunks)} chunk(s); nothing ingested")
+            return
+        msg = f"  ✓ ltm — wrote {ok} chunk(s)"
         if fail:
             msg += f" ({fail} failed)"
         print(msg)
     except SystemExit as e:
-        print(f"  ⚠ memvid flush — exit {e.code}")
+        print(f"  ⚠ ltm flush — exit {e.code}")
     except Exception as e:
-        print(f"  ⚠ memvid flush — failed: {e}")
+        print(f"  ⚠ ltm flush — failed: {e}")
 
 
 # ── Background flush dispatcher ──────────────────────────────────────────────
 
 
-def _sweep_stale_memvid_buffers() -> None:
-    """Delete leftover .memvid_buffer_* temp files older than 1h.
+def _sweep_stale_ltm_buffers() -> None:
+    """Delete leftover buffer temp files older than 1h.
 
     Defensive cleanup in case a prior background child died before unlinking
-    its buffer.
+    its buffer. The legacy `.memvid_buffer_*` glob is swept too so buffers
+    staged by the previous backend before an upgrade don't linger forever.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
     try:
-        for p in MEMORY.glob(".memvid_buffer_*.json"):
+        stale = list(MEMORY.glob(".ltm_buffer_*.json")) + list(
+            MEMORY.glob(".memvid_buffer_*.json")
+        )
+        for p in stale:
             try:
                 mtime = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)
                 if mtime < cutoff:
@@ -624,33 +645,33 @@ def _sweep_stale_memvid_buffers() -> None:
         pass
 
 
-def _dispatch_memvid_flush_bg(chunks: list, cycle_n: int) -> None:
-    """Spawn a detached subprocess to run ``_flush_memvid_buffer`` and return.
+def _dispatch_ltm_flush_bg(chunks: list, cycle_n: int) -> None:
+    """Spawn a detached subprocess to run ``_flush_ltm_buffer`` and return.
 
-    Cycle-close has no remaining steps after the memvid flush, so blocking on
+    Cycle-close has no remaining steps after the memory flush, so blocking on
     its 5–10s commit just delays the user-facing "done" message. We stage the
     chunks to a JSON temp file and launch a detached child process to run the
     actual flush in the background. Failures fall back to an inline flush.
     """
     try:
-        from scripts.memory_ingest import DEFAULT_MV2
+        from scripts.memory_ingest import DEFAULT_DB
     except Exception as e:
-        print(f"  ⚠ memvid bg — import failed ({e}); flushing inline")
-        _flush_memvid_buffer(chunks)
+        print(f"  ⚠ ltm bg — import failed ({e}); flushing inline")
+        _flush_ltm_buffer(chunks)
         return
 
-    if not chunks and DEFAULT_MV2.exists():
+    if not chunks and DEFAULT_DB.exists():
         return
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    buf_path = MEMORY / f".memvid_buffer_{cycle_n}_{ts}.json"
-    log_path = MEMORY / ".memvid_flush.log"
+    buf_path = MEMORY / f".ltm_buffer_{cycle_n}_{ts}.json"
+    log_path = MEMORY / ".ltm_flush.log"
 
     try:
         buf_path.write_text(json.dumps(chunks))
     except Exception as e:
-        print(f"  ⚠ memvid bg — failed to stage buffer ({e}); flushing inline")
-        _flush_memvid_buffer(chunks)
+        print(f"  ⚠ ltm bg — failed to stage buffer ({e}); flushing inline")
+        _flush_ltm_buffer(chunks)
         return
 
     try:
@@ -659,7 +680,7 @@ def _dispatch_memvid_flush_bg(chunks: list, cycle_n: int) -> None:
                 [
                     sys.executable,
                     str(Path(__file__).resolve()),
-                    "--__flush-memvid",
+                    "--__flush-ltm",
                     str(buf_path),
                 ],
                 stdin=subprocess.DEVNULL,
@@ -669,13 +690,13 @@ def _dispatch_memvid_flush_bg(chunks: list, cycle_n: int) -> None:
                 close_fds=True,
             )
         print(
-            f"  ✓ memvid — flush dispatched in background "
+            f"  ✓ ltm — flush dispatched in background "
             f"(pid={proc.pid}, durable in ~5–10s, log={log_path})"
         )
     except Exception as e:
-        print(f"  ⚠ memvid bg — spawn failed ({e}); flushing inline")
+        print(f"  ⚠ ltm bg — spawn failed ({e}); flushing inline")
         buf_path.unlink(missing_ok=True)
-        _flush_memvid_buffer(chunks)
+        _flush_ltm_buffer(chunks)
 
 
 def _tick_nudge_counters() -> None:
@@ -706,7 +727,7 @@ def _dispatch_skill_bump_bg(cycle_n: int) -> None:
     in — without it, the bump would routinely miss the tail of long cycles.
 
     Best-effort: any failure (missing transcript, import error, parse error)
-    is silently absorbed so cycle-close stays atomic. Mirrors the memvid
+    is silently absorbed so cycle-close stays atomic. Mirrors the memory
     flush dispatch pattern.
     """
     script = SCRIPTS / "skill_manage.py"
@@ -736,23 +757,19 @@ def _dispatch_skill_bump_bg(cycle_n: int) -> None:
         print(f"  ⚠ skill bump — spawn failed ({e}); skipping")
 
 
-def _flush_memvid_child(buf_path: Path) -> int:
-    """Background-mode entry point: load chunks, flush memvid under a lock.
+def _flush_ltm_child(buf_path: Path) -> int:
+    """Background-mode entry point: load chunks and flush them under a lock.
 
-    Holds an exclusive ``flock`` on ``<mv2>.flush.lock`` for the duration of
-    the flush so a back-to-back cycle-close can't have two children writing
-    the same .mv2 concurrently. The lock waits rather than fails — cycles are
-    sequential in normal operation, so contention is rare and serialization
-    is the correct behavior.
+    Holds an exclusive ``flock`` on ``MEMORY/.ltm_flush.lock`` for the duration
+    of the flush so a back-to-back cycle-close can't have two children writing
+    the same store concurrently. The lock lives beside the store rather than
+    inside it, because the store is a directory that --build swaps wholesale.
+    The lock waits rather than fails — cycles are sequential in normal
+    operation, so contention is rare and serialization is the correct behavior.
     """
-    try:
-        from scripts.memory_ingest import DEFAULT_MV2
-    except Exception as e:
-        print(f"⚠ bg flush — import failed: {e}", flush=True)
-        return 1
 
     started = datetime.now(timezone.utc).isoformat()
-    print(f"[{started}] memvid bg flush starting (buf={buf_path.name})", flush=True)
+    print(f"[{started}] ltm bg flush starting (buf={buf_path.name})", flush=True)
 
     # Validate buf_path: must live under MEMORY and match the staging pattern.
     # The flag is internal, but defending against a stray invocation prevents
@@ -761,7 +778,7 @@ def _flush_memvid_child(buf_path: Path) -> int:
         resolved = buf_path.resolve()
         if (
             resolved.parent != MEMORY.resolve()
-            or not resolved.name.startswith(".memvid_buffer_")
+            or not resolved.name.startswith(".ltm_buffer_")
             or not resolved.name.endswith(".json")
         ):
             print(
@@ -779,13 +796,13 @@ def _flush_memvid_child(buf_path: Path) -> int:
         print(f"[{started}] ⚠ bg flush — failed to read buffer: {e}", flush=True)
         chunks = []
 
-    lock_path = str(DEFAULT_MV2) + ".flush.lock"
+    lock_path = str(MEMORY / ".ltm_flush.lock")
     rc = 0
     try:
         with open(lock_path, "a+") as lock_f:
             fcntl.flock(lock_f, fcntl.LOCK_EX)
             try:
-                _flush_memvid_buffer(chunks)
+                _flush_ltm_buffer(chunks)
             finally:
                 fcntl.flock(lock_f, fcntl.LOCK_UN)
     except Exception as e:
@@ -797,7 +814,7 @@ def _flush_memvid_child(buf_path: Path) -> int:
         except Exception:
             pass
         ended = datetime.now(timezone.utc).isoformat()
-        print(f"[{ended}] memvid bg flush done (rc={rc})", flush=True)
+        print(f"[{ended}] ltm bg flush done (rc={rc})", flush=True)
     return rc
 
 
@@ -805,12 +822,12 @@ def _flush_memvid_child(buf_path: Path) -> int:
 
 
 def main():
-    # Internal re-entry: background memvid flush spawned by
-    # _dispatch_memvid_flush_bg. Runs only the flush, then exits.
-    if len(sys.argv) >= 3 and sys.argv[1] == "--__flush-memvid":
-        sys.exit(_flush_memvid_child(Path(sys.argv[2])))
+    # Internal re-entry: background long-term-memory flush spawned by
+    # _dispatch_ltm_flush_bg. Runs only the flush, then exits.
+    if len(sys.argv) >= 3 and sys.argv[1] == "--__flush-ltm":
+        sys.exit(_flush_ltm_child(Path(sys.argv[2])))
 
-    _sweep_stale_memvid_buffers()
+    _sweep_stale_ltm_buffers()
 
     opts = parse_args(sys.argv)
 
@@ -1031,10 +1048,10 @@ def main():
 
     # ── Apply updates ────────────────────────────────────────────────────────
     # All long-term-memory writes for this cycle are buffered into one list
-    # and flushed in a single open + many puts + ONE commit at the end. Per-
-    # call commits on memvid rewrite the segment catalog and reserve
-    # significant on-disk space — batching keeps file growth bounded.
-    memvid_buffer: list = []
+    # and flushed as a single batch at the end. Each write is a new table
+    # version, and each batch pays one embedding pass — batching keeps both
+    # the version count and the embedding cost down.
+    ltm_buffer: list = []
 
     # 1. Update cycles.json
     cycle_entry.update(cycle_update)
@@ -1073,7 +1090,7 @@ def main():
     if opts["type"] == "goal":
         archived_n = _archive_inbox(
             cycle_start_ts=cycle_entry.get("start"),
-            ingest_buffer=memvid_buffer,
+            ingest_buffer=ltm_buffer,
             cycle_number=cycle_n,
         )
         if archived_n > 0:
@@ -1091,15 +1108,15 @@ def main():
     # 7. Sync auto memory (markdown files for agent native memory)
     _sync_auto_memory()
 
-    # 8. Buffer the journal entry, then flush every memvid write for this
-    #    cycle in a single open + ONE commit (inbox messages + journal entry).
-    #    cycle records are no longer ingested — cycles.json is excluded from
+    # 8. Buffer the journal entry, then flush every long-term-memory write for
+    #    this cycle as one batch (inbox messages + journal entry). Cycle
+    #    records are no longer ingested — cycles.json is excluded from
     #    long-term memory.
-    memvid_buffer.extend(_entry_chunks_for_memvid(journal_entry))
-    if opts["no_bg_memvid"]:
-        _flush_memvid_buffer(memvid_buffer)
+    ltm_buffer.extend(_entry_chunks_for_ltm(journal_entry))
+    if opts["no_bg_ltm"]:
+        _flush_ltm_buffer(ltm_buffer)
     else:
-        _dispatch_memvid_flush_bg(memvid_buffer, cycle_n)
+        _dispatch_ltm_flush_bg(ltm_buffer, cycle_n)
 
     # 9. Skill use-count bump (detached; transcript-driven, best-effort).
     _dispatch_skill_bump_bg(cycle_n)

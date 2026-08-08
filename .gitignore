@@ -268,11 +268,14 @@ core.*
 *.db
 *.sqlite3
 *.sqlite3-journal
-*.mv
-*.mv2
+# LanceDB stores are directories, not files
+*.lance/
+*.lancedb/
 
 # Agent
 /memory/
 /messages/
 /web/
 /workspace/
+# Downloaded embedding model weights — large and re-fetchable
+/.cache/

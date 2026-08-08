@@ -89,6 +89,11 @@ _SCRIPT_ARGS: dict[str, list] = {
     "memory_ask.py": [
         {"flag": "--k", "help": "Max retrieval results", "placeholder": "20"},
         {
+            "flag": "--min-score",
+            "help": "Drop hits below this fraction of the top score (0-1)",
+            "placeholder": "0.5",
+        },
+        {
             "flag": "--context-only",
             "help": "Show retrieved context without Claude synthesis",
         },
@@ -117,10 +122,10 @@ _SCRIPT_ARGS: dict[str, list] = {
             "type": "select",
             "label": "Mode",
             "options": [
-                ("--build", "Rebuild .mv2 index from scratch"),
+                ("--build", "Rebuild the LanceDB index from scratch"),
                 ("--append-json", "Append a single entry (JSON string or @file.json)"),
                 ("--append-text", "Ingest raw text directly"),
-                ("--append-file", "Ingest a file (PDF, DOCX, TXT, MD, etc.)"),
+                ("--append-file", "Ingest a text file (TXT, MD, JSON, etc.)"),
             ],
         },
         {

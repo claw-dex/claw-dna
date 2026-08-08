@@ -62,6 +62,7 @@ def _show_image(path: str, caption: str) -> None:
 
 def render():
     from app.data import (
+        load_ltm_size,
         load_journal,
         load_goals,
         load_logs,
@@ -73,7 +74,6 @@ def render():
     )
 
     # ── Memory Overview (top section) ─────────────────────────
-    ltm_path = f"{MEMORY_DIR}/long_term_memory.mv2"
     journal_path = f"{MEMORY_DIR}/journal.json"
     journal_archive_path = f"{MEMORY_DIR}/journal_archive.json"
     # inbox_history / outbox_history live alongside the other messaging
@@ -93,8 +93,8 @@ def render():
     st.subheader("Memory Overview")
     o1, o2, o3, o4, o5 = st.columns(5)
     with o1:
-        st.metric("Long-term Memory", _file_size(ltm_path))
-        st.caption("long_term_memory.mv2")
+        st.metric("Long-term Memory", _format_size(load_ltm_size()))
+        st.caption("long_term_memory.lancedb")
     with o2:
         st.metric("Journal Entries", f"{journal_n + archive_n}")
         st.caption(f"{journal_n} active · {archive_n} archived")

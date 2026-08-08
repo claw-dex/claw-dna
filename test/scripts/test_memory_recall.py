@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import json
 import sys
-from pathlib import Path
 
 import pytest
 
+# These suites exercise a real LanceDB store. uv only resolves lancedb for
+# the Linux container, so on a dev machine the dependency is simply absent.
+pytest.importorskip("lancedb")
+
 import memory_recall as mr
+import memory_store as store
 
 
 def test_parse_args_question():
@@ -19,10 +23,10 @@ def test_parse_args_question():
 
 def test_parse_args_options():
     a = mr.parse_args(
-        ["script", "Q", "--k", "10", "--mv2", "/tmp/x.mv2", "--json", "--timeline"]
+        ["script", "Q", "--k", "10", "--db", "/tmp/x.lancedb", "--json", "--timeline"]
     )
     assert a["k"] == 10
-    assert a["mv2"] == "/tmp/x.mv2"
+    assert a["db"] == "/tmp/x.lancedb"
     assert a["json_mode"] is True
     assert a["timeline"] is True
 
@@ -30,6 +34,16 @@ def test_parse_args_options():
 def test_parse_args_bad_k(capsys):
     with pytest.raises(SystemExit):
         mr.parse_args(["script", "Q", "--k", "x"])
+
+
+def test_parse_args_min_score():
+    a = mr.parse_args(["script", "Q", "--min-score", "0.4"])
+    assert a["min_score"] == pytest.approx(0.4)
+
+
+def test_parse_args_bad_min_score(capsys):
+    with pytest.raises(SystemExit):
+        mr.parse_args(["script", "Q", "--min-score", "x"])
 
 
 def test_parse_args_help():
@@ -66,75 +80,123 @@ def test_parse_date_to_unix_none():
     assert mr._parse_date_to_unix(None) is None
 
 
-def test_clean_snippet():
-    assert mr._clean_snippet("body title: ignore me") == "body"
-
-
-def test_clean_snippet_empty():
-    assert mr._clean_snippet("") == ""
-
-
-def test_clean_snippet_strips_metadata_lines():
-    text = "actual\nuri: mv2://x\nstatus: ok"
-    out = mr._clean_snippet(text)
-    assert "uri:" not in out
-    assert "actual" in out
-
-
-def test_hit_to_dict():
-    h = mr._hit_to_dict(
-        {"snippet": "s", "score": 0.5, "title": "t", "tags": ["a"], "frame_id": 1}, 1
-    )
+def test_result_to_dict():
+    row = {
+        "id": "abc",
+        "score": 0.5,
+        "title": "t",
+        "text": "s",
+        "tags": ["a"],
+        "metadata": {"source": "journal"},
+    }
+    h = mr._result_to_dict(row, 1)
     assert h["rank"] == 1
     assert h["score"] == 0.5
     assert h["title"] == "t"
+    assert h["snippet"] == "s"
+    assert h["id"] == "abc"
+    assert h["metadata"]["source"] == "journal"
 
 
-def test_recall_no_sdk(monkeypatch):
-    monkeypatch.setattr(mr, "memvid_sdk", None)
-    assert mr.recall("q") == []
-
-
-def test_recall_no_file(monkeypatch, tmp_path):
-    monkeypatch.setattr(mr, "MV2_PATH", tmp_path / "missing.mv2")
-    monkeypatch.setattr(mr, "memvid_sdk", object())  # not None
-    assert mr.recall("q") == []
-
-
-def test_recall_returns_items(monkeypatch, tmp_path, mocker):
-    mv2 = tmp_path / "x.mv2"
-    mv2.write_text("p")
-    monkeypatch.setattr(mr, "MV2_PATH", mv2)
-    monkeypatch.setattr(mr, "memvid_sdk", object())
-    mocker.patch.object(
-        mr,
-        "_ask_normalized",
-        return_value=(
-            [
-                {
-                    "rank": 1,
-                    "score": 0.9,
-                    "title": "t",
-                    "snippet": "s",
-                    "tags": [],
-                    "frame_id": 1,
-                }
-            ],
-            1,
-        ),
+def test_timeline_entry_extracts_cycle():
+    entry = mr._timeline_entry(
+        {
+            "id": "abc",
+            "ts": 1700000000,
+            "date": "2026-01-01",
+            "title": "t",
+            "label": "evolve",
+            "source": "journal",
+            "tags": ["journal", "cycle:12"],
+            "text": "body",
+        }
     )
-    out = mr.recall("q")
-    assert len(out) == 1
-    assert out[0]["rank"] == 1
+    assert entry["cycle"] == "12"
+    assert entry["timestamp"] == 1700000000
+    assert entry["preview"] == "body"
 
 
-def test_recall_swallows_errors(monkeypatch, tmp_path, mocker):
-    mv2 = tmp_path / "x.mv2"
-    mv2.write_text("p")
-    monkeypatch.setattr(mr, "MV2_PATH", mv2)
-    monkeypatch.setattr(mr, "memvid_sdk", object())
-    mocker.patch.object(mr, "_ask_normalized", side_effect=RuntimeError("nope"))
+# ---------------------------------------------------------------------------
+# Query paths against a real store
+# ---------------------------------------------------------------------------
+
+_CHUNKS = [
+    {
+        "title": "Cycle 1: fixed the scheduler",
+        "label": "evolve",
+        "text": "Goal: repair the cron parser\nSummary: scheduler now handles */5",
+        "tags": ["journal", "cycle:1", "date:2026-01-01"],
+        "metadata": {"source": "journal", "cycle": "1", "date": "2026-01-01T10:00:00Z"},
+    },
+    {
+        "title": "Inbox message: restart the portal",
+        "label": "inbox",
+        "text": "please restart the portal when you get a chance",
+        "tags": ["inbox", "date:2026-01-03"],
+        "metadata": {"source": "inbox", "id": "m1", "date": "2026-01-03T09:00:00Z"},
+    },
+]
+
+
+@pytest.fixture
+def populated_db(tmp_path, stub_embeddings):
+    db = tmp_path / "long_term_memory.lancedb"
+    tbl = store.create_table(db)
+    store.add_chunks(tbl, _CHUNKS)
+    store.ensure_indexes(tbl)
+    return db
+
+
+def test_recall_no_store(monkeypatch, tmp_path, stub_embeddings):
+    monkeypatch.setattr(mr, "DB_PATH", tmp_path / "missing.lancedb")
     assert mr.recall("q") == []
+
+
+def test_recall_returns_items(monkeypatch, populated_db, stub_embeddings):
+    monkeypatch.setattr(mr, "DB_PATH", populated_db)
+    out = mr.recall("scheduler cron parser")
+    assert out
+    assert out[0]["rank"] == 1
+    assert out[0]["score"] == pytest.approx(1.0)
+    assert "scheduler" in out[0]["title"].lower()
+    assert out[0]["id"]
+
+
+def test_recall_swallows_errors(monkeypatch, populated_db, mocker, stub_embeddings):
+    monkeypatch.setattr(mr, "DB_PATH", populated_db)
+    mocker.patch.object(mr, "search_store", side_effect=RuntimeError("nope"))
+    assert mr.recall("q") == []
+
+
+def test_search_store_missing_raises(tmp_path, stub_embeddings):
+    with pytest.raises(FileNotFoundError):
+        mr.search_store(tmp_path / "no.lancedb", "q", 5)
+
+
+def test_search_store_min_score_filters(populated_db, stub_embeddings):
+    everything, _ = mr.search_store(populated_db, "portal restart scheduler", 5)
+    filtered, _ = mr.search_store(
+        populated_db, "portal restart scheduler", 5, min_score=1.0
+    )
+    assert len(filtered) < len(everything)
+    assert all(item["score"] >= 1.0 for item in filtered)
+
+
+def test_search_store_since_filters(populated_db, stub_embeddings):
+    cutoff = store.to_unix("2026-01-02")
+    items, _ = mr.search_store(populated_db, "portal scheduler", 5, since=cutoff)
+    assert items
+    assert all(item["metadata"].get("source") == "inbox" for item in items)
+
+
+def test_search_falls_back_to_vector_without_fts(tmp_path, stub_embeddings):
+    """A store built but never indexed still answers queries, vector-only."""
+    db = tmp_path / "unindexed.lancedb"
+    tbl = store.create_table(db)
+    store.add_chunks(tbl, _CHUNKS)
+    assert store.has_fts_index(tbl) is False
+    items, _ = mr.search_store(db, "scheduler", 5)
+    assert items
 
 
 def test_main_no_question(monkeypatch, capsys):
@@ -150,62 +212,58 @@ def test_main_help(monkeypatch):
     assert exc.value.code == 0
 
 
-def test_main_missing_mv2(monkeypatch, tmp_path, capsys):
-    monkeypatch.setattr(mr, "MV2_PATH", tmp_path / "no.mv2")
+def test_main_missing_store(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(mr, "DB_PATH", tmp_path / "no.lancedb")
     monkeypatch.setattr(sys, "argv", ["memory_recall.py", "what?"])
     with pytest.raises(SystemExit):
         mr.main()
     assert "not found" in capsys.readouterr().err
 
 
-def test_main_query_json(monkeypatch, tmp_path, mocker, capsys):
-    mv2 = tmp_path / "x.mv2"
-    mv2.write_text("p")
+def test_main_query_json(monkeypatch, populated_db, capsys, stub_embeddings):
     monkeypatch.setattr(
-        sys, "argv", ["memory_recall.py", "Q", "--mv2", str(mv2), "--json"]
+        sys,
+        "argv",
+        ["memory_recall.py", "Q", "--db", str(populated_db), "--json"],
     )
-    mocker.patch.object(mr, "_ask_normalized", return_value=([], 0))
     mr.main()
     data = json.loads(capsys.readouterr().out)
     assert data["query"] == "Q"
-    assert data["results"] == []
+    assert data["total_hits"] == len(data["results"])
 
 
-def test_main_timeline_json(monkeypatch, tmp_path, mocker, capsys):
-    mv2 = tmp_path / "x.mv2"
-    mv2.write_text("p")
+def test_main_timeline_json(monkeypatch, populated_db, capsys, stub_embeddings):
     monkeypatch.setattr(
-        sys, "argv", ["memory_recall.py", "--timeline", "--mv2", str(mv2), "--json"]
+        sys,
+        "argv",
+        ["memory_recall.py", "--timeline", "--db", str(populated_db), "--json"],
     )
-    fake_mem = mocker.MagicMock()
-    fake_mem.timeline.return_value = [
-        {
-            "frame_id": 1,
-            "timestamp": 1700000000,
-            "preview": "p",
-            "uri": "u",
-            "child_frames": [],
-        }
-    ]
-    mocker.patch.object(mr, "_open_readonly", return_value=fake_mem)
     mr.main()
     data = json.loads(capsys.readouterr().out)
     assert data["mode"] == "timeline"
-    assert data["count"] == 1
+    assert data["count"] == 2
+    # Newest first.
+    stamps = [e["timestamp"] for e in data["entries"]]
+    assert stamps == sorted(stamps, reverse=True)
 
 
-def test_entry_to_dict_dict_input():
-    d = mr._entry_to_dict({"frame_id": 1})
-    assert d == {"frame_id": 1}
+def test_recall_survives_missing_backend(monkeypatch, populated_db, stub_embeddings):
+    """A missing lancedb/fastembed must yield [] rather than kill the caller.
+
+    The dependency guards in memory_store call sys.exit, and recall() runs
+    inside cycle_start's thread pool — an escaping SystemExit would abort the
+    whole cycle-start briefing over an optional dependency.
+    """
+    monkeypatch.setattr(mr, "DB_PATH", populated_db)
+    monkeypatch.setattr(mr, "search_store", lambda *a, **kw: sys.exit(1))
+    assert mr.recall("q") == []
 
 
-def test_entry_to_dict_obj_input():
-    class E:
-        frame_id = 7
-        timestamp = 1
-        preview = "p"
-        uri = "u"
-        child_frames = []
+def test_recall_survives_missing_embedder(monkeypatch, populated_db, stub_embeddings):
+    monkeypatch.setattr(mr, "DB_PATH", populated_db)
 
-    d = mr._entry_to_dict(E())
-    assert d["frame_id"] == 7
+    def _exit(_text):
+        sys.exit(1)
+
+    monkeypatch.setattr(store, "embed_query", _exit)
+    assert mr.recall("q") == []

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-memory_recall.py — Query long-term semantic memory (memvid SDK).
+memory_recall.py — Query long-term semantic memory (LanceDB).
 
 Searches the agent's long-term memory store for entries matching a
-natural-language question using the `memvid_sdk` Python package (hybrid
-lexical + semantic search).
+natural-language question using hybrid retrieval: BM25 full-text search fused
+with bge-small vector similarity (see scripts/memory_store.py).
 
 Usage:
     uv run python scripts/memory_recall.py "What did I work on last week?"
@@ -17,44 +17,28 @@ Required:
     QUESTION          Natural-language query (first positional argument)
 
 Optional:
-    --mv2 PATH        Path to the .mv2 file (default: /agent/memory/long_term_memory.mv2)
+    --db PATH         Path to the LanceDB store (default: /agent/memory/long_term_memory.lancedb)
     --k N             Number of results to return (default: 5)
+    --min-score F     Drop results scoring below F of the top hit, 0..1 (default: 0 = keep all)
     --json            Output as JSON instead of formatted text
     --timeline        Show timeline entries instead of semantic search
     --since DATE      Filter entries since DATE (ISO format or unix timestamp)
     --until DATE      Filter entries until DATE (ISO format or unix timestamp)
 
-Exit codes: 0 = success, 1 = error (missing args, file not found, SDK error)
+Exit codes: 0 = success, 1 = error (missing args, store not found, query error)
 """
 
 import json
 import sys
-from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-try:
-    import memvid_sdk
-except ImportError:
-    memvid_sdk = None
+from scripts import memory_store as store
+from scripts.memory_store import DEFAULT_DB
 
-
-def _require_sdk():
-    """Fail fast with a clear error when memvid_sdk is unavailable."""
-    if memvid_sdk is None:
-        print(
-            "ERROR: memvid_sdk not installed (not available on this runtime). "
-            "Install from https://github.com/0xGosu/memvid-sdk",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-
-MEMORY = Path("/agent/memory")
-MV2_PATH = MEMORY / "long_term_memory.mv2"
-# Single source of truth — vectors built with one model are not comparable to
-# queries embedded with another, so always use the ingest-time model name.
-from scripts.memory_ingest import EMBED_MODEL  # noqa: E402
+# Kept as a module-level name so callers and tests can point the library
+# `recall()` helper at a different store.
+DB_PATH = DEFAULT_DB
 
 
 def parse_args(argv):
@@ -62,7 +46,8 @@ def parse_args(argv):
     result = {
         "question": None,
         "k": 5,
-        "mv2": None,
+        "db": None,
+        "min_score": 0.0,
         "json_mode": False,
         "timeline": False,
         "since": None,
@@ -83,9 +68,19 @@ def parse_args(argv):
                     f"ERROR: --k must be an integer, got: {args[i]!r}", file=sys.stderr
                 )
                 sys.exit(1)
-        elif a == "--mv2" and i + 1 < len(args):
+        elif a == "--min-score" and i + 1 < len(args):
             i += 1
-            result["mv2"] = args[i]
+            try:
+                result["min_score"] = float(args[i])
+            except ValueError:
+                print(
+                    f"ERROR: --min-score must be a number, got: {args[i]!r}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+        elif a == "--db" and i + 1 < len(args):
+            i += 1
+            result["db"] = args[i]
         elif a == "--json":
             result["json_mode"] = True
         elif a == "--timeline":
@@ -128,144 +123,35 @@ def _parse_date_to_unix(value, strict: bool = True):
         return None
 
 
-def _clean_snippet(text):
-    """Strip internal memvid metadata from snippet text.
+def _result_to_dict(row: dict, rank: int) -> dict:
+    """Shape a store result into the dict this script prints and returns.
 
-    The SDK appends frame metadata **inline** (no newlines) after the actual
-    content text, using a pattern like:
-        <content> title: <title> tags: <tags> labels: <labels> category: "..." ...
-
-    We truncate at the first inline metadata marker (`` title: `` with a
-    leading space) to remove the appended metadata block.  A newline-based
-    fallback handles cases where the SDK does use line breaks.
+    `snippet` is simply the stored text: LanceDB returns the document column
+    verbatim, so there is no embedded metadata to strip.
     """
-    if not text:
-        return ""
-    # Inline separator (SDK appends metadata as " title: ... tags: ...")
-    for sep in (" title: ", " tags: ", " labels: ", " category: "):
-        idx = text.find(sep)
-        if idx != -1:
-            text = text[:idx]
-            break
-    # Newline-based fallback
-    for sep in ("\ntitle: ", "\ntags: ", "\nlabels: ", "\ncategory: "):
-        idx = text.find(sep)
-        if idx != -1:
-            text = text[:idx]
-            break
-    _METADATA_PREFIXES = (
-        "uri: mv2://",
-        "tags: ",
-        "labels: ",
-        "category: ",
-        "title: ",
-        "extractous_metadata:",
-        "memvid.",
-        "metadata: {",
-        "source: ",
-        "status: ",
-        "type: ",
-        "cycle: ",
-        "date: ",
-        "id: ",
-    )
-    lines = [
-        line for line in text.splitlines() if not line.startswith(_METADATA_PREFIXES)
-    ]
-    return "\n".join(lines).strip()
-
-
-def _hit_to_dict(hit, rank: int) -> dict:
-    """Normalize an SDK Hit dict (or dataclass) into the dict shape used by this script."""
-    # SDK returns plain dicts, not dataclasses — use .get() with getattr fallback
-    _g = (
-        (lambda k, d=None: hit.get(k, d))
-        if isinstance(hit, dict)
-        else (lambda k, d=None: getattr(hit, k, d))
-    )
-    snippet = _clean_snippet(_g("snippet") or "")
-    metadata = _g("metadata") or {}
-    if not isinstance(metadata, dict):
-        metadata = {}
     return {
         "rank": rank,
-        "score": _g("score", 0.0),
-        "title": _g("title", "") or "",
-        "snippet": snippet,
-        "tags": list(_g("tags", []) or []),
-        "frame_id": _g("frame_id"),
-        "metadata": dict(metadata),
+        "score": row.get("score", 0.0),
+        "title": row.get("title") or "",
+        "snippet": row.get("text") or "",
+        "tags": list(row.get("tags") or []),
+        "id": row.get("id"),
+        "metadata": dict(row.get("metadata") or {}),
     }
 
 
-def _open_readonly(mv2: Path):
-    """Open an existing .mv2 read-only via the SDK."""
-    _require_sdk()
-    return memvid_sdk.use(
-        "basic",
-        str(mv2),
-        mode="open",
-        enable_vec=True,
-        enable_lex=True,
-        read_only=True,
-    )
+def search_store(db_path, query: str, k: int, since=None, until=None, min_score=0.0):
+    """Run hybrid search and return (items, total_hits).
 
-
-def _ask_normalized(mv2: Path, query: str, k: int, since=None, until=None):
-    """Run mem.ask and return (items, total_hits).
-
-    Items are score-sorted dicts produced by `_hit_to_dict`. MV004 / "lex not
-    enabled" is treated as zero results; other SDK errors propagate.
+    Raises FileNotFoundError when the store is missing so callers can choose
+    between a hard error (CLI) and an empty list (library).
     """
-    mem = _open_readonly(mv2)
-    try:
-        # mode="hybrid" + query_embedding_model=EMBED_MODEL forces semantic
-        # search using the in-mv2 fastembed vectors. The Python wrapper's
-        # mode="auto" silently falls back to lex when no OPENAI_API_KEY is set,
-        # which would ignore the in-mv2 vectors built during ingestion.
-        result = mem.ask(
-            query,
-            k=k,
-            context_only=True,
-            since=since,
-            until=until,
-            show_chunks=True,
-            mode="hybrid",
-            query_embedding_model=EMBED_MODEL,
-            adaptive=True,
-            max_k=k,
-            min_relevancy=0.1,
-            adaptive_strategy="absolute",
-        )
-    except Exception as e:
-        err = str(e)
-        if "MV004" in err or "Lexical index is not enabled" in err:
-            result = {}
-        else:
-            raise
-
-    # `chunks` (show_chunks=True) returns all k retrieved results.
-    # `hits` only returns the single top-ranked result — always 1 regardless of k.
-    if isinstance(result, dict):
-        raw_hits = list(result.get("chunks") or result.get("hits") or [])
-        stats = result.get("stats")
-    else:
-        raw_hits = list(
-            getattr(result, "chunks", None) or getattr(result, "hits", None) or []
-        )
-        stats = getattr(result, "stats", None)
-
-    raw_hits.sort(
-        key=lambda h: (
-            h.get("score", 0.0) if isinstance(h, dict) else getattr(h, "score", 0.0)
-        ),
-        reverse=True,
-    )
-    items = [_hit_to_dict(h, i) for i, h in enumerate(raw_hits, 1)]
-    total = (
-        stats.get("total_hits", len(items)) if isinstance(stats, dict) else len(items)
-    )
-    return items, total
+    tbl = store.open_table(db_path)
+    if tbl is None:
+        raise FileNotFoundError(str(db_path))
+    rows = store.search(tbl, query, k=k, since=since, until=until, min_score=min_score)
+    items = [_result_to_dict(r, i) for i, r in enumerate(rows, 1)]
+    return items, len(items)
 
 
 def main():
@@ -285,35 +171,38 @@ def main():
         )
         sys.exit(1)
 
-    mv2 = Path(opts["mv2"]) if opts["mv2"] else MV2_PATH
-    if not mv2.exists():
+    db_path = Path(opts["db"]) if opts["db"] else DB_PATH
+    if not db_path.exists():
         print(
-            f"ERROR: {mv2} not found. Run at least one cycle-close to create it.",
+            f"ERROR: {db_path} not found. Run at least one cycle-close to create it.",
             file=sys.stderr,
         )
         sys.exit(1)
 
     if opts["timeline"]:
-        _run_timeline(opts, mv2)
+        _run_timeline(opts, db_path)
     else:
-        _run_query(opts, mv2)
+        _run_query(opts, db_path)
 
 
-def _run_query(opts, mv2):
-    """Run hybrid search via the memvid SDK.
-
-    Uses `Memvid.ask(context_only=True)` rather than `find()` because only
-    `ask()` supports the `since`/`until` date filters we expose here.
-    """
+def _run_query(opts, db_path):
+    """Run hybrid search against the LanceDB store."""
     question = opts["question"]
     k = opts["k"]
     since = _parse_date_to_unix(opts.get("since"))
     until = _parse_date_to_unix(opts.get("until"))
 
     try:
-        items, total = _ask_normalized(mv2, question, k, since=since, until=until)
+        items, total = search_store(
+            db_path,
+            question,
+            k,
+            since=since,
+            until=until,
+            min_score=opts.get("min_score", 0.0),
+        )
     except Exception as e:
-        print(f"ERROR: memvid ask failed: {e}", file=sys.stderr)
+        print(f"ERROR: memory search failed: {e}", file=sys.stderr)
         sys.exit(1)
 
     if opts["json_mode"]:
@@ -361,75 +250,46 @@ def _run_query(opts, mv2):
         )
 
 
-def _entry_to_dict(entry) -> dict:
-    """Normalize an SDK TimelineEntry dataclass into a dict for JSON output."""
-    if is_dataclass(entry):
-        return asdict(entry)
-    if isinstance(entry, dict):
-        return dict(entry)
-    # Fallback: pull known attributes
-    return {
-        "frame_id": getattr(entry, "frame_id", None),
-        "timestamp": getattr(entry, "timestamp", None),
-        "preview": getattr(entry, "preview", ""),
-        "uri": getattr(entry, "uri", None),
-        "child_frames": list(getattr(entry, "child_frames", []) or []),
-    }
+def _timeline_entry(row: dict) -> dict:
+    """Shape a store timeline row for output.
 
-
-def _enrich_timeline_entry(entry: dict, mem) -> dict:
-    """Add `title` and `tags` to a timeline entry via a per-frame lookup.
-
-    `mem.timeline()` returns a `TimelineEntry` (SDK TypedDict) which only
-    carries frame_id/uri/timestamp/preview/child_frames — no tags or
-    title. To match the shape semantic search returns, we issue one
-    `mem.frame(uri)` lookup per entry and merge the frame's `title` /
-    `tags` (and a parsed `cycle` convenience field) into the entry. The
-    `preview` is also passed through `_clean_snippet` so the inline
-    metadata block the SDK appends gets stripped, matching what semantic
-    search shows.
+    Unlike semantic search the store returns every column in one scan, so
+    title and tags need no follow-up lookup per entry.
     """
-    enriched = dict(entry)
-    enriched["preview"] = _clean_snippet(enriched.get("preview") or "")
-    uri = entry.get("uri")
-    if not uri:
-        return enriched
-    try:
-        frame = mem.frame(uri) or {}
-    except Exception:
-        # Frame lookup is best-effort; missing enrichment is preferable
-        # to crashing the whole timeline call.
-        return enriched
-    enriched["title"] = frame.get("title") or ""
-    tags = list(frame.get("tags") or [])
-    enriched["tags"] = tags
+    tags = list(row.get("tags") or [])
+    entry = {
+        "id": row.get("id"),
+        "timestamp": row.get("ts"),
+        "date": row.get("date") or "",
+        "title": row.get("title") or "",
+        "label": row.get("label") or "",
+        "source": row.get("source") or "",
+        "tags": tags,
+        "preview": row.get("text") or "",
+    }
     cycle_tag = next((t for t in tags if t.startswith("cycle:")), "")
     if cycle_tag:
-        enriched["cycle"] = cycle_tag.split(":", 1)[1]
-    return enriched
+        entry["cycle"] = cycle_tag.split(":", 1)[1]
+    return entry
 
 
-def _run_timeline(opts, mv2):
-    """Show timeline entries via the memvid SDK."""
+def _run_timeline(opts, db_path):
+    """Show timeline entries newest-first."""
     k = opts["k"]
     since = opts["since"]
     since_unix = _parse_date_to_unix(since)
     until_unix = _parse_date_to_unix(opts.get("until"))
 
     try:
-        mem = _open_readonly(mv2)
-        entries = mem.timeline(
-            limit=k,
-            since=since_unix,
-            until=until_unix,
-        )
+        tbl = store.open_table(db_path)
+        if tbl is None:
+            raise FileNotFoundError(str(db_path))
+        rows = store.timeline(tbl, limit=k, since=since_unix, until=until_unix)
     except Exception as e:
-        print(f"ERROR: memvid timeline failed: {e}", file=sys.stderr)
+        print(f"ERROR: memory timeline failed: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Enrich each entry with title/tags via a per-frame lookup so the
-    # output carries the same metadata semantic search returns.
-    items = [_enrich_timeline_entry(_entry_to_dict(e), mem) for e in (entries or [])]
+    items = [_timeline_entry(r) for r in rows]
 
     if opts["json_mode"]:
         print(
@@ -452,38 +312,40 @@ def _run_timeline(opts, mv2):
         print()
         for entry in items:
             ts = entry.get("timestamp", "")
-            frame_id = entry.get("frame_id", "?")
             title = entry.get("title") or "untitled"
             tags = entry.get("tags") or []
             cycle_tag = next((t for t in tags if t.startswith("cycle:")), "")
             date_tag = next((t for t in tags if t.startswith("date:")), "")
-            header = f"  [ts={ts}] Frame {frame_id}"
+            header = f"  [ts={ts}] {entry.get('label') or 'entry'}"
             if cycle_tag:
                 header += f" | {cycle_tag}"
             if date_tag:
                 header += f" | {date_tag}"
             print(f"{header}")
             print(f"    {title}")
-            preview = (entry.get("preview") or "")[:160]
+            preview = " ".join((entry.get("preview") or "").split())[:160]
             if preview:
                 print(f"    {preview}")
-        print(f"\n[MEMORY TIMELINE] Done.")
+        print("\n[MEMORY TIMELINE] Done.")
 
 
 def recall(query: str, k: int = 5, until=None, json_mode: bool = False) -> list:
     """Query long-term memory and return results as a list of dicts.
 
-    Returns a list of result dicts (rank, score, title, snippet, tags, frame_id).
-    Returns empty list on any error (file not found, SDK unavailable, etc.).
-    Does not print or call sys.exit().
+    Returns a list of result dicts (rank, score, title, snippet, tags, id,
+    metadata). Returns an empty list on any error (store not found, backend
+    unavailable, etc.). Does not print or call sys.exit().
+
+    SystemExit is caught alongside Exception on purpose: the store's dependency
+    guards exit rather than raise, and this helper runs inside cycle_start's
+    thread pool, where an escaping SystemExit would abort the whole briefing
+    over a missing optional dependency.
     """
-    if memvid_sdk is None or not MV2_PATH.exists():
-        return []
     try:
         until_unix = _parse_date_to_unix(until, strict=False)
-        items, _ = _ask_normalized(MV2_PATH, query, k, until=until_unix)
+        items, _ = search_store(DB_PATH, query, k, until=until_unix)
         return items
-    except Exception:
+    except (Exception, SystemExit):
         return []
 
 

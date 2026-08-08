@@ -1,4 +1,5 @@
-"""Tests for scripts/memory_ingest.py — chunking helpers and arg parsing."""
+"""Tests for scripts/memory_ingest.py — chunking helpers, arg parsing, and
+the LanceDB rebuild/append paths."""
 
 from __future__ import annotations
 
@@ -8,18 +9,12 @@ from pathlib import Path
 
 import pytest
 
+# These suites exercise a real LanceDB store. uv only resolves lancedb for
+# the Linux container, so on a dev machine the dependency is simply absent.
+pytest.importorskip("lancedb")
+
 import memory_ingest as mi
-
-
-def test_should_compress_threshold(tmp_path, monkeypatch):
-    monkeypatch.setattr(mi, "COMPRESSION_THRESHOLD_MB", 0)  # any size triggers
-    p = tmp_path / "x.mv2"
-    p.write_text("data")
-    assert mi._should_compress(p) is True
-
-
-def test_should_compress_missing(tmp_path):
-    assert mi._should_compress(tmp_path / "absent.mv2") is False
+import memory_store as store
 
 
 def test_load_json_missing(tmp_path):
@@ -55,7 +50,7 @@ def test_parse_args_help():
 
 def test_parse_args_missing_value(capsys):
     with pytest.raises(SystemExit):
-        mi.parse_args(["script", "--mv2"])
+        mi.parse_args(["script", "--db"])
 
 
 def test_compose_journal_text():
@@ -239,10 +234,10 @@ def test_main_help(monkeypatch, capsys):
 def test_build_no_chunks_exits(tmp_path, monkeypatch, capsys):
     mem = tmp_path / "memory"
     mem.mkdir()
-    mv2 = tmp_path / "x.mv2"
+    db = tmp_path / "x.lancedb"
     # No source files exist — gather returns []
     with pytest.raises(SystemExit):
-        mi.build(str(mem), str(mv2), dry_run=True)
+        mi.build(str(mem), str(db), dry_run=True)
     err = capsys.readouterr().err
     assert "No chunks" in err
 
@@ -253,228 +248,291 @@ def test_build_dry_run_emits_json(tmp_path, monkeypatch, capsys):
     (mem / "journal.json").write_text(
         json.dumps([{"cycle": 1, "summary": "ok work done", "actions": ["a"]}])
     )
-    mv2 = tmp_path / "x.mv2"
-    mi.build(str(mem), str(mv2), dry_run=True, json_mode=True, quiet=True)
+    db = tmp_path / "x.lancedb"
+    mi.build(str(mem), str(db), dry_run=True, json_mode=True, quiet=True)
     out = json.loads(capsys.readouterr().out)
     assert out["mode"] == "dry_run"
     assert out["total_chunks"] >= 1
 
 
-def test_append_json_missing_mv2(tmp_path, capsys):
-    mv2 = tmp_path / "no.mv2"
-    with pytest.raises(SystemExit):
-        mi.append_json(str(mv2), '{"cycle":1}')
-    assert "not found" in capsys.readouterr().err
-
-
-def test_append_json_bad_json(tmp_path, capsys):
-    mv2 = tmp_path / "x.mv2"
-    mv2.write_text("placeholder")
-    with pytest.raises(SystemExit):
-        mi.append_json(str(mv2), "{not json")
-    assert "Invalid JSON" in capsys.readouterr().err
-
-
-def test_append_text_short_text(tmp_path, capsys):
-    mv2 = tmp_path / "x.mv2"
-    mv2.write_text("placeholder")
-    with pytest.raises(SystemExit):
-        mi.append_text(str(mv2), "")
-    assert "short" in capsys.readouterr().err.lower()
-
-
-def test_append_file_missing_mv2(tmp_path, capsys):
-    mv2 = tmp_path / "no.mv2"
-    f = tmp_path / "doc.pdf"
-    f.write_text("x")
-    with pytest.raises(SystemExit):
-        mi.append_file(str(mv2), str(f))
-
-
-def test_append_file_unsupported_ext(tmp_path, capsys):
-    mv2 = tmp_path / "x.mv2"
-    mv2.write_text("p")
-    f = tmp_path / "doc.xyz"
-    f.write_text("x")
-    with pytest.raises(SystemExit):
-        mi.append_file(str(mv2), str(f))
-    assert "Unsupported" in capsys.readouterr().err
-
-
-def test_append_many_no_chunks_returns_zero(tmp_path):
-    mv2 = tmp_path / "x.mv2"
-    mv2.write_text("p")
-    # memvid_sdk may be None on this runtime; without chunks, returns (0,0)
-    if mi.memvid_sdk is None:
-        # _require_sdk would exit; use empty chunks to avoid going further
-        ok, fail = mi.append_many(str(mv2), [])
-        assert (ok, fail) == (0, 0)
-
-
-def test_append_inbox_message_missing_mv2(tmp_path):
-    if mi.memvid_sdk is None:
-        # _require_sdk exits before reaching the file check
-        with pytest.raises(SystemExit):
-            mi.append_inbox_message(str(tmp_path / "no.mv2"), {"content": "hi"})
-    else:
-        assert (
-            mi.append_inbox_message(str(tmp_path / "no.mv2"), {"content": "hi"})
-            is False
-        )
-
-
 # ---------------------------------------------------------------------------
-# Build staging-file rebuild — verify the canonical .mv2 stays untouched
-# during the build and is only swapped after seal() succeeds.
+# Write paths — real LanceDB round-trips against tmp_path, with embeddings
+# stubbed so no test ever downloads a model.
 # ---------------------------------------------------------------------------
-
-
-class _FakeMemvid:
-    """Minimal memvid stand-in that writes a marker to its target path."""
-
-    def __init__(self, path: str, marker: str = "fresh") -> None:
-        self.path = Path(path)
-        self.path.write_text(marker)
-        self.put_many_calls: list = []
-        self.sealed = False
-
-    def put_many(self, requests, opts=None):
-        self.put_many_calls.append((list(requests), dict(opts or {})))
-        return [f"frame-{i}" for i in range(len(requests))]
-
-    def seal(self) -> None:
-        self.sealed = True
-
-
-class _FakeSdk:
-    """memvid_sdk stand-in that records every create() call."""
-
-    def __init__(self, *, fail_put_many: bool = False) -> None:
-        self.created: list[_FakeMemvid] = []
-        self.fail_put_many = fail_put_many
-
-    def create(self, path, **_kwargs):
-        mem = _FakeMemvid(path)
-        if self.fail_put_many:
-
-            def _boom(_requests, opts=None):
-                raise RuntimeError("simulated put_many failure")
-
-            mem.put_many = _boom  # type: ignore[assignment]
-        self.created.append(mem)
-        return mem
-
-    def use(self, *_a, **_kw):  # not exercised by build()
-        raise AssertionError("use() should not be called during --build")
 
 
 def _seed_memory(mem_dir: Path) -> None:
     mem_dir.mkdir()
     (mem_dir / "journal.json").write_text(
         json.dumps(
-            [{"cycle_number": 1, "summary": "did the thing", "actions": ["did it"]}]
+            [
+                {
+                    "cycle_number": 1,
+                    "summary": "did the thing",
+                    "actions": ["did it"],
+                    "timestamp": "2026-01-01T00:00:00Z",
+                }
+            ]
         )
     )
 
 
-def test_build_writes_to_staging_and_swaps(tmp_path, monkeypatch):
-    """Successful build: staging path is used, then swapped in atomically."""
+@pytest.fixture
+def built_db(tmp_path, stub_embeddings):
+    """A store with one journal row already ingested."""
     mem_dir = tmp_path / "memory"
     _seed_memory(mem_dir)
-    mv2 = tmp_path / "long_term_memory.mv2"
-    mv2.write_text("OLD INDEX")  # pretend a previous index exists
-
-    fake = _FakeSdk()
-    monkeypatch.setattr(mi, "memvid_sdk", fake)
-
-    mi.build(str(mem_dir), str(mv2), quiet=True)
-
-    # Exactly one create() call, and it targeted the staging path.
-    assert len(fake.created) == 1
-    assert fake.created[0].path == mv2.with_suffix(mv2.suffix + ".rebuild")
-    assert fake.created[0].sealed is True
-    assert fake.created[0].put_many_calls, "put_many was not invoked"
-
-    # After swap: canonical holds the freshly-built content; previous
-    # canonical is preserved as .backup; staging file is gone.
-    assert mv2.exists()
-    assert mv2.read_text() == "fresh"
-    backup = mv2.with_suffix(mv2.suffix + ".backup")
-    assert backup.exists() and backup.read_text() == "OLD INDEX"
-    assert not mv2.with_suffix(mv2.suffix + ".rebuild").exists()
+    db = tmp_path / "long_term_memory.lancedb"
+    mi.build(str(mem_dir), str(db), quiet=True)
+    return db
 
 
-def test_build_first_run_no_backup(tmp_path, monkeypatch):
+def test_append_json_missing_db(tmp_path, capsys, stub_embeddings):
+    db = tmp_path / "no.lancedb"
+    with pytest.raises(SystemExit):
+        mi.append_json(str(db), '{"cycle":1}')
+    assert "not found" in capsys.readouterr().err
+
+
+def test_append_json_bad_json(built_db, capsys, stub_embeddings):
+    with pytest.raises(SystemExit):
+        mi.append_json(str(built_db), "{not json")
+    assert "Invalid JSON" in capsys.readouterr().err
+
+
+def test_append_json_writes_row(built_db, stub_embeddings):
+    before = store.open_table(built_db).count_rows()
+    mi.append_json(
+        str(built_db),
+        json.dumps(
+            {
+                "cycle_number": 7,
+                "summary": "appended entry",
+                "actions": ["a"],
+                "timestamp": "2026-02-01T00:00:00Z",
+            }
+        ),
+        quiet=True,
+    )
+    assert store.open_table(built_db).count_rows() == before + 1
+
+
+def test_append_text_short_text(built_db, capsys, stub_embeddings):
+    with pytest.raises(SystemExit):
+        mi.append_text(str(built_db), "")
+    assert "short" in capsys.readouterr().err.lower()
+
+
+def test_append_text_is_idempotent(built_db, stub_embeddings):
+    mi.append_text(str(built_db), "a memorable fact worth keeping", quiet=True)
+    after_first = store.open_table(built_db).count_rows()
+    mi.append_text(str(built_db), "a memorable fact worth keeping", quiet=True)
+    assert store.open_table(built_db).count_rows() == after_first
+
+
+def test_append_file_missing_db(tmp_path, stub_embeddings):
+    db = tmp_path / "no.lancedb"
+    f = tmp_path / "doc.md"
+    f.write_text("some content here")
+    with pytest.raises(SystemExit):
+        mi.append_file(str(db), str(f))
+
+
+def test_append_file_unsupported_ext(built_db, capsys, stub_embeddings):
+    f = Path(built_db).parent / "doc.pdf"
+    f.write_text("x")
+    with pytest.raises(SystemExit):
+        mi.append_file(str(built_db), str(f))
+    err = capsys.readouterr().err
+    assert "Unsupported" in err
+    assert "convert to text first" in err.lower()
+
+
+def test_append_file_too_large(built_db, capsys, monkeypatch, stub_embeddings):
+    monkeypatch.setattr(mi, "MAX_FILE_BYTES", 10)
+    f = Path(built_db).parent / "big.md"
+    f.write_text("x" * 100)
+    with pytest.raises(SystemExit):
+        mi.append_file(str(built_db), str(f))
+    assert "too large" in capsys.readouterr().err.lower()
+
+
+def test_append_file_reads_text(built_db, stub_embeddings):
+    before = store.open_table(built_db).count_rows()
+    f = Path(built_db).parent / "notes.md"
+    f.write_text("# Notes\n\nThe deploy needs two approvals.")
+    mi.append_file(str(built_db), str(f), quiet=True)
+    tbl = store.open_table(built_db)
+    assert tbl.count_rows() == before + 1
+    rows = tbl.search().where("source = 'append-file'").limit(5).to_list()
+    assert any("two approvals" in r["text"] for r in rows)
+
+
+def test_append_many_no_chunks_returns_zero(built_db, stub_embeddings):
+    assert mi.append_many(str(built_db), []) == (0, 0)
+
+
+def test_append_many_missing_db_is_noop(tmp_path, stub_embeddings):
+    chunk = mi.transform_inbox_entry({"content": "a message body", "type": "user"})
+    assert mi.append_many(str(tmp_path / "no.lancedb"), [chunk]) == (0, 0)
+
+
+def test_append_many_writes_and_dedupes(built_db, stub_embeddings):
+    chunks = [
+        mi.transform_inbox_entry(
+            {"content": "first message body", "type": "user", "id": "m1"}
+        ),
+        mi.transform_inbox_entry(
+            {"content": "second message body", "type": "user", "id": "m2"}
+        ),
+    ]
+    before = store.open_table(built_db).count_rows()
+    assert mi.append_many(str(built_db), chunks) == (2, 0)
+    assert store.open_table(built_db).count_rows() == before + 2
+    # Re-flushing the same batch must not duplicate.
+    assert mi.append_many(str(built_db), chunks) == (2, 0)
+    assert store.open_table(built_db).count_rows() == before + 2
+
+
+def test_append_inbox_message_missing_db(tmp_path, stub_embeddings):
+    assert (
+        mi.append_inbox_message(str(tmp_path / "no.lancedb"), {"content": "hi there"})
+        is False
+    )
+
+
+def test_append_inbox_message_skips_short(built_db, stub_embeddings):
+    assert mi.append_inbox_message(str(built_db), {"content": "x"}) is False
+
+
+def test_append_inbox_message_writes(built_db, stub_embeddings):
+    before = store.open_table(built_db).count_rows()
+    assert (
+        mi.append_inbox_message(str(built_db), {"content": "a real inbox message"})
+        is True
+    )
+    assert store.open_table(built_db).count_rows() == before + 1
+
+
+# ---------------------------------------------------------------------------
+# Build staging rebuild — the canonical store must stay untouched during the
+# build and only be swapped after the staging store is fully written.
+# ---------------------------------------------------------------------------
+
+
+def test_build_writes_to_staging_and_swaps(tmp_path, stub_embeddings):
+    """Successful build: staging is used, then swapped in atomically."""
+    mem_dir = tmp_path / "memory"
+    _seed_memory(mem_dir)
+    db = tmp_path / "long_term_memory.lancedb"
+    staging, backup = store.staging_paths(db)
+
+    # Pretend a previous index exists.
+    mi.build(str(mem_dir), str(db), quiet=True)
+    first_rows = store.open_table(db).count_rows()
+
+    # Add a second journal entry, then rebuild.
+    (mem_dir / "journal.json").write_text(
+        json.dumps(
+            [
+                {
+                    "cycle_number": 1,
+                    "summary": "did the thing",
+                    "actions": ["did it"],
+                    "timestamp": "2026-01-01T00:00:00Z",
+                },
+                {
+                    "cycle_number": 2,
+                    "summary": "did another thing",
+                    "actions": ["did it again"],
+                    "timestamp": "2026-01-02T00:00:00Z",
+                },
+            ]
+        )
+    )
+    mi.build(str(mem_dir), str(db), quiet=True)
+
+    assert store.open_table(db).count_rows() == first_rows + 1
+    assert backup.is_dir(), "previous store should be preserved as .backup"
+    assert not staging.exists(), "staging directory should be gone after the swap"
+
+
+def test_build_first_run_no_backup(tmp_path, stub_embeddings):
     """First build (no pre-existing canonical) — no backup is created."""
     mem_dir = tmp_path / "memory"
     _seed_memory(mem_dir)
-    mv2 = tmp_path / "long_term_memory.mv2"  # does not exist
+    db = tmp_path / "long_term_memory.lancedb"
+    staging, backup = store.staging_paths(db)
 
-    fake = _FakeSdk()
-    monkeypatch.setattr(mi, "memvid_sdk", fake)
+    mi.build(str(mem_dir), str(db), quiet=True)
 
-    mi.build(str(mem_dir), str(mv2), quiet=True)
-
-    assert mv2.exists() and mv2.read_text() == "fresh"
-    assert not mv2.with_suffix(mv2.suffix + ".backup").exists()
-    assert not mv2.with_suffix(mv2.suffix + ".rebuild").exists()
+    assert store.open_table(db).count_rows() == 1
+    assert not backup.exists()
+    assert not staging.exists()
 
 
-def test_build_swap_failure_leaves_canonical_untouched(tmp_path, monkeypatch):
-    """If the rename swap fails, canonical is NOT replaced and staging is removed."""
+def test_build_creates_fts_index(tmp_path, stub_embeddings):
     mem_dir = tmp_path / "memory"
     _seed_memory(mem_dir)
-    mv2 = tmp_path / "long_term_memory.mv2"
-    mv2.write_text("OLD INDEX")
+    db = tmp_path / "long_term_memory.lancedb"
+    mi.build(str(mem_dir), str(db), quiet=True)
+    assert store.has_fts_index(store.open_table(db)) is True
 
-    fake = _FakeSdk()
-    monkeypatch.setattr(mi, "memvid_sdk", fake)
 
-    def _replace_boom(_a, _b):
+def test_build_swap_failure_leaves_canonical_untouched(
+    tmp_path, monkeypatch, stub_embeddings
+):
+    """If the swap fails, canonical is NOT replaced and staging is removed."""
+    mem_dir = tmp_path / "memory"
+    _seed_memory(mem_dir)
+    db = tmp_path / "long_term_memory.lancedb"
+    mi.build(str(mem_dir), str(db), quiet=True)
+    staging, _backup = store.staging_paths(db)
+    original_rows = store.open_table(db).count_rows()
+
+    def _promote_boom(_path):
         raise OSError("simulated rename failure")
 
-    monkeypatch.setattr(mi.os, "replace", _replace_boom)
+    monkeypatch.setattr(store, "promote_staging", _promote_boom)
 
     with pytest.raises(OSError):
-        mi.build(str(mem_dir), str(mv2), quiet=True)
+        mi.build(str(mem_dir), str(db), quiet=True)
 
-    # Canonical .mv2 must be unchanged; staging must be cleaned up.
-    assert mv2.read_text() == "OLD INDEX"
-    assert not mv2.with_suffix(mv2.suffix + ".rebuild").exists()
+    assert store.open_table(db).count_rows() == original_rows
+    assert not staging.exists()
 
 
-def test_build_put_many_failure_leaves_canonical_untouched(tmp_path, monkeypatch):
-    """If put_many raises, the swap is skipped and canonical stays intact."""
+def test_build_write_failure_leaves_canonical_untouched(
+    tmp_path, monkeypatch, stub_embeddings
+):
+    """If a batch write fails, the swap is skipped and canonical stays intact."""
     mem_dir = tmp_path / "memory"
     _seed_memory(mem_dir)
-    mv2 = tmp_path / "long_term_memory.mv2"
-    mv2.write_text("OLD INDEX")
+    db = tmp_path / "long_term_memory.lancedb"
+    mi.build(str(mem_dir), str(db), quiet=True)
+    staging, backup = store.staging_paths(db)
+    original_rows = store.open_table(db).count_rows()
 
-    fake = _FakeSdk(fail_put_many=True)
-    monkeypatch.setattr(mi, "memvid_sdk", fake)
+    monkeypatch.setattr(store, "add_chunks", lambda *a, **kw: (0, 1))
 
-    with pytest.raises(RuntimeError, match="simulated put_many failure"):
-        mi.build(str(mem_dir), str(mv2), quiet=True)
+    with pytest.raises(RuntimeError, match="failed to write"):
+        mi.build(str(mem_dir), str(db), quiet=True)
 
-    # Canonical untouched; no backup created (swap never happened); staging gone.
-    assert mv2.read_text() == "OLD INDEX"
-    assert not mv2.with_suffix(mv2.suffix + ".backup").exists()
-    assert not mv2.with_suffix(mv2.suffix + ".rebuild").exists()
+    assert store.open_table(db).count_rows() == original_rows
+    assert not backup.exists()
+    assert not staging.exists()
 
 
-def test_build_removes_stale_staging_before_start(tmp_path, monkeypatch):
-    """A leftover .rebuild file from a prior crash is cleared at the start."""
+def test_build_removes_stale_staging_before_start(tmp_path, stub_embeddings):
+    """A leftover .rebuild directory from a prior crash is cleared at the start."""
     mem_dir = tmp_path / "memory"
     _seed_memory(mem_dir)
-    mv2 = tmp_path / "long_term_memory.mv2"
-    stale = mv2.with_suffix(mv2.suffix + ".rebuild")
-    stale.write_text("STALE PARTIAL")
+    db = tmp_path / "long_term_memory.lancedb"
+    staging, _backup = store.staging_paths(db)
+    staging.mkdir(parents=True)
+    (staging / "STALE_PARTIAL").write_text("junk")
 
-    fake = _FakeSdk()
-    monkeypatch.setattr(mi, "memvid_sdk", fake)
+    mi.build(str(mem_dir), str(db), quiet=True)
 
-    mi.build(str(mem_dir), str(mv2), quiet=True)
-
-    # The stale partial was overwritten by a fresh build (then renamed away).
-    assert mv2.exists() and mv2.read_text() == "fresh"
-    assert not stale.exists()
+    assert store.open_table(db).count_rows() == 1
+    assert not staging.exists()

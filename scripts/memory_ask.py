@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-memory_ask.py — RAG-powered question answering over memvid memory files.
+memory_ask.py — RAG-powered question answering over the long-term memory store.
 
-Retrieves adaptive context from a .mv2 file via the `memvid_sdk` Python
-package (`Memvid.ask(context_only=True)`), then synthesizes an answer using
-Claude via claude-agent-sdk.
+Retrieves context from a LanceDB store via scripts/memory_store.py (hybrid
+BM25 + vector search), then synthesizes an answer using Claude via
+claude-agent-sdk.
 
 Usage:
     uv run python scripts/memory_ask.py "What is the MacBook Pro M5 price?"
-    uv run python scripts/memory_ask.py "What portal work was done?" --mv2 /agent/memory/long_term_memory.mv2
-    uv run python scripts/memory_ask.py "corporate leasing options" --mv2 /agent/workspace/itez_sg.mv2 --k 10
+    uv run python scripts/memory_ask.py "What portal work was done?" --db /agent/memory/long_term_memory.lancedb
+    uv run python scripts/memory_ask.py "corporate leasing options" --db /agent/workspace/itez_sg.lancedb --k 10
     uv run python scripts/memory_ask.py "iPhone models" --context-only
     uv run python scripts/memory_ask.py "warranty info" --json
 
@@ -17,8 +17,9 @@ Required:
     QUESTION          Natural-language question (first positional argument)
 
 Optional:
-    --mv2 PATH        Path to .mv2 file (default: /agent/memory/long_term_memory.mv2)
+    --db PATH         Path to the LanceDB store (default: /agent/memory/long_term_memory.lancedb)
     --k N             Max results for retrieval (default: 20)
+    --min-score F     Drop results scoring below F of the top hit, 0..1 (default: 0.5)
     --context-only    Show retrieved context without Claude synthesis
     --json            Output as JSON
     --system PROMPT   Custom system prompt for Claude
@@ -29,30 +30,16 @@ Exit codes: 0 = success, 1 = error
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
 
-try:
-    import memvid_sdk
-except ImportError:
-    memvid_sdk = None
+from scripts import memory_store as store
+from scripts.memory_store import DEFAULT_DB
 
-# Single source of truth — vectors built with one model are not comparable to
-# queries embedded with another, so always use the ingest-time model name.
-from scripts.memory_ingest import EMBED_MODEL  # noqa: E402
-
-
-def _require_sdk():
-    """Fail fast with a clear error when memvid_sdk is unavailable."""
-    if memvid_sdk is None:
-        print(
-            "ERROR: memvid_sdk not installed (not available on this runtime). "
-            "Install from https://github.com/0xGosu/memvid-sdk",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-
-DEFAULT_MV2 = Path("/agent/memory/long_term_memory.mv2")
+# Keep hits whose score is at least half the top hit's. Retrieval is scored
+# relative to the best match rather than on an absolute scale, because hybrid
+# fusion scores depend on how many candidates were merged.
+DEFAULT_MIN_SCORE = 0.5
 
 SYSTEM_PROMPT = (
     "You are a helpful assistant answering questions based on retrieved context. "
@@ -66,8 +53,9 @@ def parse_args(argv):
     args = argv[1:]
     result = {
         "question": None,
-        "mv2": str(DEFAULT_MV2),
+        "db": str(DEFAULT_DB),
         "k": 20,
+        "min_score": DEFAULT_MIN_SCORE,
         "context_only": False,
         "json_mode": False,
         "system_prompt": SYSTEM_PROMPT,
@@ -78,9 +66,9 @@ def parse_args(argv):
         a = args[i]
         if a in ("-h", "--help"):
             result["help"] = True
-        elif a == "--mv2" and i + 1 < len(args):
+        elif a == "--db" and i + 1 < len(args):
             i += 1
-            result["mv2"] = args[i]
+            result["db"] = args[i]
         elif a == "--k" and i + 1 < len(args):
             i += 1
             try:
@@ -88,6 +76,16 @@ def parse_args(argv):
             except ValueError:
                 print(
                     f"ERROR: --k must be an integer, got: {args[i]!r}", file=sys.stderr
+                )
+                sys.exit(1)
+        elif a == "--min-score" and i + 1 < len(args):
+            i += 1
+            try:
+                result["min_score"] = float(args[i])
+            except ValueError:
+                print(
+                    f"ERROR: --min-score must be a number, got: {args[i]!r}",
+                    file=sys.stderr,
                 )
                 sys.exit(1)
         elif a == "--context-only":
@@ -103,141 +101,51 @@ def parse_args(argv):
     return result
 
 
-def _clean_text(text: str) -> str:
-    """Strip internal memvid metadata from a snippet.
+def retrieve_context(db_path, question, k, min_score=DEFAULT_MIN_SCORE):
+    """Retrieve context for a question from the LanceDB store.
 
-    The SDK appends frame metadata **inline** (no newlines) after the actual
-    content text, using a pattern like:
-        <content> title: <title> tags: <tags> labels: <labels> category: "..." ...
-
-    We truncate at the first inline metadata marker (`` title: `` with a
-    leading space) to remove the appended metadata block.  A newline-based
-    fallback handles cases where the SDK does use line breaks.
+    Over-fetches (2x k) and then trims to k after the relevance filter, so a
+    long tail of weak matches cannot crowd out strong ones.
     """
-    if not text:
-        return ""
-    # Inline separator (SDK appends metadata as " title: ... tags: ...")
-    for sep in (" title: ", " tags: ", " labels: ", " category: "):
-        idx = text.find(sep)
-        if idx != -1:
-            text = text[:idx]
-            break
-    # Newline-based fallback
-    for sep in ("\ntitle: ", "\ntags: ", "\nlabels: ", "\ncategory: "):
-        idx = text.find(sep)
-        if idx != -1:
-            text = text[:idx]
-            break
-    _METADATA_PREFIXES = (
-        "uri: mv2://",
-        "tags: ",
-        "labels: ",
-        "category: ",
-        "title: ",
-        "extractous_metadata:",
-        "memvid.",
-        "metadata: {",
-        "source: ",
-        "status: ",
-        "type: ",
-        "cycle: ",
-        "date: ",
-        "id: ",
-    )
-    lines = [
-        line for line in text.splitlines() if not line.startswith(_METADATA_PREFIXES)
-    ]
-    return "\n".join(lines).strip()
-
-
-def retrieve_context(mv2_path, question, k):
-    """Retrieve context from a .mv2 file via the memvid SDK."""
-    _require_sdk()
-    mv2 = Path(mv2_path)
-    if not mv2.exists():
-        print(f"ERROR: {mv2} not found.", file=sys.stderr)
+    db_file = Path(db_path)
+    try:
+        tbl = store.open_table(db_file)
+    except Exception as e:
+        print(f"ERROR: cannot open {db_file}: {e}", file=sys.stderr)
+        sys.exit(1)
+    if tbl is None:
+        print(f"ERROR: {db_file} not found.", file=sys.stderr)
         sys.exit(1)
 
+    started = time.monotonic()
     try:
-        mem = memvid_sdk.use(
-            "basic",
-            str(mv2),
-            mode="open",
-            enable_vec=True,
-            enable_lex=True,
-            read_only=True,
-        )
-        # allow up to 2x initial k hits during search with adaptive strategy "relative"
-        # Keep hits whose score is at least 0.5 × top_score. E.g. top score is 0.3, drop hits with score < 0.15
-        # mode="hybrid" + query_embedding_model=EMBED_MODEL forces semantic
-        # search using the in-mv2 fastembed vectors. Without this the Python
-        # wrapper's mode="auto" silently falls back to lex when no
-        # OPENAI_API_KEY is set, ignoring the in-mv2 vectors from ingestion.
-        result = mem.ask(
-            question,
-            k=k,
-            context_only=True,
-            show_chunks=True,
-            mode="hybrid",
-            query_embedding_model=EMBED_MODEL,
-            adaptive=True,
-            max_k=k * 2,
-            min_relevancy=0.5,
-        )
+        rows = store.search(tbl, question, k=k * 2, min_score=min_score)[:k]
     except Exception as e:
-        err = str(e)
-        # MV004: no lex hits → SDK tried vec fallback → fastembed not compiled in.
-        # Treat as zero results rather than a hard failure.
-        if "MV004" in err or "Lexical index is not enabled" in err:
-            result = {}
-        else:
-            print(f"ERROR: memvid ask failed: {e}", file=sys.stderr)
-            sys.exit(1)
+        print(f"ERROR: memory search failed: {e}", file=sys.stderr)
+        sys.exit(1)
+    retrieval_ms = int((time.monotonic() - started) * 1000)
 
-    # SDK returns plain dicts, not dataclasses — use .get() not getattr()
-    _rget = (
-        (lambda k_, d=None: result.get(k_, d))
-        if isinstance(result, dict)
-        else (lambda k_, d=None: getattr(result, k_, d))
-    )
-    # `chunks` (show_chunks=True) returns all k retrieved results.
-    # `hits` only returns the single top-ranked result — always 1 regardless of k.
-    hits = list(_rget("chunks") or _rget("hits") or [])
-    clean_parts = []
+    context_parts = []
     results = []
-    for h in hits:
-        _hget = (
-            (lambda k_, d=None: h.get(k_, d))
-            if isinstance(h, dict)
-            else (lambda k_, d=None: getattr(h, k_, d))
-        )
-        title = _hget("title", "") or ""
-        snippet = _clean_text(_hget("snippet", "") or "")
-        score = _hget("score", 0.0)
-        frame_id = _hget("frame_id")
+    for row in rows:
+        title = row.get("title") or ""
+        snippet = row.get("text") or ""
         if snippet:
-            clean_parts.append(f"[{title}]\n{snippet}")
+            context_parts.append(f"[{title}]\n{snippet}")
         results.append(
             {
                 "title": title,
-                "score": score,
+                "score": row.get("score", 0.0),
                 "snippet": snippet,
-                "frame_id": frame_id,
+                "id": row.get("id"),
             }
         )
 
-    sdk_context = _rget("context", "") or ""
-    stats = _rget("stats", {}) or {}
-    total_hits = (
-        stats.get("total_hits", len(hits)) if isinstance(stats, dict) else len(hits)
-    )
-    retrieval_ms = stats.get("took_ms") if isinstance(stats, dict) else None
-
     return {
         "results": results,
-        "context": "\n\n---\n\n".join(clean_parts) or sdk_context,
-        "total_hits": total_hits,
-        "stats": {"retrieval_ms": retrieval_ms} if retrieval_ms is not None else {},
+        "context": "\n\n---\n\n".join(context_parts),
+        "total_hits": len(results),
+        "stats": {"retrieval_ms": retrieval_ms},
     }
 
 
@@ -320,10 +228,12 @@ def main():
         sys.exit(1)
 
     question = opts["question"]
-    mv2_path = opts["mv2"]
+    db_path = opts["db"]
 
     # Step 1: Retrieve context
-    retrieval = retrieve_context(mv2_path, question, opts["k"])
+    retrieval = retrieve_context(
+        db_path, question, opts["k"], min_score=opts["min_score"]
+    )
 
     if not retrieval["results"]:
         if opts["json_mode"]:
@@ -331,7 +241,7 @@ def main():
                 json.dumps(
                     {
                         "question": question,
-                        "mv2": mv2_path,
+                        "db": db_path,
                         "answer": None,
                         "context_hits": 0,
                         "message": "No relevant context found.",
@@ -351,7 +261,7 @@ def main():
                 json.dumps(
                     {
                         "question": question,
-                        "mv2": mv2_path,
+                        "db": db_path,
                         "context_hits": retrieval["total_hits"],
                         "retrieval_ms": retrieval["stats"].get("retrieval_ms"),
                         "context": retrieval["context"],
@@ -376,7 +286,7 @@ def main():
     if not opts["json_mode"]:
         print(
             f'[MEMORY ASK] "{question}" '
-            f'({retrieval["total_hits"]} context hits from {Path(mv2_path).name})\n',
+            f'({retrieval["total_hits"]} context hits from {Path(db_path).name})\n',
             file=sys.stderr,
         )
 
@@ -389,7 +299,7 @@ def main():
             json.dumps(
                 {
                     "question": question,
-                    "mv2": mv2_path,
+                    "db": db_path,
                     "answer": answer,
                     "context_hits": retrieval["total_hits"],
                     "retrieval_ms": retrieval["stats"].get("retrieval_ms"),

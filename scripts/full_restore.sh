@@ -87,9 +87,11 @@ PROTECTED_PATHS=(
   "scripts/full_restore.sh"
   "skills/full-backup-and-migrate/SKILL.md"
   # Memory CLI scripts the agent depends on at runtime
+  "scripts/memory_store.py"
   "scripts/memory_ingest.py"
   "scripts/memory_ask.py"
   "scripts/memory_recall.py"
+  "scripts/memory_inspect.py"
   # Constitution Hard-Rule "NEVER delete/modify" files
   "constitution.md"
   "system.md"

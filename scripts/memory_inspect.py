@@ -1,92 +1,68 @@
 #!/usr/bin/env python3
 """
-memory_inspect.py — Inspect a long-term memory `.mv2` file (memvid SDK).
+memory_inspect.py — Inspect the long-term memory store (LanceDB).
 
-Read-only diagnostics for a memvid `.mv2` index. Reports on-disk footprint
-(file + sibling artifacts), total frame/entry count, source/label/tag
-distribution, preview-length distribution, and timestamp span. Also compares
-the indexed counts against the source JSON files (journal, journal archive,
-inbox history) so you can spot inflation from auto-chunking or stale records.
+Read-only diagnostics for the LanceDB store. Reports on-disk footprint (the
+store directory plus any sibling rebuild/backup directories), row count,
+source/label/tag distribution, text-length distribution, and timestamp span.
+Also compares the indexed counts against the source JSON files (journal,
+journal archive, inbox history) so you can spot stale or duplicated records.
 
 Usage:
     uv run python scripts/memory_inspect.py
-    uv run python scripts/memory_inspect.py --mv2 /agent/memory/long_term_memory.mv2
+    uv run python scripts/memory_inspect.py --db /agent/memory/long_term_memory.lancedb
     uv run python scripts/memory_inspect.py --top-tags 30
-    uv run python scripts/memory_inspect.py --sample 5         # show 5 raw entries
+    uv run python scripts/memory_inspect.py --sample 5         # show 5 raw rows
     uv run python scripts/memory_inspect.py --json
-    uv run python scripts/memory_inspect.py --api               # dump SDK surface
-    uv run python scripts/memory_inspect.py --stats              # HNSW/embedding health check
-    uv run python scripts/memory_inspect.py --stats --json       # machine-readable stats
+    uv run python scripts/memory_inspect.py --api               # dump table API surface
+    uv run python scripts/memory_inspect.py --stats             # embedding/index health check
+    uv run python scripts/memory_inspect.py --stats --json      # machine-readable stats
 
 Optional:
-    --mv2 PATH        Path to the .mv2 file (default: /agent/memory/long_term_memory.mv2)
+    --db PATH         Path to the LanceDB store (default: /agent/memory/long_term_memory.lancedb)
     --memory PATH     Path to the memory directory holding the source JSON files
                       (journal/journal_archive/inbox_history). Defaults to the parent
-                      directory of --mv2, so passing --mv2 alone is enough for
+                      directory of --db, so passing --db alone is enough for
                       most cases.
-    --limit N         Max entries to iterate via timeline() (default: 200000)
+    --limit N         Max rows to scan (default: 200000)
     --top-tags N      How many top tags to print (default: 20)
-    --sample N        Print N raw timeline entries (default: 0)
-    --deep            Call SDK introspection (stats/memories_stats/state/
-                      get_capacity/doctor/verify) and fetch full frames for
-                      the largest fan-out records to find what's eating disk
-    --frame N         Fetch frame N via mem.frame() and print full content
-    --api             Print dir(mem) for the opened handle and exit
+    --sample N        Print N raw rows (default: 0)
+    --deep            Add version history, fragment stats and per-file disk usage
+    --row ID          Fetch a single row by its id and print full content
+    --api             Print dir(table) for the opened handle and exit
     --json            Output report as JSON
-    --stats            Query SDK stats() and compare embedding dimension against
-                       memory_ingest.py EMBED_MODEL. Exit code 2 = MISMATCH.
+    --stats           Report index health and compare the stored vector dimension
+                      against memory_store.EMBED_DIM. Exit code 2 = MISMATCH.
 
-Exit codes: 0 = success, 1 = error (file not found, SDK error)
+Exit codes: 0 = success, 1 = error (store not found, query error), 2 = dimension mismatch
 """
 
 import json
+import os
 import re
 import sys
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-try:
-    import memvid_sdk
-except ImportError:
-    memvid_sdk = None
-
-
-MEMORY = Path("/agent/memory")
-DEFAULT_MV2 = MEMORY / "long_term_memory.mv2"
-
-# Maps EMBED_MODEL short-keys (from memory_ingest.py) to (full_model_name, dimension).
-# Keep this in sync if memory_ingest.py ever changes EMBED_MODEL.
-_MODEL_DIMENSION_MAP = {
-    "bge-small": ("BAAI/bge-small-en-v1.5", 384),
-    "bge-base": ("BAAI/bge-base-en-v1.5", 768),
-    "bge-large": ("BAAI/bge-large-en-v1.5", 1024),
-}
-
-
-def _require_sdk():
-    if memvid_sdk is None:
-        print(
-            "ERROR: memvid_sdk not installed (not available on this runtime).",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+from scripts import memory_store as store
+from scripts.memory_store import DEFAULT_DB, EMBED_DIM, EMBED_MODEL
 
 
 def parse_args(argv):
     args = argv[1:]
-    # `mv2` and `memory` start as None so we can tell explicit overrides apart
-    # from defaults — when only `--mv2` is given, we auto-derive `memory` from
-    # the mv2 file's parent directory so source-JSON comparison works on
-    # non-default .mv2 files.
+    # `db` and `memory` start as None so we can tell explicit overrides apart
+    # from defaults — when only `--db` is given, we auto-derive `memory` from
+    # the store's parent directory so source-JSON comparison works on
+    # non-default stores.
     result = {
-        "mv2": None,
+        "db": None,
         "memory": None,
         "limit": 200000,
         "top_tags": 20,
         "sample": 0,
         "deep": False,
-        "frame": None,
+        "row": None,
         "api": False,
         "json_mode": False,
         "help": False,
@@ -97,26 +73,27 @@ def parse_args(argv):
         a = args[i]
         if a in ("-h", "--help"):
             result["help"] = True
-        elif a == "--mv2" and i + 1 < len(args):
+        elif a == "--db" and i + 1 < len(args):
             i += 1
-            result["mv2"] = args[i]
+            result["db"] = args[i]
         elif a == "--memory" and i + 1 < len(args):
             i += 1
             result["memory"] = args[i]
-        elif a == "--limit" and i + 1 < len(args):
+        elif a in ("--limit", "--top-tags", "--sample") and i + 1 < len(args):
+            key = a.lstrip("-").replace("-", "_")
             i += 1
-            result["limit"] = int(args[i])
-        elif a == "--top-tags" and i + 1 < len(args):
-            i += 1
-            result["top_tags"] = int(args[i])
-        elif a == "--sample" and i + 1 < len(args):
-            i += 1
-            result["sample"] = int(args[i])
+            try:
+                result[key] = int(args[i])
+            except ValueError:
+                print(
+                    f"ERROR: {a} must be an integer, got: {args[i]!r}", file=sys.stderr
+                )
+                sys.exit(1)
         elif a == "--deep":
             result["deep"] = True
-        elif a == "--frame" and i + 1 < len(args):
+        elif a == "--row" and i + 1 < len(args):
             i += 1
-            result["frame"] = int(args[i])
+            result["row"] = args[i]
         elif a == "--api":
             result["api"] = True
         elif a == "--json":
@@ -125,242 +102,153 @@ def parse_args(argv):
             result["stats"] = True
         i += 1
 
-    # Resolve defaults — `--mv2` falls back to DEFAULT_MV2; `--memory`
-    # auto-derives from the mv2 parent so callers only need to pass `--mv2`.
-    if result["mv2"] is None:
-        result["mv2"] = str(DEFAULT_MV2)
+    # Resolve defaults — `--db` falls back to DEFAULT_DB; `--memory`
+    # auto-derives from the store's parent so callers only need to pass `--db`.
+    if result["db"] is None:
+        result["db"] = str(DEFAULT_DB)
     if result["memory"] is None:
-        result["memory"] = str(Path(result["mv2"]).resolve().parent)
+        result["memory"] = str(Path(result["db"]).resolve().parent)
     return result
-
-
-def _read_embed_model_from_ingest() -> tuple[str | None, str | None, int | None]:
-    """Parse EMBED_MODEL from memory_ingest.py (sibling script).
-
-    Returns (model_key, full_model_name, expected_dimension).
-    Falls back gracefully if the file is missing or unparseable.
-    """
-    ingest_path = Path(__file__).parent / "memory_ingest.py"
-    try:
-        text = ingest_path.read_text(encoding="utf-8")
-        m = re.search(r'^EMBED_MODEL\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
-        if m:
-            key = m.group(1)
-            full, dim = _MODEL_DIMENSION_MAP.get(key, (None, None))
-            return key, full, dim
-    except OSError:
-        pass
-    return None, None, None
 
 
 # ── File-system inspection ──────────────────────────────────────────────────
 
 
-def inspect_files(mv2: Path) -> dict:
-    """List the .mv2 and every sibling artifact (backup, wal, tmp copies)."""
-    parent = mv2.parent
-    base = mv2.name
+def inspect_files(db_path: Path) -> dict:
+    """Measure the store directory and any sibling rebuild/backup directories."""
+    parent = db_path.parent
+    base = db_path.name
     siblings = []
     if parent.exists():
         for p in sorted(parent.iterdir()):
-            n = p.name
-            if not p.is_file():
+            if p.name == base or not p.name.startswith(base):
                 continue
-            # Anything that mentions the .mv2 stem — including hidden tmp
-            # copies the SDK writes during atomic commits (e.g. .name.RAND).
-            if base in n or n.startswith("." + base.split(".")[0]):
-                try:
-                    siblings.append(
-                        {
-                            "name": n,
-                            "size": p.stat().st_size,
-                            "mtime": datetime.fromtimestamp(
-                                p.stat().st_mtime, tz=timezone.utc
-                            ).isoformat(),
-                        }
-                    )
-                except OSError as e:
-                    siblings.append({"name": n, "error": str(e)})
+            try:
+                siblings.append(
+                    {
+                        "name": p.name,
+                        "size": store.dir_size(p),
+                        "mtime": datetime.fromtimestamp(
+                            p.stat().st_mtime, tz=timezone.utc
+                        ).isoformat(),
+                    }
+                )
+            except OSError as e:
+                siblings.append({"name": p.name, "error": str(e)})
     return {
-        "mv2": str(mv2),
-        "exists": mv2.exists(),
-        "size": mv2.stat().st_size if mv2.exists() else 0,
+        "db": str(db_path),
+        "exists": db_path.exists(),
+        "size": store.dir_size(db_path) if db_path.exists() else 0,
         "siblings": siblings,
     }
 
 
-# ── SDK-level inspection ────────────────────────────────────────────────────
+def _open(db_path: Path):
+    """Open the memories table, or exit 1 with a clear message."""
+    try:
+        tbl = store.open_table(db_path)
+    except Exception as e:
+        print(f"ERROR: cannot open {db_path}: {e}", file=sys.stderr)
+        sys.exit(1)
+    if tbl is None:
+        print(
+            f"ERROR: no '{store.TABLE_NAME}' table in {db_path}. "
+            "Run: uv run python scripts/memory_ingest.py --build",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return tbl
 
 
-def _open_readonly(mv2: Path):
-    _require_sdk()
-    return memvid_sdk.use(
-        "basic",
-        str(mv2),
-        mode="open",
-        enable_vec=True,
-        enable_lex=True,
-        read_only=True,
-    )
+# ── Index inspection ────────────────────────────────────────────────────────
 
-
-def _entry_fields(entry):
-    """Pull (frame_id, ts, preview, uri, child_frames) from a timeline entry."""
-    if isinstance(entry, dict):
-        g = entry.get
-    else:
-        g = lambda k, d=None: getattr(entry, k, d)  # noqa: E731
-    return {
-        "frame_id": g("frame_id"),
-        "timestamp": g("timestamp"),
-        "preview": g("preview") or "",
-        "uri": g("uri"),
-        "child_frames": list(g("child_frames", []) or []),
-    }
-
-
-def _parse_meta_from_preview(preview: str) -> dict:
-    """Extract `tags:` / `labels:` / `category:` / `title:` from preview text.
-
-    The SDK appends frame metadata inline after the content, e.g.
-        <content> title: ... tags: ... labels: ... category: "..."
-    We slice on the first marker to recover the appended block.
-    """
-    meta = {"title": "", "label": "", "category": "", "tags": []}
-    if not preview:
-        return meta
-    # Find the metadata block — the appended portion starts at the first marker.
-    markers = [" title: ", " tags: ", " labels: ", " category: "]
-    cut = min((preview.find(m) for m in markers if m in preview), default=-1)
-    if cut == -1:
-        return meta
-    block = preview[cut:]
-
-    def _grab(field: str) -> str:
-        # Match `field: ...` up to the next ` <other-field>: ` boundary.
-        key = f" {field}: "
-        i = block.find(key)
-        if i == -1:
-            return ""
-        rest = block[i + len(key) :]
-        next_i = len(rest)
-        for other in ("title", "tags", "labels", "category", "uri"):
-            if other == field:
-                continue
-            j = rest.find(f" {other}: ")
-            if 0 <= j < next_i:
-                next_i = j
-        return rest[:next_i].strip().strip('"')
-
-    meta["title"] = _grab("title")
-    meta["label"] = _grab("labels")
-    meta["category"] = _grab("category")
-    raw_tags = _grab("tags")
-    if raw_tags:
-        # Tags are usually comma- or space-separated; tolerate either.
-        for sep in (",", " "):
-            if sep in raw_tags:
-                meta["tags"] = [t.strip() for t in raw_tags.split(sep) if t.strip()]
-                break
-        else:
-            meta["tags"] = [raw_tags]
-    return meta
-
-
-def _content_len(preview: str) -> int:
-    """Length of the *content* portion of a preview (before metadata block)."""
-    if not preview:
-        return 0
-    cut = -1
-    for m in (" title: ", " tags: ", " labels: ", " category: "):
-        i = preview.find(m)
-        if i != -1 and (cut == -1 or i < cut):
-            cut = i
-    return cut if cut != -1 else len(preview)
+_BUCKET_ORDER = ["<100B", "<1KB", "<10KB", "<100KB", "<1MB", ">=1MB"]
 
 
 def _bucket(n: int) -> str:
+    """Bucket a byte count into a coarse size class."""
     if n < 100:
         return "<100B"
-    if n < 1_000:
+    if n < 1024:
         return "<1KB"
-    if n < 10_000:
+    if n < 10 * 1024:
         return "<10KB"
-    if n < 100_000:
+    if n < 100 * 1024:
         return "<100KB"
-    if n < 1_000_000:
+    if n < 1024 * 1024:
         return "<1MB"
     return ">=1MB"
 
 
-_BUCKET_ORDER = ("<100B", "<1KB", "<10KB", "<100KB", "<1MB", ">=1MB")
-
-
-def inspect_index(mv2: Path, limit: int) -> dict:
-    """Iterate the index via timeline() and aggregate stats."""
-    mem = _open_readonly(mv2)
+def _ts_to_iso(ts) -> str:
+    """Render a unix timestamp as ISO-8601 UTC, or "?" when unusable."""
     try:
-        entries = mem.timeline(limit=limit) or []
+        return datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError, OverflowError):
+        return "?"
+
+
+SCAN_COLUMNS = ["id", "title", "label", "text", "tags", "source", "date", "ts"]
+
+
+def inspect_index(db_path: Path, limit: int) -> dict:
+    """Scan the table once and aggregate every distribution the report shows."""
+    tbl = _open(db_path)
+    try:
+        total_rows = tbl.count_rows()
     except Exception as e:
-        return {"error": f"timeline() failed: {e}", "entries_seen": 0}
+        return {"error": f"count_rows failed: {type(e).__name__}: {e}"}
 
-    label_counts = Counter()
-    source_counts = Counter()
-    tag_counts = Counter()
-    date_counts = Counter()
-    bucket_counts = Counter()
-    child_counts = Counter()
+    try:
+        rows = tbl.search().select(SCAN_COLUMNS).limit(max(limit, 1)).to_list()
+    except Exception as e:
+        return {"error": f"scan failed: {type(e).__name__}: {e}"}
 
-    total = 0
-    total_content = 0
-    total_preview = 0
-    max_content = 0
-    max_preview = 0
+    label_counts: Counter = Counter()
+    source_counts: Counter = Counter()
+    tag_counts: Counter = Counter()
+    date_counts: Counter = Counter()
+    bucket_counts: Counter = Counter()
+    id_counts: Counter = Counter()
+
+    text_total = 0
+    text_max = 0
     ts_min = None
     ts_max = None
 
-    for e in entries:
-        f = _entry_fields(e)
-        total += 1
-        meta = _parse_meta_from_preview(f["preview"])
-        clen = _content_len(f["preview"])
-        plen = len(f["preview"])
-        total_content += clen
-        total_preview += plen
-        if clen > max_content:
-            max_content = clen
-        if plen > max_preview:
-            max_preview = plen
-        bucket_counts[_bucket(clen)] += 1
-        n_children = len(f["child_frames"])
-        child_counts[n_children if n_children < 10 else "10+"] += 1
-        if meta["label"]:
-            label_counts[meta["label"]] += 1
-        for t in meta["tags"]:
-            tag_counts[t] += 1
-            if t.startswith("date:"):
-                date_counts[t[5:]] += 1
-            if t in ("inbox", "journal", "cycle", "goal"):
-                source_counts[t] += 1
-        ts = f["timestamp"]
-        if isinstance(ts, (int, float)) and ts > 0:
-            if ts_min is None or ts < ts_min:
-                ts_min = ts
-            if ts_max is None or ts > ts_max:
-                ts_max = ts
+    for row in rows:
+        text = row.get("text") or ""
+        size = len(text.encode("utf-8", errors="ignore"))
+        text_total += size
+        text_max = max(text_max, size)
+        bucket_counts[_bucket(size)] += 1
+
+        label_counts[row.get("label") or "(none)"] += 1
+        source_counts[row.get("source") or "(none)"] += 1
+        id_counts[row.get("id") or ""] += 1
+        if row.get("date"):
+            date_counts[row["date"]] += 1
+        for tag in row.get("tags") or []:
+            tag_counts[tag] += 1
+
+        ts = row.get("ts")
+        if isinstance(ts, int):
+            ts_min = ts if ts_min is None else min(ts_min, ts)
+            ts_max = ts if ts_max is None else max(ts_max, ts)
+
+    duplicates = sum(c - 1 for c in id_counts.values() if c > 1)
 
     return {
-        "entries_seen": total,
+        "rows_total": total_rows,
+        "rows_seen": len(rows),
         "limit": limit,
-        "truncated": total >= limit,
-        "content_total_bytes": total_content,
-        "content_max_bytes": max_content,
-        "preview_total_bytes": total_preview,
-        "preview_max_bytes": max_preview,
-        "content_size_buckets": {b: bucket_counts.get(b, 0) for b in _BUCKET_ORDER},
-        "label_counts": dict(label_counts.most_common()),
-        "source_counts": dict(source_counts.most_common()),
-        "child_frame_counts": dict(child_counts),
+        "truncated": len(rows) < total_rows,
+        "duplicate_ids": duplicates,
+        "text_total_bytes": text_total,
+        "text_max_bytes": text_max,
+        "text_size_buckets": dict(bucket_counts),
+        "label_counts": dict(label_counts),
+        "source_counts": dict(source_counts),
         "top_tags": tag_counts,
         "top_dates": date_counts,
         "timestamp_min": ts_min,
@@ -368,221 +256,119 @@ def inspect_index(mv2: Path, limit: int) -> dict:
     }
 
 
-def _ts_to_iso(ts):
-    if not isinstance(ts, (int, float)) or ts <= 0:
-        return None
-    try:
-        return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
-    except (OSError, ValueError):
-        return None
+def inspect_stats(db_path: Path) -> dict:
+    """Report index health and verify the stored vector dimension.
 
-
-# ── Deep introspection via SDK methods ──────────────────────────────────────
-
-
-def _safe_call(obj, name: str, *args, **kwargs):
-    """Call a method by name, returning the result or {'error': ...} on failure.
-
-    Suppresses native stderr written by the underlying Rust SDK (e.g. doctor's
-    `doctor: ...` probe lines) so that --json output stays parseable.
+    Key field `dimension_aligned` is:
+      True  — the vector column width matches memory_store.EMBED_DIM
+      False — MISMATCH: the store was built with a different embedding model
+              and every semantic query is meaningless until it is rebuilt
+      None  — could not determine
     """
-    fn = getattr(obj, name, None)
-    if not callable(fn):
-        return {"error": f"{name} not callable"}
-    with _silenced_stderr():
-        try:
-            return fn(*args, **kwargs)
-        except Exception as e:
-            return {"error": f"{name} raised: {type(e).__name__}: {e}"}
+    tbl = _open(db_path)
 
+    stored_dim = store.vector_dimension(tbl)
+    aligned = None if stored_dim is None else (stored_dim == EMBED_DIM)
 
-import contextlib  # noqa: E402
-import os  # noqa: E402
-
-
-@contextlib.contextmanager
-def _silenced_stderr():
-    """Redirect FD 2 to /dev/null for the duration of the block.
-
-    The memvid SDK is implemented in Rust and writes diagnostic lines (e.g.
-    `doctor: probe start`) directly to file-descriptor 2, bypassing Python's
-    sys.stderr — so contextlib.redirect_stderr can't catch them. We dup the
-    FD, point 2 at /dev/null, then restore.
-    """
+    indexes = []
     try:
-        old_fd = os.dup(2)
-    except OSError:
-        yield
-        return
-    try:
-        with open(os.devnull, "wb") as devnull:
-            os.dup2(devnull.fileno(), 2)
-            try:
-                yield
-            finally:
-                os.dup2(old_fd, 2)
-    finally:
-        os.close(old_fd)
-
-
-def _frame_uri(entry_or_id) -> str:
-    """Build the mv2:// URI the SDK expects for frame() / blob() lookups.
-
-    Timeline entries already carry a `uri` field — we prefer it. If only the
-    integer frame_id is available, fall back to the canonical form.
-    """
-    if isinstance(entry_or_id, dict):
-        u = entry_or_id.get("uri")
-        if isinstance(u, str) and u:
-            return u
-        fid = entry_or_id.get("frame_id")
-    else:
-        fid = entry_or_id
-    return f"mv2://frame/{int(fid)}"
-
-
-def _to_jsonable(obj, depth: int = 0):
-    """Convert SDK return values (dicts, dataclasses, custom objects) to JSON."""
-    if depth > 6:
-        return repr(obj)
-    if obj is None or isinstance(obj, (bool, int, float, str)):
-        return obj
-    if isinstance(obj, (list, tuple, set)):
-        return [_to_jsonable(x, depth + 1) for x in obj]
-    if isinstance(obj, dict):
-        return {str(k): _to_jsonable(v, depth + 1) for k, v in obj.items()}
-    # Dataclass-ish or attrs: take public attributes
-    if hasattr(obj, "__dict__"):
-        return {
-            k: _to_jsonable(v, depth + 1)
-            for k, v in vars(obj).items()
-            if not k.startswith("_")
-        }
-    if hasattr(obj, "_asdict"):  # namedtuple
-        return {k: _to_jsonable(v, depth + 1) for k, v in obj._asdict().items()}
-    return repr(obj)
-
-
-def deep_inspect(mv2: Path, limit: int) -> dict:
-    """Call SDK introspection methods and fetch full frames for fan-out records.
-
-    The goal is to discover where the bytes actually live: vector index segments,
-    lex index, frame blobs, retired records, WAL pages, etc.
-    """
-    mem = _open_readonly(mv2)
-    out = {}
-
-    # Plain no-arg introspection methods discovered via --api.
-    for name in (
-        "stats",
-        "memories_stats",
-        "state",
-        "get_capacity",
-        "list_tables",
-        "functions",
-    ):
-        attr = getattr(mem, name, None)
-        if attr is None:
-            continue
-        if callable(attr):
-            out[name] = _to_jsonable(_safe_call(mem, name))
-        else:
-            out[name] = _to_jsonable(attr)
-
-    # doctor / verify often print or return health data
-    out["doctor"] = _to_jsonable(_safe_call(mem, "doctor"))
-    out["verify"] = _to_jsonable(_safe_call(mem, "verify"))
-
-    # For each table the SDK exposes, dump its schema/row count if reachable.
-    tables = out.get("list_tables") or []
-    if isinstance(tables, list) and tables:
-        table_info = {}
-        for t in tables[:30]:
-            table_info[str(t)] = _to_jsonable(_safe_call(mem, "get_table", t))
-        out["tables"] = table_info
-
-    # Fetch the largest fan-out frames: from timeline, find entries with
-    # the most child_frames and pull each parent + its first child via
-    # mem.frame() to see what's actually stored.
-    try:
-        entries = mem.timeline(limit=limit) or []
-    except Exception as e:
-        out["timeline_error"] = str(e)
-        return out
-
-    fanout = []
-    for e in entries:
-        f = _entry_fields(e)
-        n = len(f["child_frames"])
-        if n > 0:
-            fanout.append((n, f))
-    fanout.sort(key=lambda x: -x[0])
-
-    fan_samples = []
-    for n, f in fanout[:5]:
-        parent_uri = f.get("uri") or _frame_uri(f["frame_id"])
-        rec = {
-            "frame_id": f["frame_id"],
-            "uri": parent_uri,
-            "n_children": n,
-            "preview_120": (f["preview"] or "")[:120],
-        }
-        rec["parent_frame"] = _to_jsonable(_safe_call(mem, "frame", parent_uri))
-        if f["child_frames"]:
-            child_id = f["child_frames"][0]
-            child_uri = _frame_uri(child_id) if isinstance(child_id, int) else child_id
-            rec["first_child_uri"] = child_uri
-            rec["first_child_frame"] = _to_jsonable(_safe_call(mem, "frame", child_uri))
-            rec["first_child_blob_len"] = _maybe_blob_len(mem, child_uri)
-        rec["parent_blob_len"] = _maybe_blob_len(mem, parent_uri)
-        fan_samples.append(rec)
-    out["fanout_samples"] = fan_samples
-    out["fanout_top_counts"] = [n for n, _ in fanout[:20]]
-
-    # Sample a few zero-child frames too — they may carry bulky vector blobs.
-    zero_child = [
-        _entry_fields(e) for e in entries if not _entry_fields(e)["child_frames"]
-    ]
-    flat_samples = []
-    for f in zero_child[:3]:
-        uri = f.get("uri") or _frame_uri(f["frame_id"])
-        flat_samples.append(
-            {
-                "frame_id": f["frame_id"],
-                "uri": uri,
-                "preview_120": (f["preview"] or "")[:120],
-                "frame": _to_jsonable(_safe_call(mem, "frame", uri)),
-                "blob_len": _maybe_blob_len(mem, uri),
+        for idx in tbl.list_indices():
+            entry = {
+                "name": getattr(idx, "name", None),
+                "type": getattr(idx, "index_type", None),
+                "columns": list(getattr(idx, "columns", []) or []),
             }
-        )
-    out["flat_frame_samples"] = flat_samples
+            try:
+                istats = tbl.index_stats(entry["name"])
+                entry["indexed_rows"] = getattr(istats, "num_indexed_rows", None)
+                entry["unindexed_rows"] = getattr(istats, "num_unindexed_rows", None)
+            except Exception:
+                pass
+            indexes.append(entry)
+    except Exception as e:
+        return {"error": f"list_indices failed: {type(e).__name__}: {e}"}
 
+    result = {
+        "expected_model": EMBED_MODEL,
+        "expected_dimension": EMBED_DIM,
+        "stored_dimension": stored_dim,
+        "dimension_aligned": aligned,
+        "indexes": indexes,
+        "has_vec_index": any(str(i.get("type", "")).startswith("Ivf") for i in indexes),
+        "has_fts_index": any(i.get("type") == "FTS" for i in indexes),
+        "size_bytes": store.dir_size(db_path),
+    }
+
+    try:
+        result["row_count"] = tbl.count_rows()
+    except Exception:
+        result["row_count"] = None
+    try:
+        result["version"] = tbl.version
+    except Exception:
+        result["version"] = None
+
+    # Retained versions are the storage-health number: LanceDB is copy-on-write,
+    # so un-reclaimed versions are what makes the store grow out of proportion
+    # to the data.
+    result["retained_versions"] = store.version_count(tbl)
+    result["compact_threshold"] = store.COMPACT_VERSION_THRESHOLD
+    stamp = store.compact_stamp_path(db_path)
+    try:
+        result["last_compacted"] = datetime.fromtimestamp(
+            stamp.stat().st_mtime, tz=timezone.utc
+        ).isoformat()
+    except OSError:
+        result["last_compacted"] = None
+    try:
+        import lancedb
+
+        result["lancedb_version"] = getattr(lancedb, "__version__", None)
+    except Exception:
+        pass
+
+    return result
+
+
+def deep_inspect(db_path: Path) -> dict:
+    """Version history, fragment statistics and per-file disk usage."""
+    tbl = _open(db_path)
+    out: dict = {}
+
+    try:
+        out["stats"] = tbl.stats()
+    except Exception as e:
+        out["stats_error"] = f"{type(e).__name__}: {e}"
+
+    try:
+        versions = tbl.list_versions()
+        out["version_count"] = len(versions)
+        out["versions"] = versions[-10:]
+    except Exception as e:
+        out["versions_error"] = f"{type(e).__name__}: {e}"
+
+    # Largest files on disk — shows whether space is going to data, indexes or
+    # accumulated manifests from many small writes.
+    files = []
+    for root, _dirs, names in os.walk(db_path, onerror=lambda _e: None):
+        for name in names:
+            full = os.path.join(root, name)
+            try:
+                files.append(
+                    {
+                        "path": os.path.relpath(full, str(db_path)),
+                        "size": os.path.getsize(full),
+                    }
+                )
+            except OSError:
+                continue
+    files.sort(key=lambda f: f["size"], reverse=True)
+    out["file_count"] = len(files)
+    out["largest_files"] = files[:25]
     return out
 
 
-def _maybe_blob_len(mem, frame_uri):
-    """Try mem.blob(uri) and return byte length, or describe failure.
-
-    Accepts an mv2:// URI string (the SDK's expected form). Pass an int
-    frame_id only via _frame_uri() conversion at the call site.
-    """
-    fn = getattr(mem, "blob", None)
-    if not callable(fn):
-        return None
-    if isinstance(frame_uri, int):
-        frame_uri = _frame_uri(frame_uri)
-    with _silenced_stderr():
-        try:
-            b = fn(frame_uri)
-        except Exception as e:
-            return f"error: {type(e).__name__}: {e}"
-    try:
-        return len(b)
-    except TypeError:
-        return f"len-failed: {type(b).__name__}"
-
-
-# ── Source-JSON counts (for comparison) ─────────────────────────────────────
+# ── Source JSON comparison ──────────────────────────────────────────────────
 
 
 def _safe_load_list(p: Path) -> int:
@@ -617,68 +403,15 @@ def inspect_sources(memory_dir: Path) -> dict:
 # ── Reporting ───────────────────────────────────────────────────────────────
 
 
-def inspect_stats(mv2: Path) -> dict:
-    """Query SDK stats() and compare embedding dimension against memory_ingest.py.
-
-    Returns a structured dict. Key field `dimension_aligned` is:
-      True  — stored dimension matches memory_ingest.py EMBED_MODEL
-      False — MISMATCH: index needs a --build rebuild
-      None  — could not determine (SDK error or unknown model)
-    """
-    model_key, expected_model, expected_dim = _read_embed_model_from_ingest()
-
-    mem = _open_readonly(mv2)
-    try:
-        raw = mem.stats()
-    except Exception as e:
-        return {"error": f"stats() failed: {type(e).__name__}: {e}"}
-
-    identity_summary = raw.get("embedding_identity_summary") or {}
-    identity = (
-        (identity_summary.get("identity") or {})
-        if isinstance(identity_summary, dict)
-        else {}
-    )
-    stored_model = identity.get("model")
-    stored_dim = identity.get("dimension")
-    provider = identity.get("provider")
-    effective_dim = raw.get("effective_vec_dimension")
-
-    if expected_dim is not None and effective_dim is not None:
-        aligned = effective_dim == expected_dim
-    else:
-        aligned = None
-
-    # Try to get SDK version from global info
-    sdk_version = None
-    try:
-        sdk_info = memvid_sdk.info()
-        sdk_version = (
-            sdk_info.get("sdk_version") if isinstance(sdk_info, dict) else None
-        )
-    except Exception:
-        pass
-
-    return {
-        "model_key": model_key,
-        "expected_model": expected_model,
-        "expected_dimension": expected_dim,
-        "stored_model": stored_model,
-        "stored_dimension": stored_dim,
-        "effective_vec_dimension": effective_dim,
-        "provider": provider,
-        "dimension_aligned": aligned,
-        "frame_count": raw.get("frame_count"),
-        "active_frame_count": raw.get("active_frame_count"),
-        "has_vec_index": raw.get("has_vec_index"),
-        "has_lex_index": raw.get("has_lex_index"),
-        "has_time_index": raw.get("has_time_index"),
-        "size_bytes": raw.get("size_bytes"),
-        "vec_index_bytes": raw.get("vec_index_bytes"),
-        "lex_index_bytes": raw.get("lex_index_bytes"),
-        "compression_ratio_percent": raw.get("compression_ratio_percent"),
-        "sdk_version": sdk_version,
-    }
+def _fmt_bytes(n) -> str:
+    if n is None:
+        return "?"
+    n = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024:
+            return f"{n:.1f}{unit}"
+        n /= 1024
+    return f"{n:.1f}PB"
 
 
 def print_stats_report(s: dict) -> None:
@@ -695,48 +428,39 @@ def print_stats_report(s: dict) -> None:
     else:
         status = "⚠️  UNKNOWN"
 
-    print("── HNSW / Embedding Stats ──────────────────────────────────────────")
-    if s.get("model_key"):
-        exp = (
-            f"{s['expected_model']} (dim: {s['expected_dimension']})"
-            if s.get("expected_model")
-            else "unknown"
-        )
-        print(f"  Configured model (memory_ingest.py): {s['model_key']} → {exp}")
-    else:
-        print("  Configured model (memory_ingest.py): could not read EMBED_MODEL")
-    stored = f"{s.get('stored_model', '?')} via {s.get('provider', '?')} (dim: {s.get('stored_dimension', '?')})"
-    print(f"  Stored in index:                     {stored}")
-    print(
-        f"  Effective vec dimension:             {s.get('effective_vec_dimension', '?')}"
-    )
-    print(f"  Dimension alignment:                 {status}")
+    print("── Embedding ───────────────────────────────────────────────────────")
+    print(f"  Configured model:     {s['expected_model']}")
+    print(f"  Expected dimension:   {s['expected_dimension']}")
+    print(f"  Stored dimension:     {s.get('stored_dimension', '?')}")
+    print(f"  Dimension alignment:  {status}")
     if aligned is False:
-        print(f"\n  ⚠️  Fix: uv run python scripts/memory_ingest.py --build")
+        print("\n  ⚠️  Fix: uv run python scripts/memory_ingest.py --build")
 
     print("\n── Index Health ────────────────────────────────────────────────────")
-    print(f"  Total frames:         {s.get('frame_count', '?')}")
-    print(f"  Active frames:        {s.get('active_frame_count', '?')}")
-    print(f"  Has vec index:        {'✅' if s.get('has_vec_index') else '❌'}")
-    print(f"  Has lex index:        {'✅' if s.get('has_lex_index') else '❌'}")
-    print(f"  Has time index:       {'✅' if s.get('has_time_index') else '❌'}")
-    print(f"  Index size:           {_fmt_bytes(s.get('size_bytes') or 0)}")
-    print(f"  Vec index:            {_fmt_bytes(s.get('vec_index_bytes') or 0)}")
-    print(f"  Lex index:            {_fmt_bytes(s.get('lex_index_bytes') or 0)}")
-    if s.get("compression_ratio_percent") is not None:
-        print(f"  Compression ratio:    {s['compression_ratio_percent']:.1f}%")
-    if s.get("sdk_version"):
-        print(f"  SDK version:          {s['sdk_version']}")
-
-
-def _fmt_bytes(n: int) -> str:
-    if n is None:
-        return "?"
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024:
-            return f"{n:.1f}{unit}"
-        n /= 1024
-    return f"{n:.1f}PB"
+    print(f"  Rows:                 {s.get('row_count', '?')}")
+    print(f"  Store size:           {_fmt_bytes(s.get('size_bytes'))}")
+    print(f"  Has full-text index:  {'✅' if s.get('has_fts_index') else '❌'}")
+    print(
+        f"  Has vector index:     "
+        f"{'✅' if s.get('has_vec_index') else '— (brute-force scan)'}"
+    )
+    for idx in s.get("indexes") or []:
+        detail = f"{idx.get('type')} on {', '.join(idx.get('columns') or [])}"
+        pending = idx.get("unindexed_rows")
+        if pending:
+            detail += f"  ({pending} row(s) not yet indexed)"
+        name = str(idx.get("name") or "?")
+        print(f"    - {name:<24} {detail}")
+    print(f"  Table version:        {s.get('version', '?')}")
+    retained = s.get("retained_versions")
+    threshold = s.get("compact_threshold")
+    note = ""
+    if isinstance(retained, int) and isinstance(threshold, int):
+        note = "  (compaction due)" if retained >= threshold else ""
+    print(f"  Retained versions:    {retained}{note}")
+    print(f"  Last compacted:       {s.get('last_compacted') or 'never'}")
+    if s.get("lancedb_version"):
+        print(f"  LanceDB version:      {s['lancedb_version']}")
 
 
 def print_text_report(report: dict, top_tags: int) -> None:
@@ -744,8 +468,8 @@ def print_text_report(report: dict, top_tags: int) -> None:
     idx = report["index"]
     src = report["sources"]
 
-    print("── File ────────────────────────────────────────────────")
-    print(f"  path: {files['mv2']}")
+    print("── Store ───────────────────────────────────────────────")
+    print(f"  path: {files['db']}")
     print(f"  size: {_fmt_bytes(files['size'])}  (exists={files['exists']})")
     print(f"  siblings ({len(files['siblings'])}):")
     for s in files["siblings"]:
@@ -765,44 +489,37 @@ def print_text_report(report: dict, top_tags: int) -> None:
     if "error" in idx:
         print(f"  ERROR: {idx['error']}")
         return
-    n = idx["entries_seen"]
-    print(f"  entries_seen: {n} (limit={idx['limit']}, truncated={idx['truncated']})")
+    n = idx["rows_seen"]
     print(
-        f"  content total: {_fmt_bytes(idx['content_total_bytes'])}  "
-        f"max: {_fmt_bytes(idx['content_max_bytes'])}  "
-        f"avg: {_fmt_bytes(idx['content_total_bytes'] // max(n, 1))}/entry"
+        f"  rows: {idx['rows_total']} total, {n} scanned "
+        f"(limit={idx['limit']}, truncated={idx['truncated']})"
     )
+    if idx.get("duplicate_ids"):
+        print(f"  ⚠️  duplicate ids: {idx['duplicate_ids']}")
     print(
-        f"  preview total: {_fmt_bytes(idx['preview_total_bytes'])}  "
-        f"max: {_fmt_bytes(idx['preview_max_bytes'])}"
+        f"  text total: {_fmt_bytes(idx['text_total_bytes'])}  "
+        f"max: {_fmt_bytes(idx['text_max_bytes'])}  "
+        f"avg: {_fmt_bytes(idx['text_total_bytes'] // max(n, 1))}/row"
     )
 
     if files["size"] and n:
-        bytes_per_entry = files["size"] / n
-        ratio = bytes_per_entry / max(1, idx["content_total_bytes"] / n)
+        bytes_per_row = files["size"] / n
+        ratio = bytes_per_row / max(1, idx["text_total_bytes"] / n)
         print(
-            f"  on-disk per entry: {_fmt_bytes(int(bytes_per_entry))}  "
-            f"(file_size / entries_seen, "
-            f"{ratio:.0f}x the avg content size)"
+            f"  on-disk per row: {_fmt_bytes(int(bytes_per_row))}  "
+            f"(store_size / rows_scanned, {ratio:.0f}x the avg text size)"
         )
 
     print(
-        f"  inflation vs sources: file={n}, source_total={total_src}, "
-        f"ratio={n / max(total_src, 1):.2f}x"
+        f"  ratio vs sources: rows={idx['rows_total']}, source_total={total_src}, "
+        f"ratio={idx['rows_total'] / max(total_src, 1):.2f}x"
     )
 
-    print("\n  content-size buckets:")
+    print("\n  text-size buckets:")
     for b in _BUCKET_ORDER:
-        v = idx["content_size_buckets"].get(b, 0)
+        v = idx["text_size_buckets"].get(b, 0)
         if v:
             print(f"    {b:<8} {v}")
-
-    print("\n  child_frame_counts (how many sub-frames per entry):")
-    for k, v in sorted(
-        idx["child_frame_counts"].items(),
-        key=lambda kv: (isinstance(kv[0], str), kv[0]),
-    ):
-        print(f"    {str(k):<6} {v}")
 
     print("\n  source/label breakdown:")
     for k, v in idx["source_counts"].items():
@@ -835,13 +552,13 @@ def main(argv: list[str] | None = None):
         print(__doc__)
         sys.exit(0)
 
-    mv2 = Path(opts["mv2"])
-    if not mv2.exists():
-        print(f"ERROR: {mv2} not found.", file=sys.stderr)
+    db_path = Path(opts["db"])
+    if not db_path.exists():
+        print(f"ERROR: {db_path} not found.", file=sys.stderr)
         sys.exit(1)
 
     if opts["stats"]:
-        s = inspect_stats(mv2)
+        s = inspect_stats(db_path)
         if opts["json_mode"]:
             print(json.dumps(s, indent=2, default=str))
         else:
@@ -852,43 +569,51 @@ def main(argv: list[str] | None = None):
         sys.exit(0)
 
     if opts["api"]:
-        mem = _open_readonly(mv2)
-        public = [a for a in dir(mem) if not a.startswith("_")]
-        print("dir(mem):")
+        tbl = _open(db_path)
+        public = [a for a in dir(tbl) if not a.startswith("_")]
+        print("dir(table):")
         for a in public:
-            obj = getattr(mem, a, None)
+            obj = getattr(tbl, a, None)
             kind = "method" if callable(obj) else type(obj).__name__
             print(f"  {a:<30} ({kind})")
         sys.exit(0)
 
-    if opts["frame"] is not None:
-        mem = _open_readonly(mv2)
-        uri = _frame_uri(opts["frame"])
-        rec = {
-            "frame_id": opts["frame"],
-            "uri": uri,
-            "frame": _to_jsonable(_safe_call(mem, "frame", uri)),
-            "blob_len": _maybe_blob_len(mem, uri),
-        }
-        print(json.dumps(rec, indent=2, default=str))
+    if opts["row"] is not None:
+        row_id = str(opts["row"])
+        # Row ids are truncated sha256 hex. Validate rather than sanitise, so a
+        # malformed id is an error instead of a silently rewritten query.
+        if not re.fullmatch(r"[0-9a-f]{1,64}", row_id):
+            print(
+                f"ERROR: invalid row id {opts['row']!r} (expected hex characters)",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        tbl = _open(db_path)
+        rows = tbl.search().where(f"id = '{row_id}'").limit(1).to_list()
+        if not rows:
+            print(f"ERROR: no row with id {opts['row']!r}", file=sys.stderr)
+            sys.exit(1)
+        row = dict(rows[0])
+        row.pop("vector", None)  # 384 floats add nothing to a human-readable dump
+        print(json.dumps(store.row_to_dict(row), indent=2, default=str))
         sys.exit(0)
 
     if opts["deep"]:
-        deep = deep_inspect(mv2, opts["limit"])
-        files = inspect_files(mv2)
-        report = {"files": files, "deep": deep}
+        report = {"files": inspect_files(db_path), "deep": deep_inspect(db_path)}
         print(json.dumps(report, indent=2, default=str))
         sys.exit(0)
 
-    files = inspect_files(mv2)
+    files = inspect_files(db_path)
     sources = inspect_sources(Path(opts["memory"]))
-    index = inspect_index(mv2, opts["limit"])
+    index = inspect_index(db_path, opts["limit"])
 
     if opts["sample"] > 0:
         try:
-            mem = _open_readonly(mv2)
-            sample = mem.timeline(limit=opts["sample"]) or []
-            index["sample_entries"] = [_entry_fields(e) for e in sample]
+            tbl = _open(db_path)
+            sample = (
+                tbl.search().select(SCAN_COLUMNS).limit(opts["sample"]).to_list() or []
+            )
+            index["sample_entries"] = sample
         except Exception as e:
             index["sample_error"] = str(e)
 
@@ -904,14 +629,14 @@ def main(argv: list[str] | None = None):
     else:
         print_text_report(report, opts["top_tags"])
         if opts["sample"] > 0:
-            print("\n── Sample entries ──────────────────────────────────────")
+            print("\n── Sample rows ─────────────────────────────────────────")
             for i, e in enumerate(index.get("sample_entries", []), 1):
                 print(
-                    f"  [{i}] frame_id={e['frame_id']} ts={e['timestamp']} "
-                    f"children={len(e['child_frames'])}"
+                    f"  [{i}] id={e.get('id')} ts={e.get('ts')} "
+                    f"label={e.get('label')} source={e.get('source')}"
                 )
-                preview = (e["preview"] or "")[:300]
-                print(f"      preview: {preview}")
+                preview = (e.get("text") or "")[:300]
+                print(f"      text: {preview}")
 
 
 if __name__ == "__main__":
