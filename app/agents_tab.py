@@ -32,7 +32,7 @@ import os
 import sys
 import urllib.parse
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import streamlit as st
@@ -52,7 +52,13 @@ from shared import (  # noqa: E402
     write_to_inbox,
 )
 
-from app.shared import GOALS_PATH, _STATUS_COLORS, _TYPE_COLORS, _badge  # noqa: E402
+from app.shared import (  # noqa: E402
+    GOALS_PATH,
+    _STATUS_COLORS,
+    _TYPE_COLORS,
+    _badge,
+    parse_dt,
+)
 
 # Status icons mirror app/commands_tab.py — kept local to avoid a circular
 # import (commands_tab imports from app.shared, not from agents_tab).
@@ -74,7 +80,6 @@ _PORTAL_SOURCE = "portal"  # `from` field on send-message envelopes
 _REPLY_TO = "messages/inbox.json"  # main inbox path string
 
 # Threshold constants for agent health panel
-_HEALTH_RECENT_HOURS = 24  # errors within this window are "recent"
 _HEALTH_WARNING_COUNT = 3  # ≥ this many errors in 24h triggers warning
 
 # ─── mtime-based loader caches ───────────────────────────────────────────
@@ -101,6 +106,17 @@ _EXTERNAL_CHAT_CACHE_MIN_MTIME: float = 0.0
 
 
 # ─── data loaders ────────────────────────────────────────────────────────
+
+
+def _is_within(timestamp, now, window) -> bool:
+    """True when *timestamp* is inside *window* of *now*.
+
+    Uses app.shared.parse_dt, which assumes UTC for a timezone-naive value —
+    the same normalisation scripts/metrics_db.py applies, so the "recent" flag
+    on each row agrees with the pre-computed recent count above it.
+    """
+    parsed = parse_dt(timestamp)
+    return parsed is not None and (now - parsed) < window
 
 
 def _file_mtime(path: Path) -> float:
@@ -707,51 +723,56 @@ def _render_health(agent: dict) -> None:
     turn timeouts logged by the internal_agent_chat daemon — so the operator
     can spot recurring issues at a glance without grepping log files.
     """
+    from app.data.metrics import load_agent_error_metrics
+
     name = agent.get("name") or ""
+    # Counts come pre-computed from the DuckDB metrics store; the error list
+    # below is still read from server_errors.json, which is raw log content.
+    stats = load_agent_error_metrics(name)
     errors = _load_agent_errors(name)
 
     now = datetime.now(timezone.utc)
-    recent = [
-        e
-        for e in errors
-        if e.get("timestamp")
-        and (
-            now - datetime.fromisoformat(e["timestamp"].replace("Z", "+00:00"))
-        ).total_seconds()
-        / 3600
-        < _HEALTH_RECENT_HOURS
+    recent_hours = stats["recent_hours"]
+    recent_window = timedelta(hours=recent_hours)
+
+    # The two panes read different sources, so they can disagree: the store may
+    # be unavailable, or may lag a daemon poll behind a just-logged error.
+    # Reconcile against the live list — never claim fewer errors than are shown.
+    recent_live = [
+        e for e in errors if _is_within(e.get("timestamp"), now, recent_window)
     ]
+    total = max(stats["total"], len(errors))
+    recent_count = max(stats["recent_count"], len(recent_live))
 
     # ── Summary metrics ──────────────────────────────────────────────
     c1, c2, c3 = st.columns(3)
     with c1:
-        total = len(errors)
         st.metric("Total errors (all time)", total)
     with c2:
-        recent_count = len(recent)
         delta_color = "normal" if recent_count == 0 else "inverse"
         st.metric(
-            f"Errors (last {_HEALTH_RECENT_HOURS}h)",
+            f"Errors (last {recent_hours}h)",
             recent_count,
             delta=("⚠ active" if recent_count >= _HEALTH_WARNING_COUNT else None),
             delta_color=delta_color,
         )
     with c3:
-        if errors:
-            last_ts = errors[0].get("timestamp", "")
-            if last_ts:
-                try:
-                    last_dt = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
-                    delta_secs = (now - last_dt).total_seconds()
-                    if delta_secs < 3600:
-                        ago = f"{int(delta_secs // 60)}m ago"
-                    elif delta_secs < 86400:
-                        ago = f"{int(delta_secs // 3600)}h ago"
-                    else:
-                        ago = f"{int(delta_secs // 86400)}d ago"
-                    st.metric("Last error", ago)
-                except Exception:
-                    st.metric("Last error", last_ts[:10])
+        last_ts = stats["last_error_ts"] or (
+            errors[0].get("timestamp", "") if errors else ""
+        )
+        if last_ts:
+            try:
+                last_dt = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+                delta_secs = (now - last_dt).total_seconds()
+                if delta_secs < 3600:
+                    ago = f"{int(delta_secs // 60)}m ago"
+                elif delta_secs < 86400:
+                    ago = f"{int(delta_secs // 3600)}h ago"
+                else:
+                    ago = f"{int(delta_secs // 86400)}d ago"
+                st.metric("Last error", ago)
+            except (ValueError, TypeError):
+                st.metric("Last error", last_ts[:10])
         else:
             st.metric("Last error", "—")
 
@@ -762,16 +783,16 @@ def _render_health(agent: dict) -> None:
 
     if recent_count >= _HEALTH_WARNING_COUNT:
         st.warning(
-            f"{recent_count} error(s) in the last {_HEALTH_RECENT_HOURS}h — "
+            f"{recent_count} error(s) in the last {recent_hours}h — "
             "consider restarting the agent or checking the service log."
         )
     elif recent_count > 0:
         st.info(
-            f"{recent_count} error(s) in the last {_HEALTH_RECENT_HOURS}h "
+            f"{recent_count} error(s) in the last {recent_hours}h "
             "(below warning threshold)."
         )
     else:
-        st.success(f"No recent errors for **{name}** (last {_HEALTH_RECENT_HOURS}h).")
+        st.success(f"No recent errors for **{name}** (last {recent_hours}h).")
 
     # ── Error log table ─────────────────────────────────────────────
     st.subheader("Error log")
@@ -789,9 +810,11 @@ def _render_health(agent: dict) -> None:
 
         # Compute age
         age_str = ""
+        err_dt = parse_dt(ts)
         if ts:
             try:
-                err_dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                if err_dt is None:
+                    raise ValueError(ts)
                 delta_secs = (now - err_dt).total_seconds()
                 if delta_secs < 3600:
                     age_str = f"{int(delta_secs // 60)}m ago"
@@ -800,9 +823,10 @@ def _render_health(agent: dict) -> None:
                 else:
                     age_str = f"{int(delta_secs // 86400)}d ago"
             except Exception:
+                err_dt = None
                 age_str = ts[:10]
 
-        is_recent = err in recent
+        is_recent = _is_within(ts, now, recent_window)
         icon = "🔴" if is_recent else "⚪"
         label = f"{icon} `{ts[:16]}` ({age_str}) — **{error_msg}**" + (
             f" [{source_type}]" if source_type else ""

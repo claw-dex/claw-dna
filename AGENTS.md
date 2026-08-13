@@ -62,6 +62,22 @@ HTTP service on port **8083** (Caddy proxies `/external-agent/*` with basic auth
 
 Long-running service that polls `/agent/memory/scheduled_tasks.json` every `SCHEDULER_DAEMON_POLL_SECONDS` (default 30s) and injects due tasks into `/agent/messages/inbox.json` — decoupled from heartbeat cycle frequency. Reuses the same atomic `check_and_inject()` used by `scripts/scheduler.py --check`. Auto-started by `service_manager.py`; writes `/agent/memory/heartbeats/scheduler_daemon.heartbeat` each tick. See `services/scheduler_daemon.py`.
 
+## Metrics Daemon
+
+Long-running service that keeps the DuckDB metrics store at `/agent/memory/metrics.duckdb` in sync with the JSON files it derives from, polling every `METRICS_DAEMON_POLL_SECONDS` (default 300s, floor 60s — sources change on the heartbeat cadence, so a tighter poll would only burn stat() calls). Each tick calls `metrics_db.refresh()`, which compares a `(mtime, size)` fingerprint of every source and is a no-op when nothing changed. Rebuilds go to `<db>.tmp` and are atomically `os.replace()`d in, so the portal's read-only connections never see a partial database. `scripts/cycle_close.py` also dispatches a one-shot `metrics_db.py --refresh` so the Overview tab is current the moment a cycle lands. Auto-started by `service_manager.py`; writes `/agent/memory/heartbeats/metrics_daemon.heartbeat` each tick. See `services/metrics_daemon.py` and `scripts/metrics_db.py`.
+
+The portal reads this store through `app/data/metrics.py` (read-only `SELECT`s against pre-computed `metric_*` tables). No metric is derived at render time anywhere in the portal:
+
+| Surface | Metrics served from DuckDB |
+|---|---|
+| `app/overview_tab.py` | health strip, daily glance, suggestions, evolution balance, goal performance, cycle velocity, improvements |
+| `server.py` header | cycle velocity, portal health (24h errors) |
+| `app/memory_tab.py` | Memory Overview counts + LanceDB store size |
+| `app/system_tab.py` | memory-file size/age/health table, workspace size |
+| `app/agents_tab.py` | per-agent error totals and recent-window counts |
+
+State and status still come straight from JSON — agent status, heartbeat, cycle number, current goal, service liveness, queue depths, and raw log/error content are read live and are not metrics.
+
 ## Webhook Receiver
 
 Generic HTTP webhook handler on port **8082** (Caddy proxies `/webhook/*`). POST/PUT/DELETE/PATCH payloads are recorded to `/agent/messages/inbox.json` as `type="event"`, `source="webhook"` and logged for audit; GET/HEAD/OPTIONS return 200 without recording. Path-prefix sub-handlers (registered in `HANDLERS`, e.g. `services/webhook/whatsapp_bridge_handler.py`) can take over all methods on a prefix and bypass the default inbox-writing behavior. See `services/webhook_receiver.py`.

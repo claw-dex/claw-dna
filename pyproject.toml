@@ -16,6 +16,7 @@ dependencies = [
     "claude-agent-sdk",
     "pykeepass",
     "psutil",
+    "duckdb>=1.1",
     "lancedb>=0.36",
     "fastembed>=0.8",
     "bm25s==0.3.8",

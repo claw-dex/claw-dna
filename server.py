@@ -12,7 +12,11 @@ import hydralit_components as hc
 import streamlit as st
 
 from app.shared import _startup_check, heartbeat_freshness
-from app.data import load_state, load_errors, load_cycle_velocity, load_services
+from app.data import load_state, load_services
+from app.data.metrics import (
+    load_cycle_velocity_metric,
+    load_health as load_metrics_health,
+)
 from app import (
     agents_tab,
     chat,
@@ -350,7 +354,12 @@ def _render_header():
     status_icon = status_colors.get(agent_status, "⚪")
 
     hb_display, hb_icon = heartbeat_freshness(last_heartbeat)
-    velocity = load_cycle_velocity()
+    # Velocity and the 24h error count are pre-computed metrics; the rest of
+    # this strip is live state read straight from state.json / services.json.
+    # This fragment re-runs every 60s for every connected user, and deriving
+    # velocity meant merging cycles.json + cycles_archive.json on each tick.
+    _metrics = load_metrics_health()
+    velocity = load_cycle_velocity_metric()
     _services = load_services() or {}
     _alive_services = sum(1 for s in _services.values() if s.get("alive"))
 
@@ -391,21 +400,11 @@ def _render_header():
         _goal_help = current_goal if current_goal and len(current_goal) > 60 else None
         st.metric("Current Goal", _goal_display, help=_goal_help)
     with col_health:
-        try:
-            from datetime import timedelta
-
-            _errs = load_errors() or []
-            _cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-            _recent_errs = [e for e in _errs if e.get("timestamp", "") >= _cutoff]
-            _err_count = len(_recent_errs)
-            _health_icon = (
-                "🟢" if _err_count == 0 else ("🟡" if _err_count < 5 else "🔴")
-            )
-            st.metric("Portal Health", f"{_health_icon} {_err_count} err")
-            if _err_count > 0:
-                st.caption("See System → Tab Crash Errors")
-        except Exception:
-            st.metric("Portal Health", "⚪ —")
+        _err_count = _metrics["errors_24h"]
+        _health_icon = "🟢" if _err_count == 0 else ("🟡" if _err_count < 5 else "🔴")
+        st.metric("Portal Health", f"{_health_icon} {_err_count} err")
+        if _err_count > 0:
+            st.caption("See System → Tab Crash Errors")
 
     st.divider()
 

@@ -757,6 +757,32 @@ def _dispatch_skill_bump_bg(cycle_n: int) -> None:
         print(f"  ⚠ skill bump — spawn failed ({e}); skipping")
 
 
+def _dispatch_metrics_refresh_bg() -> None:
+    """Spawn a detached `metrics_db.py --refresh` so the portal sees this cycle.
+
+    The metrics_daemon already polls, but a cycle close is exactly when every
+    Overview metric changes at once — refreshing here removes the poll-interval
+    lag. Best-effort: cycle-close never blocks on or fails because of it.
+    """
+    script = SCRIPTS / "metrics_db.py"
+    if not script.exists():
+        return
+    log_path = MEMORY / ".metrics_refresh.log"
+    try:
+        with open(log_path, "ab") as log_f:
+            proc = subprocess.Popen(
+                [sys.executable, str(script), "--refresh"],
+                stdin=subprocess.DEVNULL,
+                stdout=log_f,
+                stderr=log_f,
+                start_new_session=True,
+                close_fds=True,
+            )
+        print(f"  ✓ metrics refresh — dispatched in background (pid={proc.pid})")
+    except Exception as e:
+        print(f"  ⚠ metrics refresh — spawn failed ({e}); skipping")
+
+
 def _flush_ltm_child(buf_path: Path) -> int:
     """Background-mode entry point: load chunks and flush them under a lock.
 
@@ -1123,6 +1149,10 @@ def main():
 
     # 10. Tick nudge counters (cycles_since_*). Best-effort; never fatal.
     _tick_nudge_counters()
+
+    # 11. Refresh the DuckDB metrics store so the portal's Overview tab reflects
+    #     this cycle immediately instead of waiting for the metrics_daemon poll.
+    _dispatch_metrics_refresh_bg()
 
     print(f"\n[cycle-close] Done. Cycle {cycle_n} closed.\n")
 

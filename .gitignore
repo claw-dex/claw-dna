@@ -266,6 +266,8 @@ core.*
 
 # DB
 *.db
+*.duckdb
+*.duckdb.*.tmp
 *.sqlite3
 *.sqlite3-journal
 # LanceDB stores are directories, not files

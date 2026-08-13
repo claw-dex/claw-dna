@@ -66,6 +66,22 @@ from app.data.script import load_scripts  # noqa: F401
 # Suggestions
 from app.data.suggest import load_suggest  # noqa: F401
 
+# Pre-computed metrics (DuckDB store — see scripts/metrics_db.py)
+from app.data.metrics import (  # noqa: F401
+    load_health,
+    load_day_glance,
+    load_suggestions,
+    load_balance_metrics,
+    load_goal_metrics,
+    load_velocity_metrics,
+    load_improvements,
+    load_cycle_velocity_metric,
+    load_workspace_mb,
+    load_memory_overview,
+    load_memory_file_health,
+    load_agent_error_metrics,
+)
+
 # Write operations
 from app.data.write import (  # noqa: F401
     queue_to_inbox,

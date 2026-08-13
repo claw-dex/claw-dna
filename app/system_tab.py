@@ -360,117 +360,64 @@ _MEMORY_FILE_LABELS = {
     "link_cache.json": ("Link Cache", "URL health check cache (link-checker.py)"),
 }
 
-_MEMORY_SIZE_WARN_KB = 500  # warn if file exceeds this
-_MEMORY_SIZE_CRIT_KB = 2000  # critical if file exceeds this
-_MEMORY_AGE_WARN_HOURS = 24  # warn if file not updated in this many hours
-_MEMORY_AGE_CRIT_HOURS = 72  # critical if not updated in this many hours
-
-# Files that are intentionally infrequently updated — skip age checks for these
-_MEMORY_AGE_EXEMPT = {
-    "bootstrap.json",
-    "link_cache.json",
-}
+# Size/age thresholds and the age-exempt list now live in scripts/metrics_db.py,
+# which grades every memory file at collection time (MEMORY_SIZE_WARN_KB etc.).
 
 
-def _count_json_entries(path: str) -> str:
-    """Return a human-readable entry count for a JSON file (list len or dict key count)."""
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            data = json.load(f)
-        if isinstance(data, list):
-            return f"{len(data)} entries"
-        if isinstance(data, dict):
-            # For state.json and similar, key count isn't useful; skip
-            if len(data) <= 5:
-                return f"{len(data)} keys"
-            return f"{len(data)} keys"
-    except Exception:
-        return "parse err"
-    return "?"
+def _format_age(age_hours: float) -> str:
+    """Human-readable 'time since last write' for a memory file."""
+    if age_hours < 1:
+        return f"{int(age_hours * 60)}m ago"
+    if age_hours < 24:
+        return f"{age_hours:.1f}h ago"
+    return f"{age_hours / 24:.1f}d ago"
 
 
 def _render_memory_files_health():
-    """Render a compact health table for all JSON files in /agent/memory/."""
-    memory_dir = "/agent/memory"
-    now_utc = datetime.now(timezone.utc)
+    """Render a compact health table for all JSON files in /agent/memory/.
 
-    try:
-        all_files = sorted(
-            f
-            for f in os.listdir(memory_dir)
-            if f.endswith(".json") and not f.endswith(".backup")
+    Sizes, ages, entry counts, and the ok/warn/crit classification are all
+    pre-computed by scripts/metrics_db.py — deriving them here meant an
+    os.listdir + os.stat + full json.load for every file on every render.
+    """
+    from app.data.metrics import load_memory_file_health
+
+    health_data = load_memory_file_health()
+    rows = health_data["rows"]
+
+    if not health_data["available"]:
+        st.warning(
+            "Metrics store unavailable — memory-file health cannot be shown. "
+            "Run `uv run python scripts/metrics_db.py --rebuild`, or check that "
+            "the `metrics_daemon` service is running."
         )
-    except OSError:
-        st.error("Could not read /agent/memory/ directory.")
         return
 
-    if not all_files:
+    if not rows:
         st.caption("No JSON files found in /agent/memory/.")
         return
 
-    # Collect stats
-    rows = []
-    total_kb = 0.0
-    warn_count = 0
-    crit_count = 0
-
-    for fname in all_files:
-        fpath = os.path.join(memory_dir, fname)
-        try:
-            stat = os.stat(fpath)
-        except OSError:
-            continue
-
-        size_bytes = stat.st_size
-        size_kb = size_bytes / 1024
-        total_kb += size_kb
-        mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
-        age_hours = (now_utc - mtime).total_seconds() / 3600
-
-        label, desc = _MEMORY_FILE_LABELS.get(fname, (fname.replace(".json", ""), ""))
-        entry_count = _count_json_entries(fpath)
-
-        # Health status — exempt files skip age checks (intentionally infrequent)
-        age_exempt = fname in _MEMORY_AGE_EXEMPT
-        size_crit = size_kb >= _MEMORY_SIZE_CRIT_KB
-        size_warn = size_kb >= _MEMORY_SIZE_WARN_KB
-        age_crit = not age_exempt and age_hours >= _MEMORY_AGE_CRIT_HOURS
-        age_warn = not age_exempt and age_hours >= _MEMORY_AGE_WARN_HOURS
-
-        if size_crit or age_crit:
-            health = "crit"
-            crit_count += 1
-        elif size_warn or age_warn:
-            health = "warn"
-            warn_count += 1
-        else:
-            health = "ok"
-
-        if age_hours < 1:
-            age_str = f"{int(age_hours * 60)}m ago"
-        elif age_hours < 24:
-            age_str = f"{age_hours:.1f}h ago"
-        else:
-            age_str = f"{age_hours / 24:.1f}d ago"
-
-        rows.append(
-            {
-                "fname": fname,
-                "label": label,
-                "desc": desc,
-                "size_kb": size_kb,
-                "entry_count": entry_count,
-                "age_str": age_str,
-                "age_hours": age_hours,
-                "age_exempt": age_exempt,
-                "health": health,
-                "size_warn": size_warn or size_crit,
-                "age_warn": age_warn or age_crit,
-            }
+    # Presentation-only enrichment: labels, descriptions, and formatted age.
+    for r in rows:
+        label, desc = _MEMORY_FILE_LABELS.get(
+            r["fname"], (r["fname"].replace(".json", ""), "")
+        )
+        r["label"] = label
+        r["desc"] = desc
+        r["age_str"] = _format_age(r["age_hours"])
+        count = r.get("entry_count")
+        r["entry_count"] = (
+            f"{count} {r.get('entry_kind') or 'entries'}"
+            if count is not None
+            else (r.get("entry_kind") or "?")
         )
 
+    total_kb = health_data["total_kb"]
+    warn_count = health_data["warn"]
+    crit_count = health_data["crit"]
+    ok_count = health_data["ok"]
+
     # Summary strip
-    ok_count = len(rows) - warn_count - crit_count
     ms1, ms2, ms3, ms4 = st.columns(4)
     with ms1:
         st.metric("Memory Files", len(rows))
@@ -486,23 +433,22 @@ def _render_memory_files_health():
         else:
             st.metric("Issues", "None ✓")
 
-    # File table using HTML for compact display
+    # Sizes and ages are frozen at collection time — surface when that was, so a
+    # stopped collector is visible rather than silently showing stale ages.
+    if health_data.get("built_at"):
+        st.caption(f"Collected {health_data['built_at'][:16].replace('T', ' ')} UTC")
+
+    # File table using HTML for compact display. The collector grades size and
+    # age independently, so the thresholds live in one place only.
     health_icons = {"ok": "🟢", "warn": "🟡", "crit": "🔴"}
+    health_colors = {"ok": "#888", "warn": "#ff9800", "crit": "#f44336"}
 
     rows_html = []
     for r in rows:
-        icon = health_icons[r["health"]]
+        icon = health_icons.get(r["health"], "🟢")
         size_str = f"{r['size_kb']:.1f} KB"
-        size_color = (
-            "#f44336"
-            if r["size_kb"] >= _MEMORY_SIZE_CRIT_KB
-            else "#ff9800" if r["size_kb"] >= _MEMORY_SIZE_WARN_KB else "#888"
-        )
-        age_color = (
-            "#f44336"
-            if r["age_hours"] >= _MEMORY_AGE_CRIT_HOURS
-            else "#ff9800" if r["age_hours"] >= _MEMORY_AGE_WARN_HOURS else "#888"
-        )
+        size_color = health_colors.get(r["size_health"], "#888")
+        age_color = health_colors.get(r["age_health"], "#888")
         rows_html.append(
             f"<tr>"
             f'<td style="padding:3px 8px;font-size:12px">{icon}</td>'
@@ -538,11 +484,11 @@ def _render_memory_files_health():
     if issues:
         st.markdown("")
         for r in issues:
-            icon = health_icons[r["health"]]
+            icon = health_icons.get(r["health"], "🟡")
             reasons = []
-            if r["size_warn"]:
+            if r["size_health"] != "ok":
                 reasons.append(f"large ({r['size_kb']:.0f} KB)")
-            if r["age_warn"]:
+            if r["age_health"] != "ok":
                 reasons.append(f"stale ({r['age_str']})")
             msg = f"{icon} **{r['fname']}** — {', '.join(reasons)}."
             if r["desc"]:
@@ -559,6 +505,7 @@ def render():
         run_script,
         load_cycle_logs,
     )
+    from app.data.metrics import load_workspace_mb
     from app.shared import ERROR_LOG_PATH, _write_json_atomic
 
     # ── System health ─────────────────────────────────────────
@@ -597,7 +544,9 @@ def render():
             st.caption(f"5m: {load_avg.get('5m')} | 15m: {load_avg.get('15m')}")
         if uptime:
             st.metric("Uptime", uptime.get("human", "—"))
-        ws_mb = info.get("workspace_mb")
+        # Pre-computed: deriving this walked every file under /agent/workspace
+        # (a directory that grows toward its 1 GB limit) on the render path.
+        ws_mb = load_workspace_mb()
         if ws_mb is not None:
             st.metric("Workspace", f"{ws_mb} MB")
 

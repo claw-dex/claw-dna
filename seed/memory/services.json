@@ -57,6 +57,20 @@
     "stdout_log": "/agent/memory/logs/service-scheduler_daemon.stdout.log",
     "stderr_log": "/agent/memory/logs/service-scheduler_daemon.stderr.log"
   },
+  "metrics_daemon": {
+    "pid": null,
+    "port": null,
+    "auto_start": true,
+    "command": [
+      "uv",
+      "run",
+      "python",
+      "/agent/services/metrics_daemon.py"
+    ],
+    "started": null,
+    "stdout_log": "/agent/memory/logs/service-metrics_daemon.stdout.log",
+    "stderr_log": "/agent/memory/logs/service-metrics_daemon.stderr.log"
+  },
   "telegram_bridge": {
     "pid": null,
     "port": null,

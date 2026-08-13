@@ -92,18 +92,14 @@ def load_system_info():
     except Exception:
         info["uptime"] = None
 
+    # Workspace size is a metric, not live system state: it is a full recursive
+    # walk of a directory that grows toward its 1 GB limit. scripts/metrics_db.py
+    # measures it (throttled) and this reads the stored value, so the walk never
+    # happens on a render path. Everything above is a cheap live /proc read.
     try:
-        total_bytes = 0
-        for dirpath, dirs, filenames in os.walk("/agent/workspace"):
-            # Skip hidden dirs (e.g. .agent-browser-profile with thousands of files)
-            dirs[:] = [d for d in dirs if not d.startswith(".")]
-            for fname in filenames:
-                if not fname.startswith("."):
-                    try:
-                        total_bytes += os.path.getsize(os.path.join(dirpath, fname))
-                    except OSError:
-                        pass
-        info["workspace_mb"] = round(total_bytes / (1024**2), 1)
+        from app.data.metrics import load_workspace_mb
+
+        info["workspace_mb"] = load_workspace_mb()
     except Exception:
         info["workspace_mb"] = None
 

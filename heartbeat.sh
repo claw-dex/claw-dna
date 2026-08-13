@@ -162,6 +162,16 @@ if [ -f /agent/memory/scheduled_tasks.json ]; then
     uv run python /agent/scripts/scheduler.py --check 2>/dev/null || true
 fi
 
+# ── Register the metrics daemon on deployments provisioned before it existed.
+#    seed/memory/services.json only applies to fresh installs, and auto-start
+#    reads the live registry — so register once, idempotently, then let
+#    auto-start own the lifecycle from here on. ──
+if ! grep -q '"metrics_daemon"' /agent/memory/services.json 2>/dev/null; then
+    uv run python /agent/scripts/service_manager.py start metrics_daemon \
+        --auto-start -- uv run python /agent/services/metrics_daemon.py \
+        2>/dev/null || true
+fi
+
 # ── Auto-start services (ensure services with auto_start:true are running) ──
 uv run python /agent/scripts/service_manager.py auto-start 2>/dev/null || true
 

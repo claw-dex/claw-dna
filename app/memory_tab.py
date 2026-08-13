@@ -1,15 +1,11 @@
 """Tab: Memory — consolidated Journal + Logs + Goals + Memory Files."""
 
 import io
-import json
-import os
 import re
 
 import streamlit as st
 
 from app.shared import (
-    MEMORY_DIR,
-    MESSAGES_DIR,
     _STATUS_COLORS,
     _STATUS_MD_COLORS,
     _badge,
@@ -17,7 +13,9 @@ from app.shared import (
 )
 
 
-def _format_size(num_bytes: int) -> str:
+def _format_size(num_bytes) -> str:
+    if num_bytes is None:
+        return "—"
     for unit in ("B", "KB", "MB", "GB"):
         if num_bytes < 1024:
             return (
@@ -25,26 +23,6 @@ def _format_size(num_bytes: int) -> str:
             )
         num_bytes /= 1024
     return f"{num_bytes:.1f} TB"
-
-
-def _file_size(path: str) -> str:
-    try:
-        return _format_size(os.path.getsize(path))
-    except OSError:
-        return "—"
-
-
-def _json_count(path: str) -> int:
-    try:
-        with open(path, "r") as f:
-            data = json.load(f)
-        if isinstance(data, list):
-            return len(data)
-        if isinstance(data, dict):
-            return len(data)
-        return 0
-    except (OSError, ValueError):
-        return 0
 
 
 def _show_image(path: str, caption: str) -> None:
@@ -61,8 +39,8 @@ def _show_image(path: str, caption: str) -> None:
 
 
 def render():
+    from app.data.metrics import load_memory_overview
     from app.data import (
-        load_ltm_size,
         load_journal,
         load_goals,
         load_logs,
@@ -74,36 +52,29 @@ def render():
     )
 
     # ── Memory Overview (top section) ─────────────────────────
-    journal_path = f"{MEMORY_DIR}/journal.json"
-    journal_archive_path = f"{MEMORY_DIR}/journal_archive.json"
-    # inbox_history / outbox_history live alongside the other messaging
-    # artifacts under /agent/messages/, not /agent/memory/.
-    inbox_history_path = f"{MESSAGES_DIR}/inbox_history.json"
-    outbox_history_path = f"{MESSAGES_DIR}/outbox_history.json"
-    cycles_path = f"{MEMORY_DIR}/cycles.json"
-    cycles_archive_path = f"{MEMORY_DIR}/cycles_archive.json"
-
-    journal_n = _json_count(journal_path)
-    archive_n = _json_count(journal_archive_path)
-    inbox_n = _json_count(inbox_history_path)
-    outbox_n = _json_count(outbox_history_path)
-    cycles_n = _json_count(cycles_path)
-    cycles_archive_n = _json_count(cycles_archive_path)
+    # Pre-computed by scripts/metrics_db.py — these are counts over journal,
+    # cycles, and the message histories, plus a walk of the LanceDB store.
+    # Deriving them here meant six full JSON parses per render.
+    overview = load_memory_overview()
+    journal_n = overview["journal_active"]
+    archive_n = overview["journal_archived"]
+    cycles_n = overview["cycles_active"]
+    cycles_archive_n = overview["cycles_archived"]
 
     st.subheader("Memory Overview")
     o1, o2, o3, o4, o5 = st.columns(5)
     with o1:
-        st.metric("Long-term Memory", _format_size(load_ltm_size()))
+        st.metric("Long-term Memory", _format_size(overview["ltm_bytes"]))
         st.caption("long_term_memory.lancedb")
     with o2:
         st.metric("Journal Entries", f"{journal_n + archive_n}")
         st.caption(f"{journal_n} active · {archive_n} archived")
     with o3:
-        st.metric("Inbox History", f"{inbox_n}")
-        st.caption(_file_size(inbox_history_path))
+        st.metric("Inbox History", f"{overview['inbox_history']}")
+        st.caption(_format_size(overview["inbox_history_bytes"]))
     with o4:
-        st.metric("Outbox History", f"{outbox_n}")
-        st.caption(_file_size(outbox_history_path))
+        st.metric("Outbox History", f"{overview['outbox_history']}")
+        st.caption(_format_size(overview["outbox_history_bytes"]))
     with o5:
         st.metric("Cycles", f"{cycles_n + cycles_archive_n}")
         st.caption(f"{cycles_n} active · {cycles_archive_n} archived")

@@ -294,6 +294,13 @@
     "enabled": true
   },
   {
+    "id": "metrics_daemon",
+    "name": "Metrics Daemon",
+    "description": "Long-running service that keeps the DuckDB metrics store at memory/metrics.duckdb in sync with the JSON sources it derives from, polling every 5 minutes (heartbeat cadence, so a tighter poll sees nothing new) and rebuilding only when a source file changes; builds to a temp file and atomically swaps it in so the portal's read-only connections never see a partial database; the Overview tab reads pre-computed metrics from it instead of aggregating at render time; managed by service_manager with auto_start=true",
+    "category": "observability",
+    "enabled": true
+  },
+  {
     "id": "reminder",
     "name": "Reminder Manager",
     "description": "Create and manage personal reminders that fire as inbox messages via the scheduler; supports one-time (--at), recurring (--every N minutes), and cron-based (--cron) reminders",
