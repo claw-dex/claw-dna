@@ -536,3 +536,77 @@ def load_agent_error_metrics(agent_name):
     row["recent_hours"] = recent_hours
     row["found"] = True
     return row
+
+
+# ── Pluggable handlers (services/metrics/*.py) ────────────────────────────────
+
+
+def load_handler_status():
+    """One row per discovered metrics handler: ok, rows written, duration, error.
+
+    Surfaces a handler that failed to import or raised during collection —
+    without this a broken plugin looks identical to "this metric has no data".
+    """
+    rows = _query(
+        "handler_status",
+        "SELECT * FROM metric_handler_status ORDER BY name",
+        default=[],
+    )
+    return [dict(r) for r in rows or []]
+
+
+def load_handler_meta(name):
+    """Meta values a handler published, with its `<name>.` prefix stripped."""
+    prefix = f"{name}."
+    return {k[len(prefix) :]: v for k, v in load_meta().items() if k.startswith(prefix)}
+
+
+# ── Token usage (services/metrics/usage.py) ───────────────────────────────────
+
+
+def load_usage_totals():
+    """Aggregate token usage across every transcript the handler covers."""
+    meta = load_handler_meta("usage")
+    return {
+        "transcripts": meta.get("transcripts") or 0,
+        "requests": meta.get("requests") or 0,
+        "total_tokens": meta.get("total_tokens") or 0,
+        "input_tokens": meta.get("input_tokens") or 0,
+        "cache_creation_input_tokens": meta.get("cache_creation_input_tokens") or 0,
+        "cache_read_input_tokens": meta.get("cache_read_input_tokens") or 0,
+        "output_tokens": meta.get("output_tokens") or 0,
+        "web_search_requests": meta.get("web_search_requests") or 0,
+        "web_fetch_requests": meta.get("web_fetch_requests") or 0,
+        "models": meta.get("models") or [],
+        "available": bool(meta),
+    }
+
+
+def load_usage_daily(limit=14):
+    """Per-day token totals, newest first."""
+    try:
+        limit = max(0, int(limit))
+    except (TypeError, ValueError):
+        limit = 14
+    rows = _query(
+        "usage_daily",
+        "SELECT * FROM metric_usage_daily ORDER BY day DESC LIMIT ?",
+        (limit,),
+        default=[],
+    )
+    return [dict(r) for r in rows or []]
+
+
+def load_usage_cycles(limit=20):
+    """Per-cycle token totals, newest cycle first."""
+    try:
+        limit = max(0, int(limit))
+    except (TypeError, ValueError):
+        limit = 20
+    rows = _query(
+        "usage_cycles",
+        "SELECT * FROM metric_usage_cycles ORDER BY cycle DESC LIMIT ?",
+        (limit,),
+        default=[],
+    )
+    return [dict(r) for r in rows or []]

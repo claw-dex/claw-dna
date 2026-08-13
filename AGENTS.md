@@ -78,6 +78,36 @@ The portal reads this store through `app/data/metrics.py` (read-only `SELECT`s a
 
 State and status still come straight from JSON — agent status, heartbeat, cycle number, current goal, service liveness, queue depths, and raw log/error content are read live and are not metrics.
 
+### Adding a metrics handler
+
+Collection is pluggable. Any module under `services/metrics/` that satisfies the contract in `services/metrics/base.py` contributes its own tables to the same build — there is no registration list to edit:
+
+```python
+NAME   = "mymetric"
+TABLES = ["metric_mymetric"]
+SCHEMA = ["CREATE TABLE metric_mymetric (day VARCHAR, n BIGINT)"]
+
+def fingerprint(ctx):          # optional — skip the rebuild when nothing moved
+    return str(my_source_mtime)
+
+def collect(ctx):              # ctx: agent dirs, build `now`, core sources,
+    return HandlerResult(      #      previous meta + rows for carry-forward
+        tables={"metric_mymetric": [("2026-08-13", 42)]},
+        meta={"total": 42},    # stored namespaced as "mymetric.total"
+    )
+```
+
+The collector owns the single write connection and the atomic swap, so a handler never touches DuckDB itself. Handler DDL runs with the core schema, so its tables exist even when `collect` raises; a failing handler is isolated and recorded in `metric_handler_status` (surfaced on the System tab) instead of taking the store down. `ctx.previous_rows(table)` returns the last build's rows, which is what makes incremental handlers possible.
+
+**Shipped handler — `services/metrics/usage.py`**: token usage parsed from `/agent/memory/transcripts/cycle-*.jsonl` (and the `.jsonl.gz` form). It deduplicates on `message.id` at two levels, both of which matter:
+
+- *Within* a transcript — one API response is written once per content block (thinking / text / tool_use), each repeating the same `message.usage`. Summing raw inflates output tokens by ~1.8x.
+- *Across* transcripts — `heartbeat.sh:483` resumes an in-progress goal's session and `heartbeat.sh:561` copies the **whole** session file to `cycle-<N>.jsonl` every cycle, so a goal spanning k cycles produces k transcripts each a superset of the last. Requests are therefore attributed to the first cycle whose transcript contained them; per-file counting would report every early request k times.
+
+Real transcripts hold the agent's reasoning, cwd, and branch names and must never be committed (`/examples/` and `*.jsonl.txt` are gitignored). The parser is tested against synthetic replicas in `test/fixtures/transcripts/`, which reproduce the CLI's record shape field for field — regenerate with `uv run python test/fixtures/make_transcripts.py`. The generator emits a `manifest.json` of the totals it *intended* to write, so the parser is checked against generator intent rather than against itself.
+
+Finished transcripts never change, so per-file `(fname, size, mtime)` identity carries already-attributed rows forward — steady state re-reads only the cycle that just ran. `metric_usage_daily` rows for days whose cycles have aged out of the `METRICS_USAGE_CYCLES` window (default 200) are frozen rather than recomputed, so daily history outlives the window. Tables: `metric_usage_files`, `metric_usage_requests` (one row per distinct API response — the carry-forward grain), `metric_usage_cycles` (cycle × model × effort × tier × speed), `metric_usage_daily`. Surfaced as "Token Usage" on the System tab.
+
 ## Webhook Receiver
 
 Generic HTTP webhook handler on port **8082** (Caddy proxies `/webhook/*`). POST/PUT/DELETE/PATCH payloads are recorded to `/agent/messages/inbox.json` as `type="event"`, `source="webhook"` and logged for audit; GET/HEAD/OPTIONS return 200 without recording. Path-prefix sub-handlers (registered in `HANDLERS`, e.g. `services/webhook/whatsapp_bridge_handler.py`) can take over all methods on a prefix and bypass the default inbox-writing behavior. See `services/webhook_receiver.py`.

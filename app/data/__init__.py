@@ -80,6 +80,11 @@ from app.data.metrics import (  # noqa: F401
     load_memory_overview,
     load_memory_file_health,
     load_agent_error_metrics,
+    load_handler_status,
+    load_handler_meta,
+    load_usage_totals,
+    load_usage_daily,
+    load_usage_cycles,
 )
 
 # Write operations

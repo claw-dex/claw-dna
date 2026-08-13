@@ -9,6 +9,12 @@ render time.
 - Wakes every METRICS_DAEMON_POLL_SECONDS (default 300s, floor 60s) and calls
   ``metrics_db.refresh()`` — a no-op unless a source file changed, so an idle
   tick costs a handful of stat() calls.
+- Collection is pluggable: every module under ``services/metrics/`` that
+  satisfies the contract in ``services/metrics/base.py`` contributes its own
+  tables to the same build. Drop a file in that directory and the next tick
+  picks it up — there is no registration list to edit. A handler that fails is
+  isolated and reported in ``metric_handler_status`` rather than taking the
+  store down. See ``services/metrics/usage.py`` for a worked example.
 - Writes /agent/memory/heartbeats/metrics_daemon.heartbeat each tick so the
   service health view can surface failures.
 - Reacts to SIGTERM / SIGINT cleanly.
@@ -143,6 +149,11 @@ def main() -> int:
     log.info("=" * 60)
     log.info(f"Metrics Daemon starting up (poll interval: {poll_interval}s)")
     log.info(f"Database: {metrics_db.db_path()}")
+    handlers, handler_errors = metrics_db._handlers()
+    names = ", ".join(h.NAME for h in handlers) if handlers else "none (core only)"
+    log.info(f"Handlers: {names}")
+    for name, message in handler_errors:
+        log.error(f"Handler {name!r} unavailable: {message}")
     log.info("=" * 60)
 
     shutdown_requested = False

@@ -648,6 +648,265 @@ def test_directory_walks_expire_after_the_throttle_interval(agent_dir, monkeypat
     assert calls["workspace"] == 2
 
 
+# ---------- pluggable handlers ----------
+
+
+def _fake_handler(name="fake", rows=None, tables=None, raises=None, schema=None):
+    """A minimal in-memory handler module satisfying services/metrics/base."""
+    import types
+
+    from services.metrics.base import HandlerResult
+
+    mod = types.ModuleType(f"fake_{name}")
+    mod.NAME = name
+    mod.TABLES = tables or [f"metric_{name}"]
+    mod.SCHEMA = schema or [f"CREATE TABLE metric_{name} (a INTEGER, b VARCHAR)"]
+
+    def collect(ctx):
+        if raises:
+            raise raises
+        return HandlerResult(
+            tables={mod.TABLES[0]: rows if rows is not None else [(1, "x")]},
+            meta={"count": len(rows) if rows is not None else 1},
+        )
+
+    mod.collect = collect
+    return mod
+
+
+def test_handler_tables_and_meta_are_written(agent_dir, monkeypatch):
+    handler = _fake_handler(rows=[(1, "x"), (2, "y")])
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([handler], []))
+    mdb.refresh(force=True)
+
+    assert _rows(mdb.db_path(), "SELECT * FROM metric_fake") == [(1, "x"), (2, "y")]
+    # Handler meta is namespaced so two handlers can both publish a "count".
+    assert _meta(mdb.db_path())["fake.count"] == 2
+    status = _rows(
+        mdb.db_path(), "SELECT name, ok, rows, error FROM metric_handler_status"
+    )
+    assert status == [("fake", True, 2, "")]
+
+
+def test_a_raising_handler_is_isolated(agent_dir, monkeypatch):
+    good = _fake_handler("good")
+    bad = _fake_handler("bad", raises=RuntimeError("boom"))
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([good, bad], []))
+    mdb.refresh(force=True)
+
+    db = mdb.db_path()
+    # Core metrics are unaffected...
+    assert _rows(db, "SELECT count(*) FROM metric_health")[0][0] == 1
+    # ...the healthy handler still wrote...
+    assert _rows(db, "SELECT count(*) FROM metric_good")[0][0] == 1
+    # ...the broken one's table exists but is empty (readers never 404)...
+    assert _rows(db, "SELECT count(*) FROM metric_bad")[0][0] == 0
+    # ...and the failure is recorded rather than silent.
+    status = {
+        r[0]: r for r in _rows(db, "SELECT name, ok, error FROM metric_handler_status")
+    }
+    assert status["good"][1] is True
+    assert status["bad"][1] is False
+    assert "RuntimeError: boom" in status["bad"][2]
+    meta = _meta(db)
+    assert meta["handlers_ok"] == 1 and meta["handlers_failed"] == 1
+
+
+@pytest.mark.parametrize(
+    "bad_rows",
+    [
+        pytest.param([("not an int", "x")], id="wrong-type"),
+        pytest.param([(1,)], id="too-few-columns"),
+        pytest.param([(1, "x", "extra")], id="too-many-columns"),
+        pytest.param([({"a": 1}, "x")], id="unsupported-value"),
+    ],
+)
+def test_a_handler_returning_bad_rows_cannot_destroy_the_core_tables(
+    agent_dir, monkeypatch, bad_rows
+):
+    """Regression: a DuckDB runtime error aborts the WHOLE transaction.
+
+    A ConversionException from a handler's insert used to poison the build's
+    single transaction — every later statement failed, COMMIT degraded to a
+    rollback, and the database came out with no tables at all. Handlers now
+    each get their own transaction.
+    """
+    good = _fake_handler("good")
+    bad = _fake_handler("bad", rows=bad_rows)
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([good, bad], []))
+    mdb.refresh(force=True)
+
+    db = mdb.db_path()
+    # Core metrics survived intact.
+    assert _rows(db, "SELECT count(*) FROM cycles")[0][0] == len(CYCLES)
+    assert _rows(db, "SELECT count(*) FROM metric_health")[0][0] == 1
+    assert _meta(db)["schema_version"] == mdb.SCHEMA_VERSION
+    assert mdb.is_ready() is True
+    # The healthy handler still wrote, the bad one wrote nothing.
+    assert _rows(db, "SELECT count(*) FROM metric_good")[0][0] == 1
+    assert _rows(db, "SELECT count(*) FROM metric_bad")[0][0] == 0
+    status = {r[0]: r for r in _rows(db, "SELECT name, ok FROM metric_handler_status")}
+    assert status["good"][1] is True
+    assert status["bad"][1] is False
+
+
+def test_a_handler_writing_an_undeclared_table_is_rejected(agent_dir, monkeypatch):
+    import types
+
+    from services.metrics.base import HandlerResult
+
+    mod = types.ModuleType("fake_sneaky")
+    mod.NAME = "sneaky"
+    mod.TABLES = ["metric_sneaky"]
+    mod.SCHEMA = ["CREATE TABLE metric_sneaky (a INTEGER)"]
+    mod.collect = lambda ctx: HandlerResult(tables={"cycles": [(999,) * 11]})
+
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([mod], []))
+    mdb.refresh(force=True)
+
+    status = _rows(
+        mdb.db_path(), "SELECT ok, error FROM metric_handler_status WHERE name='sneaky'"
+    )[0]
+    assert status[0] is False
+    assert "undeclared table" in status[1]
+    # The core table it tried to write is untouched.
+    assert _rows(mdb.db_path(), "SELECT count(*) FROM cycles")[0][0] == len(CYCLES)
+
+
+def test_a_handler_with_broken_schema_is_reported(agent_dir, monkeypatch):
+    handler = _fake_handler("brokenddl", schema=["CREATE TABLE ((("])
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([handler], []))
+    mdb.refresh(force=True)
+
+    status = _rows(
+        mdb.db_path(),
+        "SELECT ok, error FROM metric_handler_status WHERE name='brokenddl'",
+    )[0]
+    assert status[0] is False
+    assert "schema failed" in status[1]
+
+
+def test_discovery_errors_are_recorded(agent_dir, monkeypatch):
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([], [("oops", "ImportError: nope")]))
+    mdb.refresh(force=True)
+    status = _rows(mdb.db_path(), "SELECT name, ok, error FROM metric_handler_status")
+    assert status == [("oops", False, "ImportError: nope")]
+
+
+def test_handlers_receive_previous_rows_for_carry_forward(agent_dir, monkeypatch):
+    seen = {}
+
+    import types
+
+    from services.metrics.base import HandlerResult
+
+    mod = types.ModuleType("fake_carry")
+    mod.NAME = "carry"
+    mod.TABLES = ["metric_carry"]
+    mod.SCHEMA = ["CREATE TABLE metric_carry (n INTEGER)"]
+
+    def collect(ctx):
+        seen["previous"] = ctx.previous_rows("metric_carry")
+        seen["now"] = ctx.now
+        seen["sources"] = sorted(ctx.sources)
+        return HandlerResult(tables={"metric_carry": [(len(seen["previous"]) + 1,)]})
+
+    mod.collect = collect
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([mod], []))
+
+    mdb.refresh(force=True)
+    assert seen["previous"] == []
+    assert "cycles" in seen["sources"]  # core payloads are handed through
+    assert seen["now"] is not None
+
+    mdb.refresh(force=True)
+    assert seen["previous"] == [(1,)]
+    assert _rows(mdb.db_path(), "SELECT n FROM metric_carry") == [(2,)]
+
+
+def test_handler_fingerprint_participates_in_the_refresh_check(agent_dir, monkeypatch):
+    state = {"value": "a"}
+    handler = _fake_handler("fp")
+    handler.fingerprint = lambda ctx: state["value"]
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([handler], []))
+
+    mdb.refresh(force=True)
+    assert mdb.refresh() is False  # nothing changed anywhere
+
+    state["value"] = "b"  # only the handler's source moved
+    assert mdb.refresh() is True
+
+
+def test_a_handler_fingerprint_that_raises_forces_a_rebuild(agent_dir, monkeypatch):
+    handler = _fake_handler("fpboom")
+
+    def _boom(ctx):
+        raise RuntimeError("cannot stat")
+
+    handler.fingerprint = _boom
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([handler], []))
+    # Must not raise out of the fingerprint, and must not pin the store.
+    assert mdb.refresh(force=True) is True
+    assert "cannot stat" in mdb.source_fingerprint()
+
+
+def test_all_tables_includes_handler_tables(agent_dir, monkeypatch):
+    handler = _fake_handler("extra", tables=["metric_extra"])
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([handler], []))
+    tables = mdb.all_tables()
+    assert "metric_extra" in tables
+    assert "metric_health" in tables  # core tables still present
+    mdb.refresh(force=True)
+    assert mdb.stats()["tables"]["metric_extra"] == 1
+
+
+def test_the_real_usage_handler_is_discovered(agent_dir):
+    handlers, errors = mdb._handlers()
+    assert errors == []
+    assert "usage" in [h.NAME for h in handlers]
+
+
+def test_usage_handler_runs_end_to_end(agent_dir):
+    """The shipped handler collects from transcripts into the store."""
+    import json as _json
+
+    transcripts = agent_dir / "memory" / "transcripts"
+    transcripts.mkdir(parents=True)
+    record = {
+        "type": "assistant",
+        "uuid": "u1",
+        "requestId": "req_1",
+        "timestamp": "2026-08-13T10:00:00Z",
+        "effort": "medium",
+        "message": {
+            "id": "msg_1",
+            "model": "claude-sonnet-5",
+            "usage": {
+                "input_tokens": 2,
+                "cache_creation_input_tokens": 515,
+                "cache_read_input_tokens": 104810,
+                "output_tokens": 77,
+                "service_tier": "standard",
+                "speed": "standard",
+            },
+        },
+    }
+    # Two records, one API response — the store must count one request.
+    (transcripts / "cycle-1.jsonl").write_text(
+        _json.dumps(record) + "\n" + _json.dumps({**record, "uuid": "u2"}) + "\n"
+    )
+
+    mdb.refresh(force=True)
+    db = mdb.db_path()
+    assert _rows(db, "SELECT count(*) FROM metric_usage_files")[0][0] == 1
+    assert _rows(db, "SELECT requests FROM metric_usage_cycles")[0][0] == 1
+    assert _rows(db, "SELECT output_tokens FROM metric_usage_daily")[0][0] == 77
+    meta = _meta(db)
+    assert meta["usage.requests"] == 1
+    assert meta["usage.total_tokens"] == 2 + 515 + 104810 + 77
+    assert _rows(db, "SELECT ok FROM metric_handler_status WHERE name='usage'")[0][0]
+
+
 # ---------- refresh / fingerprint / atomicity ----------
 
 
@@ -873,3 +1132,52 @@ def test_sys_snapshots_are_ingested(agent_dir):
         "FROM sys_snapshots",
     )[0]
     assert row == ("2026-08-13T12:00:00+00:00", 12.5, 200, True, 100.0, 0.5)
+
+
+def test_a_handler_declaring_a_core_table_is_rejected(agent_dir, monkeypatch):
+    """Nothing in the DDL or the undeclared-table guard stops a handler naming
+    a core table in TABLES — its rows would append straight into `cycles`."""
+    from services.metrics import discover as real_discover
+
+    handler = _fake_handler("greedy", tables=["cycles"])
+    handler.SCHEMA = ["CREATE TABLE metric_greedy (a INTEGER)"]
+    monkeypatch.setattr(
+        "services.metrics.discover", lambda: ([handler], []), raising=False
+    )
+    handlers, errors = mdb._handlers()
+    assert handlers == []
+    assert "declares core table(s): cycles" in errors[0][1]
+
+    mdb.refresh(force=True)
+    # The core table is untouched and the rejection is visible.
+    assert _rows(mdb.db_path(), "SELECT count(*) FROM cycles")[0][0] == len(CYCLES)
+    status = _rows(
+        mdb.db_path(), "SELECT ok, error FROM metric_handler_status WHERE name='greedy'"
+    )[0]
+    assert status[0] is False
+    assert "core table" in status[1]
+    monkeypatch.setattr("services.metrics.discover", real_discover, raising=False)
+
+
+def test_handler_tables_are_carried_forward_in_one_connection(agent_dir, monkeypatch):
+    """_previous_rows takes every table at once — one open, not one per table."""
+    opens = {"n": 0}
+    real_connect = duckdb.connect
+
+    def _counting_connect(*args, **kwargs):
+        opens["n"] += 1
+        return real_connect(*args, **kwargs)
+
+    handler = _fake_handler("multi", tables=["metric_a", "metric_b", "metric_c"])
+    handler.SCHEMA = [
+        "CREATE TABLE metric_a (x INTEGER)",
+        "CREATE TABLE metric_b (x INTEGER)",
+        "CREATE TABLE metric_c (x INTEGER)",
+    ]
+    handler.collect = lambda ctx: {"tables": {"metric_a": [(1,)]}, "meta": {}}
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([handler], []))
+    mdb.refresh(force=True)
+
+    monkeypatch.setattr(mdb.duckdb, "connect", _counting_connect)
+    mdb._previous_rows(["metric_a", "metric_b", "metric_c"])
+    assert opens["n"] == 1

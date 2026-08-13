@@ -301,6 +301,13 @@
     "enabled": true
   },
   {
+    "id": "metrics_handlers",
+    "name": "Pluggable Metrics Handlers",
+    "description": "Drop-in collection plugins under services/metrics/: any module declaring NAME/TABLES/SCHEMA/collect() contributes its own tables to the DuckDB metrics build, with optional fingerprint() to skip unchanged work and ctx.previous_rows() for incremental carry-forward. Handler failures are isolated and recorded in metric_handler_status. Ships services/metrics/usage.py, which parses token usage from cycle transcripts (deduplicating the per-content-block records that repeat one API response's usage) and surfaces it as Token Usage on the System tab",
+    "category": "observability",
+    "enabled": true
+  },
+  {
     "id": "reminder",
     "name": "Reminder Manager",
     "description": "Create and manage personal reminders that fire as inbox messages via the scheduler; supports one-time (--at), recurring (--every N minutes), and cron-based (--cron) reminders",

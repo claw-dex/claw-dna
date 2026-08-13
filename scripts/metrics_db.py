@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -231,6 +232,36 @@ def _previous_meta() -> dict:
         con.close()
 
 
+def _previous_rows(tables) -> dict:
+    """Rows of each named table from the live database, keyed by table name.
+
+    Handlers use this to carry forward work that has not changed (see the
+    incremental parse in services/metrics/usage.py). One connection covers
+    every table — a handler declaring three tables should not cost three opens.
+    Missing or unreadable tables come back as [].
+    """
+    tables = list(tables)
+    result = {table: [] for table in tables}
+    if duckdb is None or not tables:
+        return result
+    target = db_path()
+    if not target.exists():
+        return result
+    try:
+        con = duckdb.connect(str(target), read_only=True)
+    except Exception:
+        return result
+    try:
+        for table in tables:
+            try:
+                result[table] = con.execute(f"SELECT * FROM {table}").fetchall()
+            except Exception:
+                result[table] = []
+    finally:
+        con.close()
+    return result
+
+
 def _ltm_bytes() -> int:
     """Total size of the LanceDB long-term-memory store, in bytes.
 
@@ -416,6 +447,22 @@ def source_fingerprint(now=None) -> str:
     # just the ones _sources() names, so they need to be in the key too.
     for name, size, mtime in _memory_json_files():
         parts.append([f"memory/{name}", mtime, size])
+    # Handlers read sources the core knows nothing about (transcripts, and
+    # whatever a future handler adds), so each contributes its own key.
+    handlers, errors = _handlers()
+    ctx = _handler_context(now, {}, {}, lambda _table: [])
+    for handler in handlers:
+        fn = getattr(handler, "fingerprint", None)
+        if fn is None:
+            continue
+        try:
+            parts.append([f"handler/{handler.NAME}", fn(ctx), 0])
+        except Exception as exc:
+            # A handler that can't fingerprint must not pin the store: make the
+            # key vary so the build re-runs and records the failure.
+            parts.append([f"handler/{handler.NAME}", f"error: {exc}", 0])
+    for name, message in errors:
+        parts.append([f"handler_error/{name}", message, 0])
     return json.dumps(parts)
 
 
@@ -1032,9 +1079,13 @@ CREATE TABLE metric_memory_files (
 CREATE TABLE metric_agent_errors (
     agent VARCHAR, total INTEGER, recent_count INTEGER, last_error_ts VARCHAR
 );
+CREATE TABLE metric_handler_status (
+    name VARCHAR, ok BOOLEAN, rows INTEGER, duration_ms DOUBLE, error VARCHAR
+);
 """
 
-# Every table the reader may query, so --stats and the readiness check stay honest.
+# Core tables. Handler tables are appended by all_tables() at call time —
+# a handler dropped into services/metrics/ must show up in --stats too.
 TABLES = [
     "meta",
     "cycles",
@@ -1056,7 +1107,69 @@ TABLES = [
     "metric_memory_overview",
     "metric_memory_files",
     "metric_agent_errors",
+    "metric_handler_status",
 ]
+
+
+# ─── Pluggable handlers (services/metrics/*.py) ───────────────────────────────
+
+
+def _handlers() -> tuple:
+    """Discover handler modules. Returns ``(handlers, errors)``; never raises.
+
+    Import failures are returned rather than raised so a broken handler cannot
+    stop the core metrics from being collected.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    try:
+        from services.metrics import discover
+    except Exception as exc:  # pragma: no cover - only if the package is broken
+        return [], [("services.metrics", f"{type(exc).__name__}: {exc}")]
+    try:
+        handlers, errors = discover()
+    except Exception as exc:  # pragma: no cover - discover() catches its own
+        return [], [("services.metrics", f"{type(exc).__name__}: {exc}")]
+
+    # A handler may not claim a core table. Nothing stops it declaring
+    # TABLES = ["cycles"]: the DDL would not collide (it creates something
+    # else), the undeclared-table guard would pass, and its rows would be
+    # appended straight into the core table.
+    core = set(TABLES)
+    safe = []
+    for handler in handlers:
+        clash = sorted(core.intersection(handler.TABLES))
+        if clash:
+            errors.append((handler.NAME, f"declares core table(s): {', '.join(clash)}"))
+            continue
+        safe.append(handler)
+    return safe, errors
+
+
+def all_tables() -> list:
+    """Core tables plus every table declared by a discovered handler."""
+    tables = list(TABLES)
+    handlers, _errors = _handlers()
+    for handler in handlers:
+        for table in handler.TABLES:
+            if table not in tables:
+                tables.append(table)
+    return tables
+
+
+def _handler_context(now, src, previous_meta, previous_rows):
+    from services.metrics.base import HandlerContext
+
+    return HandlerContext(
+        agent_dir=AGENT_DIR,
+        memory_dir=MEMORY_DIR,
+        messages_dir=MESSAGES_DIR,
+        now=now,
+        sources=src,
+        previous_meta=previous_meta,
+        previous_rows=previous_rows,
+    )
 
 
 def _require_duckdb():
@@ -1158,11 +1271,16 @@ def build(dest: Path, src: dict | None = None, now=None, fingerprint=None) -> No
         fingerprint = source_fingerprint(now)
     src = src if src is not None else load_sources()
 
-    # Read the carried-forward throttle state BEFORE unlinking: refresh() builds
-    # into a tmp path so the live file survives, but build() can also be called
+    # Read the carried-forward state BEFORE unlinking: refresh() builds into a
+    # tmp path so the live file survives, but build() can also be called
     # directly on the live path, and unlinking first would destroy the previous
-    # measurements and force both directory walks to re-run.
+    # measurements — forcing both directory walks and every handler's
+    # incremental cache to start from scratch.
     previous = _previous_meta()
+    handlers, handler_errors = _handlers()
+    carried = _previous_rows(
+        [table for handler in handlers for table in handler.TABLES]
+    )
 
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1328,9 +1446,103 @@ def build(dest: Path, src: dict | None = None, now=None, fingerprint=None) -> No
             ),
         )
 
+        # ── Pluggable handlers ──
+        # Each runs in isolation: a raising handler leaves its (already
+        # created) tables empty, is recorded in metric_handler_status, and
+        # does not affect the core metrics or the other handlers.
+        #
+        # Commit the core work FIRST. A DuckDB transaction is aborted wholesale
+        # by a runtime error — a handler returning a string for an INTEGER
+        # column raises ConversionException, after which every later statement
+        # fails and COMMIT silently degrades to a rollback, losing *every* core
+        # table. DuckDB has no SAVEPOINT to scope that, so each handler gets its
+        # own transaction instead. The build writes to a private tmp file that
+        # is only swapped in at the end, so committing in stages is invisible
+        # to readers.
+        con.execute("COMMIT")
+
+        # Handler DDL runs before any handler collects, so a handler's tables
+        # exist (empty) even when its collect() raises — readers never hit a
+        # missing table just because one plugin is broken.
+        for handler in list(handlers):
+            try:
+                con.execute("BEGIN TRANSACTION")
+                for statement in handler.SCHEMA:
+                    con.execute(statement)
+                con.execute("COMMIT")
+            except Exception as exc:
+                try:
+                    con.execute("ROLLBACK")
+                except Exception:
+                    pass
+                handler_errors.append(
+                    (handler.NAME, f"schema failed: {type(exc).__name__}: {exc}")
+                )
+                handlers.remove(handler)
+
+        handler_meta = {}
+        status_rows = [
+            (name, False, 0, 0.0, message) for name, message in handler_errors
+        ]
+        ctx = _handler_context(now, src, previous, lambda t: carried.get(t, []))
+        for handler in handlers:
+            started = time.monotonic()
+            try:
+                # collect() runs outside the transaction: for `usage` that is a
+                # multi-second transcript parse, and there is no reason to hold
+                # the write lock across it.
+                result = handler.collect(ctx)
+                tables = getattr(result, "tables", None)
+                if tables is None:
+                    tables = (result or {}).get("tables", {})
+                extra = getattr(result, "meta", None)
+                if extra is None:
+                    extra = (result or {}).get("meta", {})
+
+                unknown = set(tables) - set(handler.TABLES)
+                if unknown:
+                    raise ValueError(
+                        f"returned undeclared table(s): {', '.join(sorted(unknown))}"
+                    )
+
+                written = 0
+                con.execute("BEGIN TRANSACTION")
+                for table, rows in tables.items():
+                    rows = list(rows or [])
+                    _insert(con, table, rows)
+                    written += len(rows)
+                con.execute("COMMIT")
+                for key, value in (extra or {}).items():
+                    handler_meta[f"{handler.NAME}.{key}"] = value
+                elapsed_ms = round((time.monotonic() - started) * 1000, 1)
+                status_rows.append((handler.NAME, True, written, elapsed_ms, ""))
+            except Exception as exc:
+                # Discard whatever this handler managed to write and clear the
+                # aborted-transaction state before the next one starts.
+                try:
+                    con.execute("ROLLBACK")
+                except Exception:
+                    pass
+                elapsed_ms = round((time.monotonic() - started) * 1000, 1)
+                status_rows.append(
+                    (
+                        handler.NAME,
+                        False,
+                        0,
+                        elapsed_ms,
+                        f"{type(exc).__name__}: {exc}",
+                    )
+                )
+        status_rows.sort(key=lambda r: r[0])
+
+        con.execute("BEGIN TRANSACTION")
+        _insert(con, "metric_handler_status", status_rows)
+
         meta = {
             "schema_version": SCHEMA_VERSION,
             "built_at": now.isoformat(),
+            "handlers_ok": sum(1 for r in status_rows if r[1]),
+            "handlers_failed": sum(1 for r in status_rows if not r[1]),
             "source_fingerprint": fingerprint,
             "workspace_mb": workspace_mb,
             "workspace_mb_at": workspace_mb_at,
@@ -1343,6 +1555,9 @@ def build(dest: Path, src: dict | None = None, now=None, fingerprint=None) -> No
             **balance_meta,
             **velocity_meta,
             **memory_file_meta,
+            # Namespaced by handler NAME, so two handlers can both publish a
+            # "total" without colliding with each other or with the core.
+            **handler_meta,
         }
         _insert(con, "meta", [(k, _jdump(v)) for k, v in meta.items()])
         con.execute("COMMIT")
@@ -1430,7 +1645,7 @@ def stats(path: Path | None = None) -> dict:
     con = duckdb.connect(str(target), read_only=True)
     try:
         counts = {}
-        for table in TABLES:
+        for table in all_tables():
             try:
                 counts[table] = con.execute(f"SELECT count(*) FROM {table}").fetchone()[
                     0

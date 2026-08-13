@@ -279,5 +279,10 @@ core.*
 /messages/
 /web/
 /workspace/
+# Real cycle transcripts contain the agent's reasoning, cwd, and branch names —
+# never commit them. Tests use the synthetic replicas in test/fixtures/
+# (regenerate with `uv run python test/fixtures/make_transcripts.py`).
+/examples/
+*.jsonl.txt
 # Downloaded embedding model weights — large and re-fetchable
 /.cache/

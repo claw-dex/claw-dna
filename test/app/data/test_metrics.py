@@ -228,6 +228,73 @@ def test_load_agent_error_metrics_for_an_unknown_agent(built):
     assert stats["recent_hours"] == 24
 
 
+def test_load_handler_status_and_meta(built):
+    status = {h["name"]: h for h in metrics_mod.load_handler_status()}
+    assert "usage" in status
+    assert status["usage"]["ok"] is True
+    assert status["usage"]["error"] == ""
+
+    meta = metrics_mod.load_handler_meta("usage")
+    assert "requests" in meta
+    # The `usage.` prefix is stripped, and no other handler leaks in.
+    assert not any(k.startswith("usage.") for k in meta)
+
+
+def test_usage_loaders_with_transcripts(sandbox):
+    transcripts = sandbox / "memory" / "transcripts"
+    transcripts.mkdir(parents=True)
+    record = {
+        "type": "assistant",
+        "uuid": "u1",
+        "requestId": "req_1",
+        "timestamp": "2026-08-13T10:00:00Z",
+        "effort": "medium",
+        "message": {
+            "id": "msg_1",
+            "model": "claude-sonnet-5",
+            "usage": {
+                "input_tokens": 2,
+                "cache_creation_input_tokens": 515,
+                "cache_read_input_tokens": 104810,
+                "output_tokens": 77,
+                "service_tier": "standard",
+                "speed": "standard",
+            },
+        },
+    }
+    (transcripts / "cycle-7.jsonl").write_text(json.dumps(record) + "\n")
+    mdb.refresh(force=True)
+    cache_mod._cache_clear_all()
+    metrics_mod._close_conn()
+
+    totals = metrics_mod.load_usage_totals()
+    assert totals["available"] is True
+    assert totals["requests"] == 1
+    assert totals["output_tokens"] == 77
+    assert totals["total_tokens"] == 2 + 515 + 104810 + 77
+    assert totals["models"] == ["claude-sonnet-5"]
+
+    daily = metrics_mod.load_usage_daily()
+    assert [d["day"] for d in daily] == ["2026-08-13"]
+    assert daily[0]["output_tokens"] == 77
+
+    cycles = metrics_mod.load_usage_cycles()
+    assert [c["cycle"] for c in cycles] == [7]
+    assert cycles[0]["model"] == "claude-sonnet-5"
+
+    assert metrics_mod.load_usage_daily(limit=0) == []
+    assert metrics_mod.load_usage_cycles(limit="nope")  # bad limit → default
+
+
+def test_usage_totals_without_transcripts(built):
+    totals = metrics_mod.load_usage_totals()
+    # The handler ran and found nothing — that is still "available".
+    assert totals["available"] is True
+    assert totals["requests"] == 0
+    assert totals["total_tokens"] == 0
+    assert metrics_mod.load_usage_daily() == []
+
+
 # ---------- caching / freshness ----------
 
 
@@ -353,3 +420,8 @@ def test_corrupt_database_yields_defaults(sandbox, monkeypatch):
     assert metrics_mod.load_cycle_velocity_metric() is None
     assert metrics_mod.load_workspace_mb() is None
     assert metrics_mod.is_available() is False
+    assert metrics_mod.load_handler_status() == []
+    assert metrics_mod.load_handler_meta("usage") == {}
+    assert metrics_mod.load_usage_totals()["available"] is False
+    assert metrics_mod.load_usage_daily() == []
+    assert metrics_mod.load_usage_cycles() == []

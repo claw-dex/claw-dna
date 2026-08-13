@@ -1,5 +1,6 @@
 """Tab 4: System — health, errors, validation, run-script, scripts, cycle logs."""
 
+import html
 import json
 import os
 from datetime import datetime, timezone
@@ -364,6 +365,99 @@ _MEMORY_FILE_LABELS = {
 # which grades every memory file at collection time (MEMORY_SIZE_WARN_KB etc.).
 
 
+def _format_tokens(n) -> str:
+    """Compact token count: 812, 44.1K, 4.63M."""
+    n = n or 0
+    if n < 1000:
+        return str(int(n))
+    if n < 1_000_000:
+        return f"{n / 1000:.1f}K"
+    return f"{n / 1_000_000:.2f}M"
+
+
+def _render_token_usage():
+    """Token usage parsed from cycle transcripts by services/metrics/usage.py."""
+    from app.data.metrics import (
+        load_handler_status,
+        load_usage_daily,
+        load_usage_totals,
+    )
+
+    st.subheader("Token Usage")
+
+    # Only this panel's handler; other handlers' failures belong to their own
+    # sections, not under a "Token Usage" heading.
+    for handler in load_handler_status():
+        if handler.get("name") == "usage" and not handler.get("ok"):
+            st.warning(f"Usage metrics handler failed: {handler.get('error')}")
+
+    totals = load_usage_totals()
+    if not totals["available"] or not totals["transcripts"]:
+        st.caption(
+            "No usage data yet — the `usage` handler collects it from "
+            "`/agent/memory/transcripts/` on the next metrics build."
+        )
+        return
+
+    models = ", ".join(html.escape(m) for m in totals["models"])
+    st.caption(
+        f"Deduplicated API responses across the last {totals['transcripts']} cycle "
+        f"transcript(s){' · ' + models if models else ''}"
+    )
+
+    u1, u2, u3, u4 = st.columns(4)
+    with u1:
+        st.metric("Total Tokens", _format_tokens(totals["total_tokens"]))
+        st.caption(f"{totals['requests']} requests")
+    with u2:
+        st.metric("Output", _format_tokens(totals["output_tokens"]))
+    with u3:
+        st.metric("Cache Read", _format_tokens(totals["cache_read_input_tokens"]))
+        st.caption("billed at a discount")
+    with u4:
+        st.metric("Cache Write", _format_tokens(totals["cache_creation_input_tokens"]))
+        st.caption(f"input {_format_tokens(totals['input_tokens'])}")
+
+    daily = load_usage_daily(limit=14)
+    if not daily:
+        return
+
+    # Per-day bars, newest last so the chart reads left-to-right in time.
+    rows = list(reversed(daily))
+    max_total = max((r["total_tokens"] or 0) for r in rows) or 1
+    bar_w, gap, svg_h = 22, 4, 60
+    svg_w = len(rows) * (bar_w + gap) + 20
+    parts = [
+        f'<svg width="{svg_w}" height="{svg_h + 18}" xmlns="http://www.w3.org/2000/svg">'
+    ]
+    for i, r in enumerate(rows):
+        total = r["total_tokens"] or 0
+        x = 10 + i * (bar_w + gap)
+        bar_h = max(3, int(total / max_total * 46))
+        y = svg_h - bar_h
+        # `day` comes from a transcript timestamp — escape before it goes into
+        # markup rendered with unsafe_allow_html.
+        day = html.escape(str(r["day"] or ""))
+        parts.append(
+            f'<rect x="{x}" y="{y}" width="{bar_w}" height="{bar_h}" '
+            f'fill="#9C27B0" rx="2" opacity="0.8">'
+            f"<title>{day}: {_format_tokens(total)} tokens over "
+            f'{int(r["requests"] or 0)} request(s) in '
+            f'{int(r["cycles"] or 0)} cycle(s)</title></rect>'
+        )
+        parts.append(
+            f'<text x="{x + bar_w // 2}" y="{svg_h + 12}" text-anchor="middle" '
+            f'font-size="8" fill="#888">{day[5:]}</text>'
+        )
+    parts.append("</svg>")
+    st.markdown(
+        f'<div style="overflow-x:auto;padding:4px 0">{"".join(parts)}</div>'
+        f'<div><small style="color:#888">Total tokens per day — '
+        f"last {len(rows)} day(s) with activity</small></div>",
+        unsafe_allow_html=True,
+    )
+
+
 def _format_age(age_hours: float) -> str:
     """Human-readable 'time since last write' for a memory file."""
     if age_hours < 1:
@@ -549,6 +643,11 @@ def render():
         ws_mb = load_workspace_mb()
         if ws_mb is not None:
             st.metric("Workspace", f"{ws_mb} MB")
+
+    st.divider()
+
+    # ── Token usage ───────────────────────────────────────────
+    _render_token_usage()
 
     st.divider()
 
