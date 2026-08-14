@@ -419,11 +419,15 @@ def test_send_reply_agent_needs_human_mirrors_to_main_outbox(
 
 
 def test_send_reply_agent_response_mirrors_to_main_outbox(patch_iac_paths, agent_root):
-    """agent_response → primary delivery + main outbox mirror.
+    """agent_response → primary delivery + main outbox mirror, typed `response`.
 
-    agent_response mirrors to the outbox with the same needs_human envelope
-    shape as agent_needs_human, so existing notification channels (Telegram /
-    WhatsApp) surface completed-work responses without main-agent intervention.
+    The mirror carries the agent's own type rather than `needs_human`. Both
+    reach the human either way — the bridges forward every outbox entry
+    regardless of type (telegram_bridge.send_outbox_messages) — but the type
+    drives the badge: `needs_human` renders as "🚨 ACTION REQUIRED" and is
+    counted by `/outbox` as an item needing attention. Completed work is not
+    action-required, so labelling it that way would inflate the alert count
+    and blunt the badge.
     """
     iac = patch_iac_paths
     h = _make_handler(iac)
@@ -442,13 +446,13 @@ def test_send_reply_agent_response_mirrors_to_main_outbox(patch_iac_paths, agent
     assert len(inbox_items) == 1
     assert inbox_items[0]["type"] == "agent_response"
     assert inbox_items[0]["content"] == "Task completed successfully"
-    # Mirror — main outbox got a needs_human envelope with the prefix
+    # Mirror — main outbox got a `response` envelope with the prefix
     outbox_path = agent_root / "messages" / "outbox.json"
     assert outbox_path.exists()
     outbox_items = json.loads(outbox_path.read_text())
     assert len(outbox_items) == 1
     mirror = outbox_items[0]
-    assert mirror["type"] == "needs_human"
+    assert mirror["type"] == "response"  # agent_ prefix stripped, type kept
     assert mirror["content"] == (
         "[from internal agent planner] Task completed successfully"
     )
@@ -479,15 +483,19 @@ def test_send_reply_non_mirrored_types_do_not_mirror(patch_iac_paths, agent_root
     assert "mirrored to main outbox" not in out["content"][0]["text"]
 
 
-@pytest.mark.parametrize("msg_type", ["agent_needs_human", "agent_response"])
+@pytest.mark.parametrize(
+    "msg_type,expected_mirror_type",
+    [("agent_needs_human", "needs_human"), ("agent_response", "response")],
+)
 def test_send_reply_mirror_works_when_target_is_external(
-    patch_iac_paths, agent_root, msg_type
+    patch_iac_paths, agent_root, msg_type, expected_mirror_type
 ):
     """Mirror must fire even when the primary target is NOT the main inbox.
 
-    Both agent_needs_human and agent_response trigger the outbox mirror.
-    The peer gets the full envelope; main outbox gets the stripped mirror
-    regardless of whether the agent is asking a question or returning results.
+    Both agent_needs_human and agent_response trigger the outbox mirror. The
+    peer gets the full envelope; main outbox gets the stripped mirror, keeping
+    the agent's own type (the `agent_` prefix is dropped) so an escalation and
+    a completed-work reply stay distinguishable to the human.
     """
     iac = patch_iac_paths
     bot_inbox = agent_root / "messages" / "external" / "research" / "inbox.json"
@@ -518,7 +526,7 @@ def test_send_reply_mirror_works_when_target_is_external(
     # Mirror: main outbox still got the human-notification entry
     outbox_items = json.loads((agent_root / "messages" / "outbox.json").read_text())
     assert len(outbox_items) == 1
-    assert outbox_items[0]["type"] == "needs_human"
+    assert outbox_items[0]["type"] == expected_mirror_type
     assert outbox_items[0]["content"].startswith("[from internal agent planner] ")
 
 

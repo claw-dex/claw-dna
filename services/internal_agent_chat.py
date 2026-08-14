@@ -878,10 +878,19 @@ def _build_send_reply_handler(session_name: str, cfg: dict):
 
         # Mirror agent_needs_human and agent_response into the main outbox so
         # the existing human-notification channels (Telegram / WhatsApp / etc.)
-        # and the main agent pick them up — same behaviour as
-        # external_agent_api.py:708-731.  agent_error and agent_info are
+        # and the main agent pick them up.  agent_error and agent_info are
         # delivered to the target inbox only.  The primary delivery has already
         # succeeded; a failed mirror is surfaced but does NOT fail the tool call.
+        #
+        # The mirror keeps the agent's own type with the `agent_` prefix
+        # stripped, rather than flattening both to needs_human.  The bridges
+        # forward every outbox entry regardless of type, so delivery is the
+        # same either way — but the type drives the badge: `needs_human`
+        # renders as "🚨 ACTION REQUIRED" and is counted by Telegram's
+        # /outbox as needing attention.  Completed work is not action-required.
+        #
+        # This goes further than external_agent_api.py:732-746, which mirrors
+        # needs_human only and does not mirror responses at all.
         _MIRROR_TYPE_MAP = {
             "agent_needs_human": "needs_human",
             "agent_response": "response",
