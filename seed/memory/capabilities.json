@@ -303,7 +303,7 @@
   {
     "id": "metrics_handlers",
     "name": "Pluggable Metrics Handlers",
-    "description": "Drop-in collection plugins under services/metrics/: any module declaring NAME/TABLES/SCHEMA/collect() contributes its own tables to the DuckDB metrics build, with optional fingerprint() to skip unchanged work and ctx.previous_rows() for incremental carry-forward. Handler failures are isolated and recorded in metric_handler_status. Ships services/metrics/usage.py, which parses token usage from cycle transcripts (deduplicating the per-content-block records that repeat one API response's usage) and surfaces it as Token Usage on the System tab",
+    "description": "Drop-in collection plugins under services/metrics/: any module declaring NAME/TABLES/SCHEMA/collect() contributes its own tables to the DuckDB metrics build, with optional fingerprint() to skip unchanged work, optional POLL_INTERVAL_SECONDS so a handler collects on its own cadence rather than the daemon's (rows and meta carried forward verbatim between runs), and ctx.previous_rows() for incremental carry-forward. Handler failures are isolated and recorded in metric_handler_status. Ships services/metrics/usage.py, which parses token usage from cycle transcripts (deduplicating the per-content-block records that repeat one API response's usage) and surfaces it as Token Usage on the System tab",
     "category": "observability",
     "enabled": true
   },

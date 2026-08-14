@@ -27,6 +27,7 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -50,7 +51,7 @@ DB_PATH = Path(os.environ.get("METRICS_DB_PATH", str(MEMORY_DIR / "metrics.duckd
 
 # Bump whenever a table is added/changed: is_ready() treats an older version as
 # not-ready, so the portal rebuilds instead of querying a missing table.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Evolution categories, in display order. Mirrors app/data/cycle.py:load_balance.
 ALL_CATEGORIES = [
@@ -241,7 +242,10 @@ def _previous_rows(tables) -> dict:
     Missing or unreadable tables come back as [].
     """
     tables = list(tables)
-    result = {table: [] for table in tables}
+    # None means "could not read", which is NOT the same as an empty table: a
+    # handler carrying its rows forward must collect fresh rather than publish
+    # emptiness it cannot vouch for.
+    result = {table: None for table in tables}
     if duckdb is None or not tables:
         return result
     target = db_path()
@@ -256,7 +260,7 @@ def _previous_rows(tables) -> dict:
             try:
                 result[table] = con.execute(f"SELECT * FROM {table}").fetchall()
             except Exception:
-                result[table] = []
+                result[table] = None
     finally:
         con.close()
     return result
@@ -426,7 +430,7 @@ def _file_size(path):
         return None
 
 
-def source_fingerprint(now=None) -> str:
+def source_fingerprint(now=None, previous_meta=None, force_handlers=False) -> str:
     """Fingerprint of every source: (name, mtime, size) tuples as JSON.
 
     Carries a UTC hour bucket as well, because two metrics are time-relative and
@@ -434,6 +438,12 @@ def source_fingerprint(now=None) -> str:
     "N error(s) logged today" suggestion. Without it a quiet agent would keep
     showing yesterday's error count forever. The replaced `load_suggest()` did
     the same thing with a date bucket in its cache key (app/data/suggest.py).
+
+    *previous_meta* is the live database's meta, used to decide whether each
+    handler is due; it is read on demand when not supplied. Set
+    *force_handlers* to match a build that will collect every handler
+    regardless of its interval, so the stored fingerprint describes what was
+    actually collected.
     """
     now = now or datetime.now(timezone.utc)
     parts = [["_hour_bucket", now.strftime("%Y-%m-%dT%H"), 0]]
@@ -450,12 +460,38 @@ def source_fingerprint(now=None) -> str:
     # Handlers read sources the core knows nothing about (transcripts, and
     # whatever a future handler adds), so each contributes its own key.
     handlers, errors = _handlers()
-    ctx = _handler_context(now, {}, {}, lambda _table: [])
+    previous = previous_meta if previous_meta is not None else _previous_meta()
+    # The roster itself is part of the key: installing, removing, or renaming a
+    # handler must rebuild even when it declares no fingerprint(), otherwise
+    # its tables would simply be absent from the store — and readers would get
+    # empty defaults, silently, until some unrelated source happened to change.
+    parts.append(
+        [
+            "handler_roster",
+            json.dumps([[h.NAME, sorted(h.TABLES), _schema_hash(h)] for h in handlers]),
+            0,
+        ]
+    )
     for handler in handlers:
         fn = getattr(handler, "fingerprint", None)
         if fn is None:
             continue
+        if not force_handlers and not _handler_due(handler, now, previous):
+            # Not due: reuse the fingerprint recorded at its last collection so
+            # churn in its sources cannot trigger a rebuild before then. This
+            # also skips the fingerprint's own I/O (for `usage`, a stat() per
+            # transcript). When the interval elapses the live value is read
+            # again and any change shows up immediately.
+            parts.append(
+                [
+                    f"handler/{handler.NAME}",
+                    previous.get(f"{handler.NAME}.fingerprint", ""),
+                    0,
+                ]
+            )
+            continue
         try:
+            ctx = _handler_context(now, {}, previous, lambda _t: [], handler)
             parts.append([f"handler/{handler.NAME}", fn(ctx), 0])
         except Exception as exc:
             # A handler that can't fingerprint must not pin the store: make the
@@ -1080,7 +1116,8 @@ CREATE TABLE metric_agent_errors (
     agent VARCHAR, total INTEGER, recent_count INTEGER, last_error_ts VARCHAR
 );
 CREATE TABLE metric_handler_status (
-    name VARCHAR, ok BOOLEAN, rows INTEGER, duration_ms DOUBLE, error VARCHAR
+    name VARCHAR, state VARCHAR, ok BOOLEAN, rows INTEGER,
+    duration_ms DOUBLE, error VARCHAR
 );
 """
 
@@ -1136,13 +1173,26 @@ def _handlers() -> tuple:
     # TABLES = ["cycles"]: the DDL would not collide (it creates something
     # else), the undeclared-table guard would pass, and its rows would be
     # appended straight into the core table.
+    # Two handlers sharing a table name would interleave their rows — one
+    # feature's metrics silently polluted by another's — so every table in the
+    # store has exactly one owner.
     core = set(TABLES)
+    claimed = {}
     safe = []
     for handler in handlers:
         clash = sorted(core.intersection(handler.TABLES))
         if clash:
             errors.append((handler.NAME, f"declares core table(s): {', '.join(clash)}"))
             continue
+        taken = sorted(t for t in handler.TABLES if t in claimed)
+        if taken:
+            owners = ", ".join(f"{t} (owned by {claimed[t]})" for t in taken)
+            errors.append(
+                (handler.NAME, f"declares table(s) already claimed: {owners}")
+            )
+            continue
+        for table in handler.TABLES:
+            claimed[table] = handler.NAME
         safe.append(handler)
     return safe, errors
 
@@ -1158,18 +1208,146 @@ def all_tables() -> list:
     return tables
 
 
-def _handler_context(now, src, previous_meta, previous_rows):
+def handler_interval(handler):
+    """A handler's minimum gap between collections, or None for every build."""
+    raw = getattr(handler, "POLL_INTERVAL_SECONDS", None)
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds > 0 else None
+
+
+def _handler_due(handler, now, previous_meta) -> bool:
+    """Whether *handler* should collect on this build.
+
+    Due when it declares no interval, has never run, its recorded run time is
+    unreadable, or that much time has passed. A clock that jumped backwards
+    (negative elapsed) counts as due rather than pinning the handler forever.
+    """
+    # A handler that reported leftover work stays due until it is caught up,
+    # whatever its interval — otherwise a backfill would advance by one slice
+    # per interval, and (for `usage`, which attributes oldest-first) the most
+    # recent data would be the last to appear.
+    if _int_or_none(previous_meta.get(f"{handler.NAME}.pending")) or 0:
+        return True
+
+    interval = handler_interval(handler)
+    if interval is None:
+        return True
+    last = _parse_dt(previous_meta.get(f"{handler.NAME}.collected_at"))
+    if last is None:
+        return True
+    elapsed = (now - last).total_seconds()
+    return elapsed < 0 or elapsed >= interval
+
+
+def _meta_key_re():
+    """The handler contract's meta-key rule, imported lazily."""
+    from services.metrics.base import META_KEY_RE
+
+    return META_KEY_RE
+
+
+def _handler_context(now, src, previous_meta, previous_rows, handler=None):
+    """Build a context for one handler.
+
+    Every handler gets its *own* context, and nothing mutable is shared:
+
+    * ``sources`` is a read-only view, so a handler cannot re-order or clear a
+      payload the next handler is about to read.
+    * ``previous_meta`` is a copy — writing to a shared one could set another
+      handler's ``<NAME>.collected_at`` and pin it as never-due.
+    * ``previous_rows`` hands back fresh tuples, and only for tables this
+      handler owns. Returning the live list let a handler mutate rows that
+      another handler was about to carry forward verbatim.
+    """
+    from types import MappingProxyType
+
     from services.metrics.base import HandlerContext
+
+    owned = set(handler.TABLES) if handler is not None else None
+
+    def _rows(table):
+        if owned is not None and table not in owned:
+            return []
+        return [tuple(r) for r in previous_rows(table) or []]
+
+    # Shallow-copy the containers: MappingProxyType stops a handler rebinding a
+    # key, but not `ctx.sources["cycles"].clear()`. The records inside are
+    # still shared (deep-copying every cycle per handler would be wasteful), so
+    # handlers must treat them as read-only — the containers themselves are
+    # what an accidental sort()/clear()/append() would damage.
+    safe_sources = {
+        key: list(value) if isinstance(value, list) else value
+        for key, value in src.items()
+    }
 
     return HandlerContext(
         agent_dir=AGENT_DIR,
         memory_dir=MEMORY_DIR,
         messages_dir=MESSAGES_DIR,
         now=now,
-        sources=src,
-        previous_meta=previous_meta,
-        previous_rows=previous_rows,
+        sources=MappingProxyType(safe_sources),
+        previous_meta=dict(previous_meta),
+        previous_rows=_rows,
     )
+
+
+def _schema_hash(handler) -> str:
+    """Digest of a handler's DDL, so a column change is a detectable event.
+
+    Carrying rows forward is positional. A same-arity column swap or retype
+    would land values in the wrong columns with no error anywhere — and for an
+    incremental handler that mis-filing then republishes itself on every later
+    build. Any DDL edit therefore invalidates both the store and the carry.
+    """
+    try:
+        body = "\n".join(str(s) for s in handler.SCHEMA)
+    except Exception:
+        return ""
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+
+
+def _table_names(con) -> set:
+    """Every table currently in the open database."""
+    try:
+        return {
+            row[0]
+            for row in con.execute(
+                "SELECT table_name FROM information_schema.tables"
+            ).fetchall()
+        }
+    except Exception:
+        return set()
+
+
+def _carry_forward(con, handler, carried):
+    """Re-insert a not-due handler's previous rows. Returns the count, or None.
+
+    None means the copy failed and the caller should collect fresh instead of
+    publishing empty tables.
+    """
+    # A table the previous build did not have (a handler that just added one,
+    # or a database swapped out mid-read) reads back as None. Publishing it
+    # empty would look like real data — collect fresh instead.
+    if any(carried.get(table) is None for table in handler.TABLES):
+        return None
+    try:
+        total = 0
+        con.execute("BEGIN TRANSACTION")
+        for table in handler.TABLES:
+            rows = [tuple(r) for r in carried.get(table) or []]
+            _insert(con, table, rows)
+            total += len(rows)
+        con.execute("COMMIT")
+        return total
+    except Exception:
+        try:
+            con.execute("ROLLBACK")
+        except Exception:
+            pass
+        return None
 
 
 def _require_duckdb():
@@ -1259,24 +1437,35 @@ def _sys_snapshot_rows(snapshots: list) -> list:
     return rows
 
 
-def build(dest: Path, src: dict | None = None, now=None, fingerprint=None) -> None:
+def build(
+    dest: Path,
+    src: dict | None = None,
+    now=None,
+    fingerprint=None,
+    force_handlers: bool = False,
+) -> None:
     """Create a fresh database at `dest` (overwriting it) from the JSON sources."""
     _require_duckdb()
     now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        # _parse_dt always returns aware datetimes, so a naive `now` would make
+        # every comparison against a stored stamp raise TypeError and abort the
+        # whole build. Assume UTC, as everything else here does.
+        now = now.replace(tzinfo=timezone.utc)
     # Stamp the fingerprint from BEFORE the read. If a source is written while we
     # are reading, a pre-read fingerprint makes the next refresh() rebuild (one
     # redundant build); a post-read one would mark this stale snapshot current
     # and freeze it until some unrelated source happens to change.
+    previous = _previous_meta()
     if fingerprint is None:
-        fingerprint = source_fingerprint(now)
+        fingerprint = source_fingerprint(now, previous, force_handlers=force_handlers)
     src = src if src is not None else load_sources()
 
-    # Read the carried-forward state BEFORE unlinking: refresh() builds into a
-    # tmp path so the live file survives, but build() can also be called
-    # directly on the live path, and unlinking first would destroy the previous
-    # measurements — forcing both directory walks and every handler's
-    # incremental cache to start from scratch.
-    previous = _previous_meta()
+    # `previous` (read above, before any unlink) carries the throttle state,
+    # each handler's last-run stamp, and its incremental cache. refresh()
+    # builds into a tmp path so the live file survives, but build() can also be
+    # called directly on the live path, where unlinking first would destroy all
+    # of it and force every walk and parse to start from scratch.
     handlers, handler_errors = _handlers()
     carried = _previous_rows(
         [table for handler in handlers for table in handler.TABLES]
@@ -1466,9 +1655,43 @@ def build(dest: Path, src: dict | None = None, now=None, fingerprint=None) -> No
         # missing table just because one plugin is broken.
         for handler in list(handlers):
             try:
+                # Re-check every statement here, not just at discovery: the
+                # created/dropped comparison below cannot see a DELETE or an
+                # UPDATE, so a multi-statement string that creates its declared
+                # table and then wipes a core one would look perfectly healthy.
+                from services.metrics.base import check_schema_statement
+
+                before = _table_names(con)
                 con.execute("BEGIN TRANSACTION")
                 for statement in handler.SCHEMA:
+                    check_schema_statement(statement)
                     con.execute(statement)
+
+                # Verify BEFORE committing, so a violation is rolled back
+                # rather than merely reported: the handler must have created
+                # exactly the tables it declared and removed none. Anything
+                # else means it is writing somewhere it does not own —
+                # `CREATE TABLE IF NOT EXISTS x` silently no-ops onto another
+                # handler's table (both then append into it), an undeclared
+                # CREATE escapes the ownership check, and a DROP takes a core
+                # table with it. validate() already refuses non-CREATE
+                # statements at discovery; this is the backstop.
+                after = _table_names(con)
+                created = after - before
+                dropped = before - after
+                declared = set(handler.TABLES)
+                if created != declared or dropped:
+                    missing = sorted(declared - created)
+                    extra = sorted(created - declared)
+                    detail = []
+                    if missing:
+                        detail.append(f"did not create {', '.join(missing)}")
+                    if extra:
+                        detail.append(f"created undeclared {', '.join(extra)}")
+                    if dropped:
+                        detail.append(f"dropped {', '.join(sorted(dropped))}")
+                    raise ValueError("; ".join(detail))
+
                 con.execute("COMMIT")
             except Exception as exc:
                 try:
@@ -1482,11 +1705,63 @@ def build(dest: Path, src: dict | None = None, now=None, fingerprint=None) -> No
 
         handler_meta = {}
         status_rows = [
-            (name, False, 0, 0.0, message) for name, message in handler_errors
+            (name, "failed", False, 0, 0.0, message) for name, message in handler_errors
         ]
-        ctx = _handler_context(now, src, previous, lambda t: carried.get(t, []))
         for handler in handlers:
+            # A DDL change makes the previous rows' shape untrustworthy, so
+            # the handler starts from scratch rather than reading them back at
+            # offsets that no longer mean what they did.
+            rows_source = (
+                (lambda _t: [])
+                if previous.get(f"{handler.NAME}.schema_hash") != _schema_hash(handler)
+                else (lambda t: carried.get(t) or [])
+            )
+            ctx = _handler_context(now, src, previous, rows_source, handler)
+            # A handler with POLL_INTERVAL_SECONDS collects on its own cadence,
+            # not the daemon's. Between runs its rows and meta are copied over
+            # verbatim, so readers see no gap and nothing recomputes. If the
+            # copy fails we fall through and collect fresh rather than
+            # publishing an empty table.
+            schema_changed = previous.get(
+                f"{handler.NAME}.schema_hash"
+            ) != _schema_hash(handler)
+            if (
+                not force_handlers
+                and not schema_changed
+                and not _handler_due(handler, now, previous)
+            ):
+                started = time.monotonic()
+                carried_rows = _carry_forward(con, handler, carried)
+                if carried_rows is not None:
+                    prefix = f"{handler.NAME}."
+                    handler_meta.update(
+                        {k: v for k, v in previous.items() if k.startswith(prefix)}
+                    )
+                    status_rows.append(
+                        (
+                            handler.NAME,
+                            "carried",
+                            True,
+                            carried_rows,
+                            round((time.monotonic() - started) * 1000, 1),
+                            "",
+                        )
+                    )
+                    continue
+
             started = time.monotonic()
+            # Read the fingerprint BEFORE collecting, for the same reason the
+            # store-level one is stamped before load_sources(): `usage.collect`
+            # is a multi-second parse, and a transcript written during it would
+            # otherwise be recorded as already-seen while its rows are missing —
+            # freezing that cycle out until some unrelated source changed.
+            fingerprint_fn = getattr(handler, "fingerprint", None)
+            handler_fingerprint = None
+            if fingerprint_fn is not None:
+                try:
+                    handler_fingerprint = fingerprint_fn(ctx)
+                except Exception:
+                    handler_fingerprint = ""
             try:
                 # collect() runs outside the transaction: for `usage` that is a
                 # multi-second transcript parse, and there is no reason to hold
@@ -1499,10 +1774,25 @@ def build(dest: Path, src: dict | None = None, now=None, fingerprint=None) -> No
                 if extra is None:
                     extra = (result or {}).get("meta", {})
 
+                if not isinstance(tables, dict):
+                    raise TypeError(
+                        f"tables must be a dict, got {type(tables).__name__}"
+                    )
+                if not isinstance(extra, dict):
+                    raise TypeError(f"meta must be a dict, got {type(extra).__name__}")
                 unknown = set(tables) - set(handler.TABLES)
                 if unknown:
                     raise ValueError(
                         f"returned undeclared table(s): {', '.join(sorted(unknown))}"
+                    )
+                meta_key_re = _meta_key_re()
+                bad_keys = sorted(k for k in extra if not meta_key_re.match(str(k)))
+                if bad_keys:
+                    # Meta is stored as "<NAME>.<key>"; a key with a dot or a
+                    # separator could address another handler's namespace.
+                    raise ValueError(
+                        f"meta key(s) must match {meta_key_re.pattern}: "
+                        f"{', '.join(bad_keys)}"
                     )
 
                 written = 0
@@ -1514,8 +1804,16 @@ def build(dest: Path, src: dict | None = None, now=None, fingerprint=None) -> No
                 con.execute("COMMIT")
                 for key, value in (extra or {}).items():
                     handler_meta[f"{handler.NAME}.{key}"] = value
+                # Stamp the run so the interval and the deferred fingerprint
+                # have something to measure from.
+                handler_meta[f"{handler.NAME}.collected_at"] = now.isoformat()
+                handler_meta[f"{handler.NAME}.schema_hash"] = _schema_hash(handler)
+                if handler_fingerprint is not None:
+                    handler_meta[f"{handler.NAME}.fingerprint"] = handler_fingerprint
                 elapsed_ms = round((time.monotonic() - started) * 1000, 1)
-                status_rows.append((handler.NAME, True, written, elapsed_ms, ""))
+                status_rows.append(
+                    (handler.NAME, "collected", True, written, elapsed_ms, "")
+                )
             except Exception as exc:
                 # Discard whatever this handler managed to write and clear the
                 # aborted-transaction state before the next one starts.
@@ -1527,6 +1825,7 @@ def build(dest: Path, src: dict | None = None, now=None, fingerprint=None) -> No
                 status_rows.append(
                     (
                         handler.NAME,
+                        "failed",
                         False,
                         0,
                         elapsed_ms,
@@ -1541,8 +1840,11 @@ def build(dest: Path, src: dict | None = None, now=None, fingerprint=None) -> No
         meta = {
             "schema_version": SCHEMA_VERSION,
             "built_at": now.isoformat(),
-            "handlers_ok": sum(1 for r in status_rows if r[1]),
-            "handlers_failed": sum(1 for r in status_rows if not r[1]),
+            # status_rows are (name, state, ok, rows, duration_ms, error).
+            "handlers_ok": sum(1 for r in status_rows if r[2]),
+            "handlers_failed": sum(1 for r in status_rows if not r[2]),
+            "handlers_collected": sum(1 for r in status_rows if r[1] == "collected"),
+            "handlers_carried": sum(1 for r in status_rows if r[1] == "carried"),
             "source_fingerprint": fingerprint,
             "workspace_mb": workspace_mb,
             "workspace_mb_at": workspace_mb_at,
@@ -1601,9 +1903,18 @@ def refresh(force: bool = False) -> bool:
     _require_duckdb()
     dest = db_path()
     now = datetime.now(timezone.utc)
-    fingerprint = source_fingerprint(now)
+    previous = _previous_meta()
+    # Every handler re-collects on a forced rebuild (the operator escape hatch
+    # and the portal's cold-start path) and on a schema bump — in both cases a
+    # skipped handler would publish empty or stale-shaped tables.
+    stored, version = _stored_fingerprint(dest) if dest.exists() else (None, None)
+    force_handlers = force or version != SCHEMA_VERSION
+    # The fingerprint must be computed under the same flag it will be stored
+    # with: deferring a handler's fingerprint here while collecting it fresh in
+    # build() would publish a mismatch, and the very next poll would rebuild
+    # again for no reason.
+    fingerprint = source_fingerprint(now, previous, force_handlers=force_handlers)
     if not force and dest.exists():
-        stored, version = _stored_fingerprint(dest)
         if version == SCHEMA_VERSION and stored == fingerprint:
             return False
 
@@ -1614,7 +1925,7 @@ def refresh(force: bool = False) -> bool:
     # candidate is complete.
     tmp = dest.with_name(f"{dest.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     try:
-        build(tmp, now=now, fingerprint=fingerprint)
+        build(tmp, now=now, fingerprint=fingerprint, force_handlers=force_handlers)
         os.replace(tmp, dest)
     finally:
         # A failed build must leave the previous database untouched. DuckDB

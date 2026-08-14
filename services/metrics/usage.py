@@ -33,9 +33,21 @@ actually ran in. ``metric_usage_requests`` holds each request exactly once.
 Incrementality
 --------------
 A finished cycle's transcript never changes, so per-file ``(fname, size,
-mtime)`` identity carries its already-attributed rows forward instead of
-re-reading it. Steady state parses only the transcript of the cycle that just
-ran. What that key does *not* protect against:
+mtime)`` identity — recorded in ``metric_usage_files`` — marks it processed and
+carries its already-attributed rows forward instead of re-reading it. Steady
+state parses only the transcript of the cycle that just ran. Note that the
+marker is the *file* row, not the presence of request rows: a resumed session's
+transcript repeats an earlier cycle's history and contributes zero new
+requests, and it is still fully processed.
+
+Only ``METRICS_USAGE_MAX_PARSE`` transcripts are parsed per build. The first
+build on a long-running agent would otherwise read a whole window of ~300 KB
+files in one pass, stalling the daemon (and, via the portal's cold-start path,
+every metrics read). Instead each build takes a bounded slice, oldest first,
+and reports the remainder as ``pending`` — which keeps the handler due on the
+next build regardless of its interval, so a backfill converges in a few polls.
+
+What the identity key does *not* protect against:
 
 * A transcript still being copied while it is parsed — the partial parse is
   recorded against the pre-copy stat, so the next build sees a new size and
@@ -47,8 +59,9 @@ ran. What that key does *not* protect against:
   forward so long-range daily history survives a modest cycle window.
 
 Config (env):
-    METRICS_USAGE_CYCLES   how many recent transcripts to keep (default 200)
-    METRICS_TRANSCRIPT_DIR override the transcript directory
+    METRICS_USAGE_CYCLES    how many recent transcripts to keep (default 200)
+    METRICS_USAGE_MAX_PARSE how many to parse per build (default 20)
+    METRICS_TRANSCRIPT_DIR  override the transcript directory
 """
 
 from __future__ import annotations
@@ -62,6 +75,14 @@ from pathlib import Path
 from services.metrics.base import HandlerResult
 
 NAME = "usage"
+
+# Collect at most every 15 minutes, regardless of how often the daemon polls.
+# Transcripts only land at cycle end (~15 min apart), and reading them means a
+# stat() sweep plus a parse of whatever changed — there is nothing to gain from
+# looking on every 5-minute tick. Inside the interval the collector carries
+# these tables forward untouched and skips the stat() sweep entirely, so
+# transcript churn cannot trigger a rebuild before this handler is due.
+POLL_INTERVAL_SECONDS = 900
 
 TABLES = [
     "metric_usage_files",
@@ -117,6 +138,17 @@ SCHEMA = [
 ]
 
 DEFAULT_RECENT_CYCLES = 200
+
+# How many transcripts may be *parsed* in a single build. The window above is
+# how much history to keep; this is how much work one build is allowed to do.
+# They differ because of the first build on an existing agent: a long-running
+# one has thousands of transcripts, and parsing a whole window of ~300 KB files
+# in one pass would stall the daemon — and, on the portal's cold-start path,
+# every metrics read with it. Instead each build chews through a bounded slice,
+# oldest first, and reports how many are still pending; successive builds catch
+# up. Steady state parses exactly one (the cycle that just ran).
+DEFAULT_MAX_PARSE_PER_BUILD = 20
+
 CYCLE_RE = re.compile(r"^cycle-(\d+)\.jsonl(\.gz)?$")
 
 # Token counters summed by every rollup.
@@ -164,13 +196,21 @@ def transcript_dir(ctx) -> Path:
     return ctx.memory_dir / "transcripts"
 
 
-def _recent_cycles() -> int:
-    raw = os.environ.get("METRICS_USAGE_CYCLES")
+def _env_int(name, default) -> int:
+    raw = os.environ.get(name)
     try:
-        n = int(raw) if raw else DEFAULT_RECENT_CYCLES
+        value = int(raw) if raw else default
     except ValueError:
-        return DEFAULT_RECENT_CYCLES
-    return max(1, n)
+        return default
+    return max(1, value)
+
+
+def _recent_cycles() -> int:
+    return _env_int("METRICS_USAGE_CYCLES", DEFAULT_RECENT_CYCLES)
+
+
+def _max_parse_per_build() -> int:
+    return _env_int("METRICS_USAGE_MAX_PARSE", DEFAULT_MAX_PARSE_PER_BUILD)
 
 
 def transcript_files(ctx) -> list:
@@ -181,39 +221,60 @@ def transcript_files(ctx) -> list:
     double that cycle's tokens, so the uncompressed copy wins.
     """
     directory = transcript_dir(ctx)
-    best: dict = {}
     try:
         names = os.listdir(directory)
     except OSError:
         return []
+
+    # Pick the window from the *filenames* first, and only stat what survives.
+    # A long-running agent accumulates thousands of transcripts; stat()ing all
+    # of them on every fingerprint and every collect would dwarf the actual
+    # work. At most one file per cycle: `gzip` writes `cycle-N.jsonl.gz` before
+    # removing `cycle-N.jsonl`, so a crash mid-compress can leave both, and
+    # counting both would double that cycle's tokens — the uncompressed copy
+    # wins because it is the one heartbeat.sh just wrote.
+    best: dict = {}
     for name in names:
         match = CYCLE_RE.match(name)
         if not match:
-            continue
-        path = directory / name
-        try:
-            st = os.stat(path)
-        except OSError:
             continue
         cycle = int(match.group(1))
         is_gz = bool(match.group(2))
         current = best.get(cycle)
         if current is None or (current[1] and not is_gz):
-            best[cycle] = ((cycle, path, st.st_size, st.st_mtime), is_gz)
+            best[cycle] = (name, is_gz)
 
-    found = [entry for entry, _is_gz in best.values()]
-    # Newest cycles win the cap, but return chronological: attribution depends
-    # on processing oldest-first.
-    found.sort(key=lambda item: item[0], reverse=True)
-    return sorted(found[: _recent_cycles()], key=lambda item: item[0])
+    windowed = sorted(best, reverse=True)[: _recent_cycles()]
+
+    found = []
+    for cycle in windowed:
+        name = best[cycle][0]
+        path = directory / name
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        found.append((cycle, path, st.st_size, st.st_mtime))
+    # Chronological: attribution depends on processing oldest-first.
+    return sorted(found, key=lambda item: item[0])
 
 
 def fingerprint(ctx) -> str:
-    """Identity of every transcript we would read. Cheap: one stat() each."""
+    """Identity of every transcript in the window. Cheap: one stat() each.
+
+    Carries the previous build's pending count as well. Without it a capped
+    build would leave the fingerprint unchanged — the files it deferred are
+    still the same files — so no rebuild would be triggered and the backfill
+    would stall halfway. Because each build reduces the count, the value keeps
+    changing until it settles at zero.
+    """
     return json.dumps(
         [
-            [cycle, path.name, size, mtime]
-            for cycle, path, size, mtime in transcript_files(ctx)
+            ctx.previous_meta.get(f"{NAME}.pending", 0),
+            [
+                [cycle, path.name, size, mtime]
+                for cycle, path, size, mtime in transcript_files(ctx)
+            ],
         ]
     )
 
@@ -435,19 +496,33 @@ def collect(ctx) -> HandlerResult:
     request_rows = []
     parsed = 0
     reused = 0
+    pending = 0
+    budget = _max_parse_per_build()
 
     # Oldest first: a request belongs to the first cycle that recorded it.
     for cycle, path, size, mtime in files:
         identity = (path.name, size, mtime)
-        if previous_files.get(cycle) == identity and cycle in previous_requests:
-            rows = previous_requests[cycle]
+        if previous_files.get(cycle) == identity:
+            # metric_usage_files is the processed-marker on its own: a cycle
+            # can legitimately contribute *zero* rows and still be fully
+            # processed. That is the normal case for a resumed session, whose
+            # transcript repeats an earlier cycle's history and contributes
+            # nothing new. Requiring rows here made those cycles look
+            # unprocessed and re-parsed them on every single build.
+            rows = previous_requests.get(cycle, [])
             # Carried rows were already deduped against earlier cycles, but
             # their ids still have to enter `seen` for the cycles after them.
             seen.update(r[_IDX["message_id"]] for r in rows if r[_IDX["message_id"]])
             reused += 1
-        else:
+        elif parsed < budget:
             rows = parse_transcript(cycle, path, seen)
             parsed += 1
+        else:
+            # Out of budget for this build. Leave the file entirely alone — no
+            # rows, and crucially no metric_usage_files entry, so the next
+            # build still sees it as unprocessed and picks it up.
+            pending += 1
+            continue
 
         request_rows.extend(rows)
         stamps = [r[_IDX["ts"]] for r in rows if r[_IDX["ts"]]]
@@ -490,6 +565,11 @@ def collect(ctx) -> HandlerResult:
             "transcripts": len(file_rows),
             "transcripts_parsed": parsed,
             "transcripts_reused": reused,
+            # `pending` is the collector's reserved key: >0 keeps this
+            # handler due on the next build regardless of its interval, so a
+            # backfill converges in successive builds rather than one slice
+            # per 15 minutes.
+            "pending": pending,
             "requests": len(request_rows),
             "total_tokens": sum(totals[f] for f in _BILLED_FIELDS),
             "models": sorted(

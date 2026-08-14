@@ -82,6 +82,8 @@ from app.data.metrics import (  # noqa: F401
     load_agent_error_metrics,
     load_handler_status,
     load_handler_meta,
+    load_metric_table,
+    is_available,
     load_usage_totals,
     load_usage_daily,
     load_usage_cycles,

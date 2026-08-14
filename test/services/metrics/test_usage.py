@@ -104,7 +104,8 @@ def test_transcript_files_is_empty_without_a_directory(tmp_path):
         now=None,
     )
     assert usage.transcript_files(ctx) == []
-    assert json.loads(usage.fingerprint(ctx)) == []
+    # Fingerprint is [pending, files] — nothing pending, nothing to read.
+    assert json.loads(usage.fingerprint(ctx)) == [0, []]
 
 
 def test_fingerprint_tracks_file_identity(ctx):
@@ -517,3 +518,121 @@ def test_fixture_grain_columns_are_populated(ctx):
         "claude-opus-5",
     }
     assert {r[usage._IDX["speed"]] for r in rows} == {"standard"}
+
+
+# ---------- bounded work per build (long-running agents) ----------
+
+
+def _many(ctx, count, per_file=2, start=1):
+    """Write `count` distinct transcripts."""
+    for cycle in range(start, start + count):
+        _write(
+            ctx,
+            cycle,
+            [
+                _record(f"msg_{cycle}_{j}", f"2026-08-13T10:{j:02d}:00Z")
+                for j in range(per_file)
+            ],
+        )
+
+
+def test_only_a_bounded_slice_is_parsed_per_build(ctx, monkeypatch):
+    """A long-running agent has thousands of transcripts.
+
+    Parsing a whole window in one pass would stall the daemon, and on the
+    portal's cold-start path every metrics read with it.
+    """
+    monkeypatch.setenv("METRICS_USAGE_MAX_PARSE", "5")
+    _many(ctx, 12)
+
+    result = usage.collect(ctx)
+    assert result.meta["transcripts_parsed"] == 5
+    assert result.meta["pending"] == 7
+    # Only the parsed ones are recorded as processed.
+    assert len(result.tables["metric_usage_files"]) == 5
+    assert {r[0] for r in result.tables["metric_usage_files"]} == {1, 2, 3, 4, 5}
+
+
+def test_a_backfill_converges_over_successive_builds(ctx, monkeypatch):
+    monkeypatch.setenv("METRICS_USAGE_MAX_PARSE", "5")
+    _many(ctx, 12)
+
+    carried = {}
+    seen_parsed = []
+    for _ in range(4):
+        result = usage.collect(_as_context(ctx, carried))
+        carried = dict(result.tables)
+        seen_parsed.append(result.meta["transcripts_parsed"])
+
+    assert seen_parsed == [5, 5, 2, 0]
+    assert result.meta["pending"] == 0
+    assert result.meta["transcripts"] == 12
+    assert result.meta["transcripts_reused"] == 12
+    # Every request from every transcript landed exactly once.
+    assert result.meta["requests"] == 12 * 2
+
+
+def test_pending_is_reported_so_the_handler_stays_due(ctx, monkeypatch):
+    """`pending` is the collector's reserved key — it overrides the interval."""
+    monkeypatch.setenv("METRICS_USAGE_MAX_PARSE", "2")
+    _many(ctx, 5)
+    result = usage.collect(ctx)
+    assert result.meta["pending"] == 3
+
+    # And it feeds the fingerprint, so a capped build still triggers the next.
+    ctx_with_pending = HandlerContext(
+        agent_dir=ctx.agent_dir,
+        memory_dir=ctx.memory_dir,
+        messages_dir=ctx.messages_dir,
+        now=ctx.now,
+        previous_meta={"usage.pending": 3},
+    )
+    assert usage.fingerprint(ctx_with_pending) != usage.fingerprint(ctx)
+
+
+def test_a_cycle_with_no_new_requests_is_still_marked_processed(ctx):
+    """A resumed session repeats history and contributes zero new requests.
+
+    Treating "no rows" as "not processed" made those transcripts re-parse on
+    every single build, which on a backlog meant the backfill never advanced.
+    """
+    records = [_record("msg_a", "2026-08-13T10:00:00Z")]
+    _write(ctx, 1, records)
+    _write(ctx, 2, records)  # identical: every request is a duplicate
+
+    first = usage.collect(ctx)
+    assert first.meta["transcripts_parsed"] == 2
+    # Cycle 2 contributed nothing...
+    assert [r[usage._IDX["cycle"]] for r in first.tables["metric_usage_requests"]] == [
+        1
+    ]
+    # ...but is recorded as processed.
+    assert {r[0] for r in first.tables["metric_usage_files"]} == {1, 2}
+
+    second = usage.collect(_as_context(ctx, dict(first.tables)))
+    assert second.meta["transcripts_parsed"] == 0
+    assert second.meta["transcripts_reused"] == 2
+
+
+def test_only_the_windowed_files_are_stat_ed(ctx, monkeypatch):
+    """Filenames pick the window; only the survivors are stat()ed.
+
+    A long-running agent has thousands of transcripts and this runs on every
+    fingerprint as well as every collect.
+    """
+    _many(ctx, 30)
+    monkeypatch.setenv("METRICS_USAGE_CYCLES", "5")
+
+    calls = {"n": 0}
+    real_stat = os.stat
+
+    def _counting_stat(path, *a, **k):
+        if str(path).endswith((".jsonl", ".jsonl.gz")):
+            calls["n"] += 1
+        return real_stat(path, *a, **k)
+
+    monkeypatch.setattr(usage.os, "stat", _counting_stat)
+    files = usage.transcript_files(ctx)
+
+    assert [c for c, *_ in files] == [26, 27, 28, 29, 30]
+    assert calls["n"] == 5, "stat()ed files outside the window"

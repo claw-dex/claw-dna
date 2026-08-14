@@ -375,6 +375,52 @@ def _format_tokens(n) -> str:
     return f"{n / 1_000_000:.2f}M"
 
 
+def _render_collector_health():
+    """Collector freshness and per-handler state.
+
+    Without this, a handler that fails to import, is rejected for a table
+    clash, or raises is invisible: its tables are simply empty, and a panel
+    renders "0" as a fact.
+    """
+    from app.data.metrics import built_at, load_handler_status
+    from app.shared import parse_dt
+
+    stamp = built_at()
+    handlers = load_handler_status()
+    if not stamp and not handlers:
+        st.warning(
+            "Metrics store unavailable — run `uv run python scripts/metrics_db.py "
+            "--rebuild`, or check that the `metrics_daemon` service is running."
+        )
+        return
+
+    failed = [h for h in handlers if not h.get("ok")]
+    for handler in failed:
+        st.warning(
+            f"Metrics handler `{handler.get('name')}` failed: {handler.get('error')}"
+        )
+
+    if stamp:
+        collected = ", ".join(
+            f"{h['name']} ({h.get('state') or '?'})" for h in handlers
+        )
+        age = ""
+        parsed = parse_dt(stamp)
+        if parsed is not None:
+            minutes = int((datetime.now(timezone.utc) - parsed).total_seconds() // 60)
+            # The daemon polls every 5 minutes; well past that means it is down.
+            age = f" ({minutes}m ago)" if minutes >= 0 else ""
+            if minutes > 30:
+                st.warning(
+                    f"Metrics store last built {minutes}m ago — the "
+                    "`metrics_daemon` service may not be running."
+                )
+        st.caption(
+            f"Metrics collected {stamp[:16].replace('T', ' ')} UTC{age}"
+            + (f" · handlers: {collected}" if collected else " · no handlers")
+        )
+
+
 def _render_token_usage():
     """Token usage parsed from cycle transcripts by services/metrics/usage.py."""
     from app.data.metrics import (
@@ -385,8 +431,8 @@ def _render_token_usage():
 
     st.subheader("Token Usage")
 
-    # Only this panel's handler; other handlers' failures belong to their own
-    # sections, not under a "Token Usage" heading.
+    # Only this panel's handler; every other handler is covered by the
+    # collector-health strip above.
     for handler in load_handler_status():
         if handler.get("name") == "usage" and not handler.get("ok"):
             st.warning(f"Usage metrics handler failed: {handler.get('error')}")
@@ -399,10 +445,21 @@ def _render_token_usage():
         )
         return
 
+    if totals.get("pending"):
+        st.info(
+            f"Backfilling — {totals['pending']} transcript(s) still to read. "
+            "The numbers below cover what has been processed so far and will "
+            "fill in over the next few collector runs."
+        )
+
     models = ", ".join(html.escape(m) for m in totals["models"])
+    collected = totals.get("collected_at") or ""
     st.caption(
         f"Deduplicated API responses across the last {totals['transcripts']} cycle "
         f"transcript(s){' · ' + models if models else ''}"
+        # The handler collects on its own interval, not the daemon's, so say
+        # when these numbers were last measured.
+        + (f" · collected {collected[:16].replace('T', ' ')} UTC" if collected else "")
     )
 
     u1, u2, u3, u4 = st.columns(4)
@@ -645,6 +702,9 @@ def render():
             st.metric("Workspace", f"{ws_mb} MB")
 
     st.divider()
+
+    # ── Metrics collector health ──────────────────────────────
+    _render_collector_health()
 
     # ── Token usage ───────────────────────────────────────────
     _render_token_usage()

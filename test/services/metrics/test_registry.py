@@ -192,3 +192,141 @@ def test_a_module_that_fails_to_execute_is_not_left_in_sys_modules(
     # The second pass reports the same real cause, not a validation error.
     handlers, errors_again = registry.discover()
     assert errors_again[0][1] == errors[0][1]
+
+
+# ---------- identifier hygiene (isolation between features) ----------
+
+
+@pytest.mark.parametrize("name", ["a.b", "MyMetric", "_leading", "-leading", "a b"])
+def test_validate_rejects_names_that_break_the_meta_namespace(name):
+    """NAME prefixes every meta key as "<NAME>.<key>".
+
+    A dot makes that ambiguous: handler "a.b" publishing "k" and handler "a"
+    publishing "b.k" both write "a.b.k", and one silently overwrites the other.
+    """
+    with pytest.raises(HandlerError) as exc:
+        validate(_valid(NAME=name))
+    assert "NAME" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "tables",
+    [
+        ["Metric_Upper"],
+        ["metric-dash"],
+        ["metric x"],
+        ["metric_a; DROP TABLE cycles"],
+        [123],
+    ],
+)
+def test_validate_rejects_malformed_table_names(tables):
+    with pytest.raises(HandlerError) as exc:
+        validate(_valid(TABLES=tables))
+    assert "table name" in str(exc.value)
+
+
+def test_validate_rejects_duplicate_tables_within_one_handler():
+    with pytest.raises(HandlerError) as exc:
+        validate(_valid(TABLES=["metric_a", "metric_a"]))
+    assert "duplicates" in str(exc.value)
+
+
+def test_validate_accepts_the_shipped_handler():
+    from services.metrics import usage
+
+    validate(usage)  # the real one must satisfy its own rules
+
+
+# ---------- SCHEMA is whitelisted, not blacklisted ----------
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "DROP TABLE cycles",
+        "DELETE FROM cycles",
+        "INSERT INTO cycles VALUES (1)",
+        "ALTER TABLE cycles DROP COLUMN summary",
+        "ATTACH '/tmp/other.db'",
+        "UPDATE metric_health SET cycle_number = 0",
+        "CREATE VIEW v AS SELECT * FROM cycles",
+        "CREATE TABLE metric_fake (a INTEGER); DROP TABLE cycles",
+        "CREATE TABLE IF NOT EXISTS metric_fake (a INTEGER)",
+        "",
+        123,
+    ],
+)
+def test_validate_rejects_anything_but_a_plain_create_table(statement):
+    """SCHEMA runs verbatim against the shared database.
+
+    A DROP/DELETE/ALTER reaches straight into the core tables, and the
+    created-tables check at build time cannot see a deletion or a row change —
+    so the statement never gets to run at all.
+    """
+    with pytest.raises(HandlerError) as exc:
+        validate(_valid(SCHEMA=[statement]))
+    assert "SCHEMA" in str(exc.value)
+
+
+def test_validate_requires_schema_and_tables_to_agree():
+    with pytest.raises(HandlerError) as exc:
+        validate(_valid(TABLES=["metric_a"], SCHEMA=["CREATE TABLE metric_b (x INT)"]))
+    assert "must match exactly" in str(exc.value)
+
+    # Declaring two tables but creating one is caught too.
+    with pytest.raises(HandlerError):
+        validate(
+            _valid(
+                TABLES=["metric_a", "metric_b"],
+                SCHEMA=["CREATE TABLE metric_a (x INT)"],
+            )
+        )
+
+
+def test_validate_accepts_a_multiline_create_table():
+    validate(
+        _valid(
+            TABLES=["metric_fake"],
+            SCHEMA=["""
+                CREATE TABLE metric_fake (
+                    day VARCHAR,
+                    n BIGINT
+                )
+                """],
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "CREATE TABLE metric_fake (x INT); DELETE FROM cycles WHERE x IN (1)",
+        "CREATE TABLE metric_fake (x INT); INSERT INTO meta VALUES ('a','b')",
+        "CREATE TABLE metric_fake (x INT); UPDATE metric_health SET cycle_number = 0",
+        "CREATE TABLE metric_fake (x INT); DROP TABLE cycles",
+        "CREATE TABLE metric_fake (x INT);;",
+    ],
+)
+def test_validate_rejects_multi_statement_schema(statement):
+    """DuckDB executes EVERY statement in a string passed to execute().
+
+    An embedded semicolon is a full bypass: the declared table is created (so
+    the build-time created/dropped check is satisfied) and the trailing
+    statement mutates whatever it likes — the core tables included.
+    """
+    with pytest.raises(HandlerError) as exc:
+        validate(_valid(SCHEMA=[statement]))
+    assert "';'" in str(exc.value) or "SCHEMA" in str(exc.value)
+
+
+def test_validate_allows_one_trailing_semicolon():
+    validate(_valid(SCHEMA=["CREATE TABLE metric_fake (x INTEGER);"]))
+
+
+def test_validate_rejects_an_uppercase_create_target():
+    """DuckDB would record it as METRIC_FAKE and the build check would confuse."""
+    with pytest.raises(HandlerError) as exc:
+        validate(
+            _valid(TABLES=["metric_fake"], SCHEMA=["CREATE TABLE METRIC_FAKE (x INT)"])
+        )
+    assert "lowercase" in str(exc.value)

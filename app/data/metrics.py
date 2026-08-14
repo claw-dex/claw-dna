@@ -13,6 +13,7 @@ file's mtime changes.
 
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -41,6 +42,10 @@ _CONN_LOCK = threading.Lock()
 # that is failing persistently; a time-based backoff handles retries instead.
 _BUILD_STATE: dict = {}  # {"attempted_at": monotonic float}
 _BUILD_RETRY_SECONDS = 300
+
+# Which db mtime we last ran the schema-readiness probe against, so an existing
+# but out-of-date store is detected once rather than on every query.
+_SCHEMA_CHECK: dict = {}  # {"mtime": float}
 
 
 def _metrics_db():
@@ -120,10 +125,20 @@ def _acquire():
     if duckdb is None:
         return None, 0.0
     mtime = _db_mtime()
-    if mtime == 0.0:
+
+    # A missing file, or one left behind by an older SCHEMA_VERSION, both need
+    # a build — the second case is what makes the version bump self-healing on
+    # a deployment whose metrics_daemon is not running. The readiness probe
+    # opens the database, so it is checked once per mtime, not per query.
+    if mtime == 0.0 or _SCHEMA_CHECK.get("mtime") != mtime:
         if not _ensure_db():
-            return None, 0.0
+            if mtime == 0.0:
+                return None, 0.0
+            # Unreadable or stale-schema, and the build could not fix it: fall
+            # through and serve what is there. Individual queries degrade to
+            # their defaults if a table is genuinely missing.
         mtime = _db_mtime()
+        _SCHEMA_CHECK["mtime"] = mtime
 
     cached = _CONN_CACHE.get("conn")
     if cached is not None:
@@ -168,6 +183,7 @@ def _close_conn():
             except Exception:
                 pass
         _BUILD_STATE.clear()
+        _SCHEMA_CHECK.clear()
 
 
 def _query(key, sql, params=(), default=None):
@@ -561,6 +577,70 @@ def load_handler_meta(name):
     return {k[len(prefix) :]: v for k, v in load_meta().items() if k.startswith(prefix)}
 
 
+# Identifiers are interpolated into SQL (DuckDB cannot parameterise them), so
+# they are restricted to the same shape the handler contract enforces.
+_IDENTIFIER_RE = re.compile(r"^[a-z0-9][a-z0-9_]*$")
+
+# Hard ceiling on a generic read. Named loaders pick their own smaller limits;
+# this stops an unbounded table from being materialised on a render path.
+MAX_ROWS = 5000
+
+
+def load_metric_table(table, order_by=None, descending=False, limit=None, where=None):
+    """Read a whole metric table as a list of dicts — the generic reader.
+
+    Any feature can query its own tables through this without hand-writing a
+    loader: results are cached against the database's mtime like every other
+    accessor, and an unreadable store yields [] rather than raising.
+
+        load_metric_table("metric_usage_daily", order_by="day",
+                          descending=True, limit=14)
+        load_metric_table("metric_usage_cycles", where=("cycle", 8017))
+
+    Args:
+        table:      table name; must match ^[a-z0-9][a-z0-9_]*$
+        order_by:   column to sort on, same character restriction
+        descending: sort direction
+        limit:      max rows
+        where:      (column, value) equality filter; the value is parameterised
+
+    Prefer a named loader (`load_usage_daily` and friends) for anything a tab
+    calls repeatedly — it documents the shape and keeps the SQL in one place.
+    """
+    if not isinstance(table, str) or not _IDENTIFIER_RE.match(table):
+        return []
+    sql = f"SELECT * FROM {table}"  # noqa: S608 — identifier validated above
+    params = ()
+    if where is not None:
+        column, value = where
+        if not isinstance(column, str) or not _IDENTIFIER_RE.match(column):
+            return []
+        sql += f" WHERE {column} = ?"
+        params = (value,)
+    if order_by:
+        if not isinstance(order_by, str) or not _IDENTIFIER_RE.match(order_by):
+            return []
+        sql += f" ORDER BY {order_by}" + (" DESC" if descending else "")
+    # Always bounded: this runs under the shared connection lock, so one
+    # un-limited call against a large table would stall every other tab's
+    # metrics for its duration.
+    try:
+        row_limit = MAX_ROWS if limit is None else min(max(0, int(limit)), MAX_ROWS)
+    except (TypeError, ValueError):
+        row_limit = MAX_ROWS
+    sql += f" LIMIT {row_limit}"
+
+    try:
+        hash(params)
+    except TypeError:
+        return []  # an unhashable filter value would break the cache key
+    # The full SQL is the cache key: keying on (table, order_by, limit) alone
+    # would serve a `where=("day", 2)` query the rows cached for
+    # `where=("cycle", 2)` — same params, different column.
+    rows = _query(("table", sql), sql, params, default=[])
+    return [dict(r) for r in rows or []]
+
+
 # ── Token usage (services/metrics/usage.py) ───────────────────────────────────
 
 
@@ -578,6 +658,12 @@ def load_usage_totals():
         "web_search_requests": meta.get("web_search_requests") or 0,
         "web_fetch_requests": meta.get("web_fetch_requests") or 0,
         "models": meta.get("models") or [],
+        # When the handler last actually collected. It runs on its own
+        # POLL_INTERVAL_SECONDS, so this can lag the store's built_at.
+        "collected_at": meta.get("collected_at"),
+        # >0 while a first-run backfill is still working through a backlog of
+        # transcripts; the totals above are incomplete until it reaches 0.
+        "pending": meta.get("pending") or 0,
         "available": bool(meta),
     }
 

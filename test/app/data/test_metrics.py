@@ -425,3 +425,106 @@ def test_corrupt_database_yields_defaults(sandbox, monkeypatch):
     assert metrics_mod.load_usage_totals()["available"] is False
     assert metrics_mod.load_usage_daily() == []
     assert metrics_mod.load_usage_cycles() == []
+
+
+def test_a_stale_schema_database_is_rebuilt_on_read(sandbox):
+    """The SCHEMA_VERSION bump must self-heal even when the daemon is down.
+
+    _acquire() used to call _ensure_db() only when the file was *absent*, so a
+    deployment left holding an older-schema store would query it forever.
+    """
+    duckdb = pytest.importorskip("duckdb")
+    con = duckdb.connect(str(mdb.db_path()))
+    con.execute("CREATE TABLE meta (key VARCHAR, value VARCHAR)")
+    con.execute("INSERT INTO meta VALUES ('schema_version', '1')")
+    con.close()
+    assert mdb.is_ready() is False
+
+    # A read triggers the rebuild rather than serving the stale file.
+    health = metrics_mod.load_health()
+    assert mdb.is_ready() is True
+    assert health["cycle_number"] == 3
+    assert metrics_mod.load_meta()["schema_version"] == mdb.SCHEMA_VERSION
+
+
+def test_the_schema_probe_runs_once_per_mtime(sandbox, monkeypatch):
+    """Readiness opens the database, so it must not run on every query."""
+    built = metrics_mod.load_health()  # cold-start build
+    assert built
+
+    probes = {"n": 0}
+    real_is_ready = mdb.is_ready
+
+    def _counting_is_ready(*a, **k):
+        probes["n"] += 1
+        return real_is_ready(*a, **k)
+
+    monkeypatch.setattr(mdb, "is_ready", _counting_is_ready)
+    for _ in range(5):
+        metrics_mod.load_health()
+        metrics_mod.load_usage_totals()
+    assert probes["n"] == 0  # same mtime → already checked
+
+
+# ---------- generic reader ----------
+
+
+def test_load_metric_table_reads_any_table(built):
+    rows = metrics_mod.load_metric_table("metric_balance")
+    assert len(rows) == len(mdb.ALL_CATEGORIES)
+    assert {"category", "all_time_count", "score"} <= set(rows[0])
+
+
+def test_load_metric_table_supports_order_limit_and_where(sandbox):
+    transcripts = sandbox / "memory" / "transcripts"
+    transcripts.mkdir(parents=True)
+    for cycle, out in ((1, 10), (2, 20)):
+        (transcripts / f"cycle-{cycle}.jsonl").write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "uuid": f"u{cycle}",
+                    "timestamp": f"2026-08-1{cycle}T10:00:00Z",
+                    "message": {
+                        "id": f"msg_{cycle}",
+                        "model": "claude-sonnet-5",
+                        "usage": {"output_tokens": out},
+                    },
+                }
+            )
+            + "\n"
+        )
+    mdb.refresh(force=True)
+    cache_mod._cache_clear_all()
+
+    rows = metrics_mod.load_metric_table(
+        "metric_usage_requests", order_by="cycle", descending=True
+    )
+    assert [r["cycle"] for r in rows] == [2, 1]
+
+    assert len(metrics_mod.load_metric_table("metric_usage_requests", limit=1)) == 1
+
+    filtered = metrics_mod.load_metric_table(
+        "metric_usage_requests", where=("cycle", 2)
+    )
+    assert [r["output_tokens"] for r in filtered] == [20]
+
+
+@pytest.mark.parametrize(
+    "table",
+    ["Metric_Upper", "metric_a; DROP TABLE cycles", "metric-dash", "", None, 7],
+)
+def test_load_metric_table_rejects_malformed_identifiers(built, table):
+    """Identifiers are interpolated into SQL, so they must be validated."""
+    assert metrics_mod.load_metric_table(table) == []
+
+
+def test_load_metric_table_rejects_malformed_order_and_where_columns(built):
+    assert metrics_mod.load_metric_table("metric_balance", order_by="a; DROP") == []
+    assert metrics_mod.load_metric_table("metric_balance", where=("a; DROP", 1)) == []
+    # And the core tables survived the attempt.
+    assert metrics_mod.load_metric_table("metric_balance")
+
+
+def test_load_metric_table_on_an_unknown_table_is_empty(built):
+    assert metrics_mod.load_metric_table("metric_does_not_exist") == []

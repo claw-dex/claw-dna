@@ -683,9 +683,10 @@ def test_handler_tables_and_meta_are_written(agent_dir, monkeypatch):
     # Handler meta is namespaced so two handlers can both publish a "count".
     assert _meta(mdb.db_path())["fake.count"] == 2
     status = _rows(
-        mdb.db_path(), "SELECT name, ok, rows, error FROM metric_handler_status"
+        mdb.db_path(),
+        "SELECT name, state, ok, rows, error FROM metric_handler_status",
     )
-    assert status == [("fake", True, 2, "")]
+    assert status == [("fake", "collected", True, 2, "")]
 
 
 def test_a_raising_handler_is_isolated(agent_dir, monkeypatch):
@@ -1181,3 +1182,765 @@ def test_handler_tables_are_carried_forward_in_one_connection(agent_dir, monkeyp
     monkeypatch.setattr(mdb.duckdb, "connect", _counting_connect)
     mdb._previous_rows(["metric_a", "metric_b", "metric_c"])
     assert opens["n"] == 1
+
+
+# ---------- per-handler poll interval ----------
+
+
+def _interval_handler(name="slow", interval=900, rows=None):
+    handler = _fake_handler(name, rows=rows if rows is not None else [(1, "x")])
+    handler.POLL_INTERVAL_SECONDS = interval
+    return handler
+
+
+def test_handler_interval_is_read_from_the_module(agent_dir):
+    assert mdb.handler_interval(_interval_handler(interval=900)) == 900
+    assert mdb.handler_interval(_fake_handler()) is None  # no attribute
+    # Nonsense values mean "every build" rather than crashing the collector.
+    for bad in (0, -5, "soon", None):
+        assert mdb.handler_interval(_interval_handler(interval=bad)) is None
+
+
+def test_handler_is_due_when_it_has_never_run(agent_dir):
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+    assert mdb._handler_due(_interval_handler(), now, {}) is True
+
+
+def test_handler_is_not_due_inside_its_interval(agent_dir):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+    handler = _interval_handler(interval=900)
+    meta = {"slow.collected_at": (now - timedelta(seconds=300)).isoformat()}
+    assert mdb._handler_due(handler, now, meta) is False
+    meta = {"slow.collected_at": (now - timedelta(seconds=901)).isoformat()}
+    assert mdb._handler_due(handler, now, meta) is True
+
+
+def test_handler_is_due_when_the_stamp_is_unusable_or_in_the_future(agent_dir):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+    handler = _interval_handler()
+    assert mdb._handler_due(handler, now, {"slow.collected_at": "garbage"}) is True
+    # A backwards clock jump must not pin the handler forever.
+    future = (now + timedelta(hours=5)).isoformat()
+    assert mdb._handler_due(handler, now, {"slow.collected_at": future}) is True
+
+
+def test_a_handler_without_an_interval_collects_every_build(agent_dir, monkeypatch):
+    calls = {"n": 0}
+    handler = _fake_handler("always")
+
+    def collect(ctx):
+        calls["n"] += 1
+        from services.metrics.base import HandlerResult
+
+        return HandlerResult(tables={"metric_always": [(calls["n"], "x")]})
+
+    handler.collect = collect
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([handler], []))
+    mdb.refresh(force=True)
+    mdb.refresh(force=True)
+    assert calls["n"] == 2
+
+
+def test_a_not_due_handler_carries_its_rows_and_meta_forward(agent_dir, monkeypatch):
+    calls = {"n": 0}
+    handler = _interval_handler(interval=900)
+
+    def collect(ctx):
+        calls["n"] += 1
+        from services.metrics.base import HandlerResult
+
+        return HandlerResult(
+            tables={"metric_slow": [(calls["n"], "run")]},
+            meta={"runs": calls["n"]},
+        )
+
+    handler.collect = collect
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([handler], []))
+
+    mdb.refresh(force=True)
+    assert calls["n"] == 1
+
+    # An unforced rebuild inside the interval must not collect again, but the
+    # rows and meta must still be present — a reader sees no gap.
+    (agent_dir / "memory" / "goal.json").write_text(json.dumps(GOALS + GOALS))
+    assert mdb.refresh() is True  # a core source changed, so the store rebuilt
+    assert calls["n"] == 1
+
+    db = mdb.db_path()
+    assert _rows(db, "SELECT * FROM metric_slow") == [(1, "run")]
+    meta = _meta(db)
+    assert meta["slow.runs"] == 1
+    assert meta["slow.collected_at"]
+    assert meta["handlers_carried"] == 1
+    assert meta["handlers_collected"] == 0
+    status = _rows(
+        db, "SELECT state, ok, rows FROM metric_handler_status WHERE name='slow'"
+    )[0]
+    assert status == ("carried", True, 1)
+
+
+def test_a_due_handler_collects_again(agent_dir, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    calls = {"n": 0}
+    handler = _interval_handler(interval=900)
+
+    def collect(ctx):
+        calls["n"] += 1
+        from services.metrics.base import HandlerResult
+
+        return HandlerResult(tables={"metric_slow": [(calls["n"], "run")]})
+
+    handler.collect = collect
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([handler], []))
+
+    t0 = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+    mdb.build(mdb.db_path(), now=t0, fingerprint="a")
+    assert calls["n"] == 1
+
+    # 10 minutes later: not due.
+    mdb.build(mdb.db_path(), now=t0 + timedelta(minutes=10), fingerprint="b")
+    assert calls["n"] == 1
+    assert _rows(mdb.db_path(), "SELECT * FROM metric_slow") == [(1, "run")]
+
+    # 16 minutes later: due.
+    mdb.build(mdb.db_path(), now=t0 + timedelta(minutes=16), fingerprint="c")
+    assert calls["n"] == 2
+    assert _rows(mdb.db_path(), "SELECT * FROM metric_slow") == [(2, "run")]
+
+
+def test_a_forced_rebuild_runs_every_handler_regardless_of_interval(
+    agent_dir, monkeypatch
+):
+    """--rebuild and the portal's cold-start path must repopulate every table."""
+    calls = {"n": 0}
+    handler = _interval_handler(interval=3600)
+
+    def collect(ctx):
+        calls["n"] += 1
+        from services.metrics.base import HandlerResult
+
+        return HandlerResult(tables={"metric_slow": [(calls["n"], "run")]})
+
+    handler.collect = collect
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([handler], []))
+
+    mdb.refresh(force=True)
+    mdb.refresh(force=True)
+    assert calls["n"] == 2
+
+
+def test_a_not_due_handlers_fingerprint_is_not_computed(agent_dir, monkeypatch):
+    """Its sources must not be stat()ed, nor trigger a rebuild, before it is due."""
+    from datetime import datetime, timedelta, timezone
+
+    probes = {"n": 0}
+    state = {"value": "a"}
+    handler = _interval_handler(interval=900)
+
+    def fingerprint(ctx):
+        probes["n"] += 1
+        return state["value"]
+
+    handler.fingerprint = fingerprint
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([handler], []))
+
+    mdb.refresh(force=True)
+    probes["n"] = 0
+
+    # The handler's source changed, but it is not due: no probe, no rebuild.
+    state["value"] = "b"
+    assert mdb.refresh() is False
+    assert probes["n"] == 0
+
+    # Once the interval has elapsed the live fingerprint is read again and the
+    # change shows up.
+    stale = (datetime.now(timezone.utc) - timedelta(seconds=1000)).isoformat()
+    con = duckdb.connect(str(mdb.db_path()))
+    con.execute(
+        "UPDATE meta SET value = ? WHERE key = 'slow.collected_at'",
+        [json.dumps(stale)],
+    )
+    con.close()
+    assert mdb.refresh() is True
+    assert probes["n"] >= 1
+
+
+def test_the_usage_handler_declares_a_fifteen_minute_interval(agent_dir):
+    handlers, _errors = mdb._handlers()
+    usage = next(h for h in handlers if h.NAME == "usage")
+    assert mdb.handler_interval(usage) == 900
+
+
+def test_a_handler_that_gained_a_table_collects_rather_than_carrying_empty(
+    agent_dir, monkeypatch
+):
+    """A table the previous build never had must not be published empty.
+
+    Deploying a handler update that adds a table would otherwise leave it
+    empty for a whole interval, with state='carried', ok=True — data that
+    looks real and is not.
+    """
+    from services.metrics.base import HandlerResult
+
+    calls = {"n": 0}
+    handler = _interval_handler(interval=900)
+
+    def collect(ctx):
+        calls["n"] += 1
+        tables = {t: [(calls["n"], "x")] for t in handler.TABLES}
+        return HandlerResult(tables=tables, meta={"runs": calls["n"]})
+
+    handler.collect = collect
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([handler], []))
+    mdb.refresh(force=True)
+    assert calls["n"] == 1
+
+    # The update: a second table appears, absent from the live database.
+    handler.TABLES = ["metric_slow", "metric_slow_extra"]
+    handler.SCHEMA = handler.SCHEMA + [
+        "CREATE TABLE metric_slow_extra (a INTEGER, b VARCHAR)"
+    ]
+    (agent_dir / "memory" / "goal.json").write_text(json.dumps(GOALS + GOALS))
+    assert mdb.refresh() is True
+
+    # It collected instead of carrying, so both tables hold real rows.
+    assert calls["n"] == 2
+    db = mdb.db_path()
+    assert _rows(db, "SELECT count(*) FROM metric_slow_extra")[0][0] == 1
+    assert (
+        _rows(db, "SELECT state FROM metric_handler_status WHERE name='slow'")[0][0]
+        == "collected"
+    )
+
+
+def test_a_failed_carry_forward_falls_through_to_a_fresh_collect(
+    agent_dir, monkeypatch
+):
+    from services.metrics.base import HandlerResult
+
+    calls = {"n": 0}
+    handler = _interval_handler(interval=900)
+
+    def collect(ctx):
+        calls["n"] += 1
+        return HandlerResult(tables={"metric_slow": [(calls["n"], "run")]})
+
+    handler.collect = collect
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([handler], []))
+    mdb.refresh(force=True)
+    assert calls["n"] == 1
+
+    # Carried rows of the wrong arity blow up the insert.
+    monkeypatch.setattr(
+        mdb, "_previous_rows", lambda tables: {t: [(1, "x", "extra")] for t in tables}
+    )
+    (agent_dir / "memory" / "goal.json").write_text(json.dumps(GOALS + GOALS))
+    assert mdb.refresh() is True
+
+    assert calls["n"] == 2  # fell through and collected
+    db = mdb.db_path()
+    assert _rows(db, "SELECT * FROM metric_slow") == [(2, "run")]
+    assert (
+        _rows(db, "SELECT state FROM metric_handler_status WHERE name='slow'")[0][0]
+        == "collected"
+    )
+
+
+def test_carrying_forward_covers_every_declared_table(agent_dir, monkeypatch):
+    from services.metrics.base import HandlerResult
+
+    handler = _interval_handler(interval=900)
+    handler.TABLES = ["metric_slow", "metric_slow_b"]
+    handler.SCHEMA = [
+        "CREATE TABLE metric_slow (a INTEGER, b VARCHAR)",
+        "CREATE TABLE metric_slow_b (a INTEGER, b VARCHAR)",
+    ]
+    handler.collect = lambda ctx: HandlerResult(
+        tables={"metric_slow": [(1, "x"), (2, "y")], "metric_slow_b": [(3, "z")]}
+    )
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([handler], []))
+    mdb.refresh(force=True)
+
+    (agent_dir / "memory" / "goal.json").write_text(json.dumps(GOALS + GOALS))
+    assert mdb.refresh() is True
+
+    db = mdb.db_path()
+    assert _rows(db, "SELECT * FROM metric_slow") == [(1, "x"), (2, "y")]
+    assert _rows(db, "SELECT * FROM metric_slow_b") == [(3, "z")]
+    # `rows` is the total carried across every table, not just the first.
+    status = _rows(
+        db, "SELECT state, rows FROM metric_handler_status WHERE name='slow'"
+    )[0]
+    assert status == ("carried", 3)
+
+
+def test_a_forced_rebuild_does_not_leave_a_stale_fingerprint(agent_dir, monkeypatch):
+    """force must not store a deferred fingerprint for a freshly collected handler.
+
+    Otherwise the stored value describes the *previous* collection and the very
+    next poll rebuilds again for nothing — two builds for every --rebuild.
+    """
+    state = {"value": "a"}
+    handler = _interval_handler(interval=900)
+    handler.fingerprint = lambda ctx: state["value"]
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([handler], []))
+
+    mdb.refresh(force=True)
+    # Not due, nothing changed → the next unforced refresh must be a no-op.
+    assert mdb.refresh() is False
+
+    # Even when the source moved between the two forced builds.
+    state["value"] = "b"
+    mdb.refresh(force=True)
+    assert mdb.refresh() is False
+
+
+def test_a_schema_bump_recollects_every_handler(agent_dir, monkeypatch):
+    """A version bump must repopulate handler tables, not carry v-old rows."""
+    from services.metrics.base import HandlerResult
+
+    calls = {"n": 0}
+    handler = _interval_handler(interval=3600)
+
+    def collect(ctx):
+        calls["n"] += 1
+        return HandlerResult(tables={"metric_slow": [(calls["n"], "run")]})
+
+    handler.collect = collect
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([handler], []))
+    mdb.refresh(force=True)
+    assert calls["n"] == 1
+
+    monkeypatch.setattr(mdb, "SCHEMA_VERSION", mdb.SCHEMA_VERSION + 1)
+    assert mdb.refresh() is True
+    assert calls["n"] == 2  # collected despite the hour-long interval
+
+
+def test_an_interval_handler_without_a_fingerprint_still_defers(agent_dir, monkeypatch):
+    """No fingerprint() means no deferral to do — but the skip must still apply."""
+    from services.metrics.base import HandlerResult
+
+    calls = {"n": 0}
+    handler = _interval_handler(interval=900)
+    assert not hasattr(handler, "fingerprint")
+
+    def collect(ctx):
+        calls["n"] += 1
+        return HandlerResult(tables={"metric_slow": [(calls["n"], "run")]})
+
+    handler.collect = collect
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([handler], []))
+    mdb.refresh(force=True)
+
+    (agent_dir / "memory" / "goal.json").write_text(json.dumps(GOALS + GOALS))
+    assert mdb.refresh() is True
+    assert calls["n"] == 1  # carried, not collected
+    assert _rows(mdb.db_path(), "SELECT * FROM metric_slow") == [(1, "run")]
+
+
+def test_a_naive_now_does_not_abort_the_build(agent_dir, monkeypatch):
+    """A caller passing a naive datetime must not take the whole build down."""
+    from datetime import datetime
+
+    handler = _interval_handler(interval=900)
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([handler], []))
+    mdb.refresh(force=True)
+
+    # Naive `now` against an aware stored stamp used to raise TypeError.
+    mdb.build(mdb.db_path(), now=datetime(2026, 8, 14, 12, 0), fingerprint="x")
+    assert _rows(mdb.db_path(), "SELECT count(*) FROM metric_health")[0][0] == 1
+
+
+def test_handler_fingerprint_is_recorded_from_before_the_collect(
+    agent_dir, monkeypatch
+):
+    """A source written *during* collect() must not be marked already-seen."""
+    from services.metrics.base import HandlerResult
+
+    state = {"value": "a"}
+    handler = _interval_handler(interval=900)
+    handler.fingerprint = lambda ctx: state["value"]
+
+    def collect(ctx):
+        # Simulate a transcript landing mid-parse.
+        state["value"] = "b"
+        return HandlerResult(tables={"metric_slow": [(1, "x")]})
+
+    handler.collect = collect
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([handler], []))
+    mdb.refresh(force=True)
+
+    # The pre-collect value is stored, so the change is still pending.
+    assert _meta(mdb.db_path())["slow.fingerprint"] == "a"
+
+
+# ---------- table ownership: one feature's metrics cannot touch another's ----
+
+
+def test_two_handlers_cannot_claim_the_same_table(agent_dir, monkeypatch):
+    alpha = _fake_handler("alpha", tables=["metric_shared"])
+    alpha.SCHEMA = ["CREATE TABLE metric_shared (a INTEGER, b VARCHAR)"]
+    beta = _fake_handler("beta", tables=["metric_shared"], rows=[(99, "beta")])
+    beta.SCHEMA = ["CREATE TABLE metric_shared (a INTEGER, b VARCHAR)"]
+
+    from services.metrics import discover as real_discover
+
+    monkeypatch.setattr(
+        "services.metrics.discover", lambda: ([alpha, beta], []), raising=False
+    )
+    handlers, errors = mdb._handlers()
+    assert [h.NAME for h in handlers] == ["alpha"]
+    assert "already claimed" in errors[0][1]
+    assert "owned by alpha" in errors[0][1]
+
+    mdb.refresh(force=True)
+    # Only the owner's rows are present; beta contributed nothing.
+    assert _rows(mdb.db_path(), "SELECT * FROM metric_shared") == [(1, "x")]
+    status = {
+        r[0]: r
+        for r in _rows(mdb.db_path(), "SELECT name, state FROM metric_handler_status")
+    }
+    assert status["beta"][1] == "failed"
+    monkeypatch.setattr("services.metrics.discover", real_discover, raising=False)
+
+
+def test_a_handler_cannot_squat_another_table_with_if_not_exists(
+    agent_dir, monkeypatch
+):
+    """`CREATE TABLE IF NOT EXISTS x` silently no-ops onto an existing table.
+
+    Both handlers would then append into it and their rows would interleave —
+    exactly the cross-feature contamination the ownership rules exist to stop.
+    The DDL guard catches it even when discovery does not (different declared
+    names, same physical table).
+    """
+    alpha = _fake_handler("alpha", tables=["metric_shared"])
+    alpha.SCHEMA = ["CREATE TABLE metric_shared (a INTEGER, b VARCHAR)"]
+    beta = _fake_handler("beta", tables=["metric_shared"], rows=[(99, "beta")])
+    beta.SCHEMA = ["CREATE TABLE IF NOT EXISTS metric_shared (a INTEGER, b VARCHAR)"]
+
+    # Bypass discovery so only the build-time guard is under test.
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([alpha, beta], []))
+    mdb.refresh(force=True)
+
+    assert _rows(mdb.db_path(), "SELECT * FROM metric_shared") == [(1, "x")]
+    status = {
+        r[0]: r
+        for r in _rows(
+            mdb.db_path(), "SELECT name, state, error FROM metric_handler_status"
+        )
+    }
+    assert status["beta"][1] == "failed"
+    # Refused either at the statement check (IF NOT EXISTS is not a plain
+    # CREATE TABLE) or by the created-tables diff — both leave alpha's data
+    # untouched, which is the property that matters.
+    assert "IF NOT EXISTS" in status["beta"][2] or "did not create" in status["beta"][2]
+
+
+def test_a_handler_creating_an_undeclared_table_is_rejected(agent_dir, monkeypatch):
+    sneaky = _fake_handler("sneaky", tables=["metric_sneaky"])
+    sneaky.SCHEMA = [
+        "CREATE TABLE metric_sneaky (a INTEGER, b VARCHAR)",
+        "CREATE TABLE metric_undeclared (a INTEGER)",
+    ]
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([sneaky], []))
+    mdb.refresh(force=True)
+
+    status = _rows(
+        mdb.db_path(),
+        "SELECT state, error FROM metric_handler_status WHERE name='sneaky'",
+    )[0]
+    assert status[0] == "failed"
+    assert "created undeclared metric_undeclared" in status[1]
+
+
+def test_handlers_keep_their_meta_namespaces_separate(agent_dir, monkeypatch):
+    a = _fake_handler("alpha", tables=["metric_alpha"])
+    a.SCHEMA = ["CREATE TABLE metric_alpha (a INTEGER, b VARCHAR)"]
+    a.collect = lambda ctx: {"tables": {"metric_alpha": [(1, "a")]}, "meta": {"n": 1}}
+    b = _fake_handler("beta", tables=["metric_beta"])
+    b.SCHEMA = ["CREATE TABLE metric_beta (a INTEGER, b VARCHAR)"]
+    b.collect = lambda ctx: {"tables": {"metric_beta": [(2, "b")]}, "meta": {"n": 2}}
+
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([a, b], []))
+    mdb.refresh(force=True)
+
+    meta = _meta(mdb.db_path())
+    # Same key name, no collision.
+    assert meta["alpha.n"] == 1
+    assert meta["beta.n"] == 2
+    # And neither shadowed a core key.
+    assert meta["schema_version"] == mdb.SCHEMA_VERSION
+
+
+# ---------- the roster is part of the refresh key ----------
+
+
+def test_installing_a_handler_triggers_a_rebuild_without_a_fingerprint(
+    agent_dir, monkeypatch
+):
+    """Adding a plugin must publish its tables, not wait for an unrelated change.
+
+    A handler with no fingerprint() contributes nothing to the source key, so
+    the store would never rebuild and its tables would simply be absent —
+    readers getting empty defaults, silently, indefinitely.
+    """
+    alpha = _fake_handler("alpha", tables=["metric_alpha"])
+    alpha.SCHEMA = ["CREATE TABLE metric_alpha (a INTEGER, b VARCHAR)"]
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([alpha], []))
+    mdb.refresh(force=True)
+    assert mdb.refresh() is False
+
+    beta = _fake_handler("beta", tables=["metric_beta"], rows=[(7, "b")])
+    beta.SCHEMA = ["CREATE TABLE metric_beta (a INTEGER, b VARCHAR)"]
+    assert not hasattr(beta, "fingerprint")
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([alpha, beta], []))
+
+    assert mdb.refresh() is True
+    assert _rows(mdb.db_path(), "SELECT * FROM metric_beta") == [(7, "b")]
+
+
+def test_removing_a_handler_triggers_a_rebuild(agent_dir, monkeypatch):
+    alpha = _fake_handler("alpha", tables=["metric_alpha"])
+    alpha.SCHEMA = ["CREATE TABLE metric_alpha (a INTEGER, b VARCHAR)"]
+    beta = _fake_handler("beta", tables=["metric_beta"])
+    beta.SCHEMA = ["CREATE TABLE metric_beta (a INTEGER, b VARCHAR)"]
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([alpha, beta], []))
+    mdb.refresh(force=True)
+
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([alpha], []))
+    assert mdb.refresh() is True
+    assert _rows(mdb.db_path(), "SELECT count(*) FROM metric_alpha")[0][0] == 1
+    # beta's table is gone with it — nothing stale left behind.
+    assert "metric_beta" not in mdb.all_tables()
+
+
+def test_renaming_a_handlers_table_triggers_a_rebuild(agent_dir, monkeypatch):
+    alpha = _fake_handler("alpha", tables=["metric_alpha"])
+    alpha.SCHEMA = ["CREATE TABLE metric_alpha (a INTEGER, b VARCHAR)"]
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([alpha], []))
+    mdb.refresh(force=True)
+    assert mdb.refresh() is False
+
+    renamed = _fake_handler("alpha", tables=["metric_alpha_v2"])
+    renamed.SCHEMA = ["CREATE TABLE metric_alpha_v2 (a INTEGER, b VARCHAR)"]
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([renamed], []))
+    assert mdb.refresh() is True
+    assert _rows(mdb.db_path(), "SELECT count(*) FROM metric_alpha_v2")[0][0] == 1
+
+
+def test_a_handler_that_drops_a_core_table_is_caught_at_build(agent_dir, monkeypatch):
+    """Defence in depth: validate() rejects this, so only a bypass reaches here.
+
+    The created-tables check alone would pass (the handler did create its own
+    table), so the build must also verify nothing disappeared.
+    """
+    evil = _fake_handler("evil", tables=["metric_evil"])
+    evil.SCHEMA = [
+        "DROP TABLE cycles",
+        "CREATE TABLE metric_evil (a INTEGER, b VARCHAR)",
+    ]
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([evil], []))
+    mdb.refresh(force=True)
+
+    status = _rows(
+        mdb.db_path(),
+        "SELECT state, error FROM metric_handler_status WHERE name='evil'",
+    )[0]
+    assert status[0] == "failed"
+    # Refused at the statement check (DROP is not a CREATE TABLE); the
+    # created/dropped diff before COMMIT is the second line of defence.
+    assert "DROP TABLE" in status[1] or "dropped cycles" in status[1]
+    # What matters either way: the core table is intact. (The handler's own
+    # table is absent, not empty — a handler whose DDL is refused is dropped
+    # from the build entirely.)
+    assert _rows(mdb.db_path(), "SELECT count(*) FROM cycles")[0][0] == len(CYCLES)
+    assert "metric_evil" not in {
+        r[0]
+        for r in _rows(
+            mdb.db_path(), "SELECT table_name FROM information_schema.tables"
+        )
+    }
+
+
+def test_a_multi_statement_schema_cannot_touch_the_core(agent_dir, monkeypatch):
+    """Collector-level backstop for the validate() bypass.
+
+    The handler creates its declared table (so created/dropped both look fine)
+    and the second statement wipes a core table.
+    """
+    evil = _fake_handler("evil", tables=["metric_evil"])
+    evil.SCHEMA = [
+        "CREATE TABLE metric_evil (a INTEGER, b VARCHAR); DELETE FROM cycles"
+    ]
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([evil], []))
+    mdb.refresh(force=True)
+
+    # Discovery would have rejected this; if it ever reaches the build, the
+    # core rows must still be intact.
+    assert _rows(mdb.db_path(), "SELECT count(*) FROM cycles")[0][0] == len(CYCLES)
+
+
+# ---------- handlers cannot reach into each other through ctx ----------
+
+
+def test_a_handler_cannot_mutate_what_another_handler_reads(agent_dir, monkeypatch):
+    """Each handler gets its own context; nothing mutable is shared.
+
+    A handler appending to `ctx.previous_rows(...)`, writing
+    `ctx.previous_meta`, or re-ordering `ctx.sources` used to affect every
+    later handler — including pinning one as never-due.
+    """
+    from services.metrics.base import HandlerResult
+
+    seen = {}
+
+    first = _fake_handler("aaa", tables=["metric_aaa"])
+    first.SCHEMA = ["CREATE TABLE metric_aaa (a INTEGER, b VARCHAR)"]
+
+    def hostile(ctx):
+        # Try to poison everything the next handler will read.
+        ctx.previous_rows("metric_zzz").append(("junk",))
+        ctx.previous_meta["zzz.collected_at"] = "2099-01-01T00:00:00+00:00"
+        try:
+            ctx.sources["cycles"].clear()
+        except Exception:
+            pass
+        try:
+            ctx.sources["injected"] = True
+        except Exception:
+            pass
+        return HandlerResult(tables={"metric_aaa": [(1, "x")]})
+
+    first.collect = hostile
+
+    second = _fake_handler("zzz", tables=["metric_zzz"])
+    second.SCHEMA = ["CREATE TABLE metric_zzz (a INTEGER, b VARCHAR)"]
+
+    def victim(ctx):
+        seen["rows"] = ctx.previous_rows("metric_zzz")
+        seen["collected_at"] = ctx.previous_meta.get("zzz.collected_at")
+        seen["cycles"] = len(ctx.sources["cycles"])
+        seen["injected"] = "injected" in ctx.sources
+        return HandlerResult(tables={"metric_zzz": [(2, "y")]})
+
+    second.collect = victim
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([first, second], []))
+    mdb.refresh(force=True)
+
+    assert seen["rows"] == []  # not the poisoned list
+    assert seen["collected_at"] is None  # not pinned as never-due
+    assert seen["cycles"] == len(CYCLES)  # sources intact
+    assert seen["injected"] is False  # read-only view
+    assert _rows(mdb.db_path(), "SELECT * FROM metric_zzz") == [(2, "y")]
+
+
+def test_previous_rows_is_scoped_to_the_calling_handler(agent_dir, monkeypatch):
+    from services.metrics.base import HandlerResult
+
+    seen = {}
+    alpha = _fake_handler("alpha", tables=["metric_alpha"])
+    alpha.SCHEMA = ["CREATE TABLE metric_alpha (a INTEGER, b VARCHAR)"]
+    beta = _fake_handler("beta", tables=["metric_beta"])
+    beta.SCHEMA = ["CREATE TABLE metric_beta (a INTEGER, b VARCHAR)"]
+    beta.collect = lambda ctx: HandlerResult(tables={"metric_beta": [(2, "b")]})
+
+    def peek(ctx):
+        seen["own"] = ctx.previous_rows("metric_alpha")
+        seen["other"] = ctx.previous_rows("metric_beta")
+        seen["core"] = ctx.previous_rows("cycles")
+        return HandlerResult(tables={"metric_alpha": [(1, "a")]})
+
+    alpha.collect = peek
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([alpha, beta], []))
+    mdb.refresh(force=True)
+    mdb.refresh(force=True)  # second build has previous rows to hand back
+
+    assert seen["own"] == [(1, "a")]  # its own table
+    assert seen["other"] == []  # another handler's — refused
+    assert seen["core"] == []  # a core table — refused
+
+
+def test_a_handler_returning_a_bad_meta_key_is_rejected(agent_dir, monkeypatch):
+    """A dotted meta key could address another handler's namespace."""
+    bad = _fake_handler("github", tables=["metric_github"])
+    bad.SCHEMA = ["CREATE TABLE metric_github (a INTEGER, b VARCHAR)"]
+    bad.collect = lambda ctx: {
+        "tables": {"metric_github": [(1, "x")]},
+        "meta": {"_stats.total": 1},
+    }
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([bad], []))
+    mdb.refresh(force=True)
+
+    status = _rows(
+        mdb.db_path(),
+        "SELECT state, error FROM metric_handler_status WHERE name='github'",
+    )[0]
+    assert status[0] == "failed"
+    assert "meta key" in status[1]
+    assert not any(k.startswith("github_stats") for k in _meta(mdb.db_path()))
+
+
+def test_a_bad_result_shape_is_rejected_before_any_insert(agent_dir, monkeypatch):
+    """Validation used to run after the rows were already committed."""
+    bad = _fake_handler("shape", tables=["metric_shape"])
+    bad.SCHEMA = ["CREATE TABLE metric_shape (a INTEGER, b VARCHAR)"]
+    bad.collect = lambda ctx: {"tables": {"metric_shape": [(1, "x")]}, "meta": ["oops"]}
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([bad], []))
+    mdb.refresh(force=True)
+
+    status = _rows(
+        mdb.db_path(),
+        "SELECT state, rows FROM metric_handler_status WHERE name='shape'",
+    )[0]
+    assert status == ("failed", 0)
+    # The table is empty, matching the reported row count.
+    assert _rows(mdb.db_path(), "SELECT count(*) FROM metric_shape")[0][0] == 0
+
+
+# ---------- schema evolution ----------
+
+
+def test_changing_a_handlers_ddl_forces_a_rebuild_and_a_fresh_collect(
+    agent_dir, monkeypatch
+):
+    """A same-arity column change would otherwise mis-file carried rows.
+
+    Carrying forward is positional, so swapping two columns of the same type
+    lands every value in the wrong column — with no error anywhere, and for an
+    incremental handler the mis-filing then republishes itself forever.
+    """
+    from services.metrics.base import HandlerResult
+
+    calls = {"n": 0}
+    handler = _interval_handler(interval=3600)
+    handler.SCHEMA = ["CREATE TABLE metric_slow (a INTEGER, b VARCHAR)"]
+
+    def collect(ctx):
+        calls["n"] += 1
+        return HandlerResult(tables={"metric_slow": [(calls["n"], "x")]})
+
+    handler.collect = collect
+    monkeypatch.setattr(mdb, "_handlers", lambda: ([handler], []))
+    mdb.refresh(force=True)
+    assert calls["n"] == 1
+    assert mdb.refresh() is False
+
+    # Same arity, swapped column meanings.
+    handler.SCHEMA = ["CREATE TABLE metric_slow (b VARCHAR, a INTEGER)"]
+    handler.collect = lambda ctx: HandlerResult(tables={"metric_slow": [("x", 2)]})
+
+    assert mdb.refresh() is True  # the DDL change is part of the refresh key
+    row = _rows(mdb.db_path(), "SELECT * FROM metric_slow")[0]
+    assert row == ("x", 2)  # collected fresh under the new shape, not carried
+    status = _rows(
+        mdb.db_path(), "SELECT state FROM metric_handler_status WHERE name='slow'"
+    )[0][0]
+    assert status == "collected"

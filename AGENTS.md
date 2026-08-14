@@ -64,49 +64,13 @@ Long-running service that polls `/agent/memory/scheduled_tasks.json` every `SCHE
 
 ## Metrics Daemon
 
-Long-running service that keeps the DuckDB metrics store at `/agent/memory/metrics.duckdb` in sync with the JSON files it derives from, polling every `METRICS_DAEMON_POLL_SECONDS` (default 300s, floor 60s — sources change on the heartbeat cadence, so a tighter poll would only burn stat() calls). Each tick calls `metrics_db.refresh()`, which compares a `(mtime, size)` fingerprint of every source and is a no-op when nothing changed. Rebuilds go to `<db>.tmp` and are atomically `os.replace()`d in, so the portal's read-only connections never see a partial database. `scripts/cycle_close.py` also dispatches a one-shot `metrics_db.py --refresh` so the Overview tab is current the moment a cycle lands. Auto-started by `service_manager.py`; writes `/agent/memory/heartbeats/metrics_daemon.heartbeat` each tick. See `services/metrics_daemon.py` and `scripts/metrics_db.py`.
+Long-running service that keeps the DuckDB metrics store at `/agent/memory/metrics.duckdb` in sync with the JSON files it derives from, polling every `METRICS_DAEMON_POLL_SECONDS` (default 300s, floor 60s). Each tick calls `metrics_db.refresh()`, a no-op unless a `(mtime, size)` fingerprint of the sources changed; rebuilds go to a temp file and are atomically swapped in, so the portal's read-only connections never see a partial database. `scripts/cycle_close.py` also dispatches a one-shot refresh so the Overview tab is current the moment a cycle lands.
 
-The portal reads this store through `app/data/metrics.py` (read-only `SELECT`s against pre-computed `metric_*` tables). No metric is derived at render time anywhere in the portal:
+The portal reads this store through `app/data/metrics.py` — read-only `SELECT`s against pre-computed `metric_*` tables. **No metric is derived at render time anywhere in the portal.** State and status still come straight from JSON: agent status, heartbeat, cycle number, current goal, service liveness, queue depths, and raw log/error content are read live and are not metrics.
 
-| Surface | Metrics served from DuckDB |
-|---|---|
-| `app/overview_tab.py` | health strip, daily glance, suggestions, evolution balance, goal performance, cycle velocity, improvements |
-| `server.py` header | cycle velocity, portal health (24h errors) |
-| `app/memory_tab.py` | Memory Overview counts + LanceDB store size |
-| `app/system_tab.py` | memory-file size/age/health table, workspace size |
-| `app/agents_tab.py` | per-agent error totals and recent-window counts |
+Collection is pluggable — any module under `services/metrics/` contributes its own tables to the same build. **→ See the `metrics-daemon-handler` skill** to add one.
 
-State and status still come straight from JSON — agent status, heartbeat, cycle number, current goal, service liveness, queue depths, and raw log/error content are read live and are not metrics.
-
-### Adding a metrics handler
-
-Collection is pluggable. Any module under `services/metrics/` that satisfies the contract in `services/metrics/base.py` contributes its own tables to the same build — there is no registration list to edit:
-
-```python
-NAME   = "mymetric"
-TABLES = ["metric_mymetric"]
-SCHEMA = ["CREATE TABLE metric_mymetric (day VARCHAR, n BIGINT)"]
-
-def fingerprint(ctx):          # optional — skip the rebuild when nothing moved
-    return str(my_source_mtime)
-
-def collect(ctx):              # ctx: agent dirs, build `now`, core sources,
-    return HandlerResult(      #      previous meta + rows for carry-forward
-        tables={"metric_mymetric": [("2026-08-13", 42)]},
-        meta={"total": 42},    # stored namespaced as "mymetric.total"
-    )
-```
-
-The collector owns the single write connection and the atomic swap, so a handler never touches DuckDB itself. Handler DDL runs with the core schema, so its tables exist even when `collect` raises; a failing handler is isolated and recorded in `metric_handler_status` (surfaced on the System tab) instead of taking the store down. `ctx.previous_rows(table)` returns the last build's rows, which is what makes incremental handlers possible.
-
-**Shipped handler — `services/metrics/usage.py`**: token usage parsed from `/agent/memory/transcripts/cycle-*.jsonl` (and the `.jsonl.gz` form). It deduplicates on `message.id` at two levels, both of which matter:
-
-- *Within* a transcript — one API response is written once per content block (thinking / text / tool_use), each repeating the same `message.usage`. Summing raw inflates output tokens by ~1.8x.
-- *Across* transcripts — `heartbeat.sh:483` resumes an in-progress goal's session and `heartbeat.sh:561` copies the **whole** session file to `cycle-<N>.jsonl` every cycle, so a goal spanning k cycles produces k transcripts each a superset of the last. Requests are therefore attributed to the first cycle whose transcript contained them; per-file counting would report every early request k times.
-
-Real transcripts hold the agent's reasoning, cwd, and branch names and must never be committed (`/examples/` and `*.jsonl.txt` are gitignored). The parser is tested against synthetic replicas in `test/fixtures/transcripts/`, which reproduce the CLI's record shape field for field — regenerate with `uv run python test/fixtures/make_transcripts.py`. The generator emits a `manifest.json` of the totals it *intended* to write, so the parser is checked against generator intent rather than against itself.
-
-Finished transcripts never change, so per-file `(fname, size, mtime)` identity carries already-attributed rows forward — steady state re-reads only the cycle that just ran. `metric_usage_daily` rows for days whose cycles have aged out of the `METRICS_USAGE_CYCLES` window (default 200) are frozen rather than recomputed, so daily history outlives the window. Tables: `metric_usage_files`, `metric_usage_requests` (one row per distinct API response — the carry-forward grain), `metric_usage_cycles` (cycle × model × effort × tier × speed), `metric_usage_daily`. Surfaced as "Token Usage" on the System tab.
+**Shipped handler — `services/metrics/usage.py`**: token spend (requests, input / output / cache tokens, by model and day) parsed from the cycle transcripts under `/agent/memory/transcripts/`, surfaced as "Token Usage" on the System tab.
 
 ## Webhook Receiver
 
