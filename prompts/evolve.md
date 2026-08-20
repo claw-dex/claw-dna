@@ -33,6 +33,7 @@ goal alignment, ROI, and maturity. No separate balance check needed.
 
 Then skim:
 
+- Active operations: Check `/agent/messages/inbox.json` for `[DNA UPDATE IN PROGRESS]`. If a recent (< 15m) DNA update is underway (and neither `[DNA UPDATE COMPLETE]` nor `[DNA UPDATE ABORTED]` is present), **DO NOT modify files, do NOT attempt evolve changes, and do NOT abort or interfere with git rebase**. Stand down and close the cycle cleanly. If complete/aborted or stale (> 15m), proceed normally.
 - The `<your_past_goals>` section of this prompt — the most recent 20 completed/failed goals (pre-extracted from `goal.json`). Use it to avoid repeating work already done and to build on prior outcomes. Do **not** re-parse `goal.json` for this view.
 - Failure patterns from journal entries — fix patterns, not symptoms
 - Avoid repeating work in recent journal entries — they maybe be part of evolve cycles
@@ -60,8 +61,9 @@ See the `callmebot` skill for setup instructions and full details.
 
 ## Step 2: Check & Fix Tab Errors
 
-1. Read `/agent/memory/server_errors.json`
-2. Run the app render check to catch runtime/import errors that `server_errors.json` might miss:
+1. Check `/agent/messages/inbox.json`: if a recent (< 15m) `[DNA UPDATE IN PROGRESS]` is present without complete/aborted notices, **DO NOT fix tab errors, modify code, or abort git rebase**. Portal disruption during upstream DNA sync is expected. Defer evolve work and proceed to cycle close. (If complete/aborted or stale > 15m, proceed with fixes).
+2. Read `/agent/memory/server_errors.json`
+3. Run the app render check to catch runtime/import errors that `server_errors.json` might miss:
 
    ```bash
    uv run python scripts/app_check.py
@@ -69,8 +71,8 @@ See the `callmebot` skill for setup instructions and full details.
 
    - `[app-check] OK` → no runtime errors
    - `[app-check] FAIL` → fix the reported errors before continuing
-3. If both `server_errors.json` is empty (`[]`) and app-check passes, skip to Step 4
-4. If errors exist:
+4. If both `server_errors.json` is empty (`[]`) and app-check passes, skip to Step 4
+5. If errors exist:
    a. Read each traceback to identify the root cause (which tab/module, what line)
    b. Fix the root cause in the affected file (e.g., `app/*.py`, `server.py`)
    c. After fixing, verify with both checks:
@@ -86,7 +88,7 @@ See the `callmebot` skill for setup instructions and full details.
       uv run python -c "import json; open('/agent/memory/server_errors.json','w').write('[]')"
       ```
 
-5. Only clear errors you've confirmed are fixed — stale errors from a hot-reload are always safe to clear
+6. Only clear errors you've confirmed are fixed — stale errors from a hot-reload are always safe to clear
 
 **Important:** If errors are stale (timestamp predates your most recent portal fix in the journal), they are safe to clear without further investigation.
 
@@ -169,6 +171,7 @@ Always read a prompt before modifying it. Keep prompts concise — trim, don't p
 ## Rules
 
 - Pick ONE improvement per cycle. Do it well.
+- **Never interrupt active DNA update:** If `/agent/messages/inbox.json` contains `[DNA UPDATE IN PROGRESS]` (or `from.source: "claw-update-dna"`), do NOT modify files, stage git changes, or run `git rebase --abort`/checkout/reset commands.
 - **ONE cycle per heartbeat.** Never run `cycle_start.py` or `cycle_close.py` more than once
   per session. Never create additional cycle entries in `cycles.json`. If you discover a
   goal or inbox item while working on an evolve cycle, leave it — the next heartbeat will

@@ -17,6 +17,7 @@ uv run python scripts/self_test.py --record
 
 Also inspect:
 
+- Active operations: Check `/agent/messages/inbox.json` for DNA update notices (`[DNA UPDATE IN PROGRESS]`, `[DNA UPDATE COMPLETE]`, `[DNA UPDATE ABORTED]`). If an active, recent (< 15m) update is in progress, note that an upstream DNA sync / git rebase is underway and temporary portal disruption is expected. If a completion/abort notice is present or the in-progress message is stale (> 15m), the update is finished or hung.
 - Service status via `uv run python scripts/service_manager.py status` (or the
   equivalent inspection — list each managed service and its state).
 - Resource usage: CPU load, memory, disk free on `/agent` and `/tmp`.
@@ -49,7 +50,7 @@ outside:
    - Status code MUST be `200`.
    - Response MUST NOT include a `WWW-Authenticate` header.
    - Status MUST NOT be `401` or `403`, and the body MUST NOT indicate that
-     authentication (basic auth or otherwise) is required.
+      authentication (basic auth or otherwise) is required.
 
 Any of the following counts as a **critical issue** and must be alerted:
 
@@ -64,19 +65,30 @@ For every anomaly collected in steps 1–2, decide:
 - **Severity** — `critical` (core component down or webhook unreachable /
   auth-protected), `warning` (degraded but functional, e.g. high resource
   usage, stale non-essential heartbeat, public hostname unset), or `info`
-  (transient blip already recovered).
+  (transient blip already recovered, or expected downtime during active DNA update).
 - **Component** — portal app (Streamlit on 8081), Caddy gateway (8080),
   webhook_receiver, scheduler_daemon, memory/state files, external network,
   or other.
-- **Likely root cause** — based on logs and probe output, not guesswork. If
-  the data is insufficient to decide, say so explicitly.
+- **Likely root cause** — based on logs and probe output, not guesswork:
+  - If portal/service checks fail and `inbox.json` contains a recent (< 15m) `[DNA UPDATE IN PROGRESS]` without completion/abort notices, root cause is an active upstream DNA rebase/sync. Mark severity as `info`/`warning` (expected transition) rather than `critical`.
+  - If `[DNA UPDATE COMPLETE]` / `[DNA UPDATE ABORTED]` is present, or if `[DNA UPDATE IN PROGRESS]` is stale (> 15m), the update is finished or broken; classify failures as real issues requiring recovery.
 
 ## 4. Recovery actions
 
+> [!IMPORTANT]
+> **Active DNA Update in `inbox.json`:**
+> If `/agent/messages/inbox.json` contains a recent (< 15 min old) `[DNA UPDATE IN PROGRESS]` (and neither `[DNA UPDATE COMPLETE]` nor `[DNA UPDATE ABORTED]` is present):
+> - **DO NOT trigger `self-heal.md`, DO NOT abort git rebase (`git rebase --abort`), and DO NOT modify or restore files**.
+> - Temporary downtime is expected during rebase and dependency installation. Allow the DNA update to finish.
+>
+> **Exceptions (When Recovery IS Allowed):**
+> - If `[DNA UPDATE COMPLETE]` or `[DNA UPDATE ABORTED]` is present, the update has concluded. If the portal is broken, proceed with recovery via `prompts/self-heal.md`.
+> - If `[DNA UPDATE IN PROGRESS]` is stale (> 15 minutes old), the update is hung or abandoned. Proceed with recovery via `prompts/self-heal.md`.
+
 When the issue affects a **core system component** — the agent portal app,
 the Caddy gateway, or anything that breaks the user's communication channel —
-**switch to `prompts/self-heal.md` and follow that recovery procedure**. That
-prompt is the authoritative recipe for portal/gateway recovery; do not
+and no active (non-stale) DNA update is in progress, **switch to `prompts/self-heal.md` and follow that recovery procedure**.
+That prompt is the authoritative recipe for portal/gateway recovery; do not
 improvise an alternative fix here.
 
 For non-core issues:

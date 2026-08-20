@@ -72,9 +72,43 @@ Check if there are new commits:
 git log --oneline HEAD..origin/{dna-branch-name}
 ```
 
-If no new commits, skip to **Step 6** (restore stash and exit — already up to date).
+If no new commits, skip to **Step 7** (restore stash and exit — already up to date).
 
-### Step 4: Integrate Remote Changes
+### Step 4: Inject Pre-Update Notice into `inbox.json` (MANDATORY)
+
+> [!IMPORTANT]
+> **Always inject this notification before starting rebase or merge.**
+> During `git rebase` or `git merge`, files in `server.py`, `app/`, or Python dependencies may temporarily be in an inconsistent, conflicting, or transitional state. This can cause the Streamlit Portal health checks to fail or watchdog errors to fire. If a background cycle (heartbeat or self-heal) runs concurrently, it might detect the broken Portal and mistakenly try to "fix" it by executing `git rebase --abort` or discarding modifications.
+> Injecting an informative message into `inbox.json` ensures any concurrent cycle is aware that a DNA update is in progress, understands why the Portal is temporarily unhealthy, and will **NOT** abort the git rebase or interfere with the git state.
+
+Inject the notification message into the main inbox:
+
+```bash
+uv run python scripts/interact_with_agent.py send-message --name main \
+  --type message \
+  --priority 1 \
+  --source "claw-update-dna" \
+  --content "[DNA UPDATE IN PROGRESS] Starting DNA update from origin/{dna-branch-name}. Integration strategy: rebase/merge. Stashing local changes, pulling remote commits, resolving conflicts, and syncing dependencies. The Portal/Streamlit server may experience temporary downtime or syntax/import errors while rebase and dependency sync are underway. DO NOT abort git rebase, discard uncommitted changes, or intervene until DNA update completes."
+```
+
+*Fallback (if Python script directly needed):*
+
+```bash
+uv run python -c "
+import sys; sys.path.insert(0, 'services')
+from shared import write_to_inbox
+from datetime import datetime, timezone
+write_to_inbox([{
+    'type': 'message',
+    'content': '[DNA UPDATE IN PROGRESS] Starting DNA update from origin/{dna-branch-name}. Strategy: rebase/merge. Portal may be temporarily unhealthy. DO NOT abort git rebase.',
+    'priority': 1,
+    'timestamp': datetime.now(timezone.utc).isoformat(),
+    'from': {'source': 'claw-update-dna', 'role': 'system'}
+}], dedup=False)
+"
+```
+
+### Step 5: Integrate Remote Changes
 
 Choose the integration strategy based on the situation.
 
@@ -117,13 +151,13 @@ git pull --ff-only origin {dna-branch-name}
 
 Use when the local branch has zero commits ahead of remote (just behind).
 
-### Step 5: Resolve Conflicts
+### Step 6: Resolve Conflicts
 
-#### 5a: No conflicts
+#### 6a: No conflicts
 
-If rebase/merge completes cleanly, proceed to **Step 6**.
+If rebase/merge completes cleanly, proceed to **Step 7**.
 
-#### 5b: Rebase conflicts
+#### 6b: Rebase conflicts
 
 When `git rebase` stops on a conflict:
 
@@ -154,7 +188,7 @@ git rebase --skip
 > git merge origin/{dna-branch-name}
 > ```
 
-#### 5c: Merge conflicts
+#### 6c: Merge conflicts
 
 When `git merge` reports conflicts:
 
@@ -171,7 +205,7 @@ git diff --name-only --diff-filter=U
 git add <resolved-file>
 ```
 
-# 4. Complete the merge
+#### 6d: Complete the merge
 
 At end of merge, **commit all staged changes** with a detailed, structured commit message.
 
@@ -190,13 +224,13 @@ Changes merged:
 - <a summary of all conflicts occurred and how they were resolved>
 
 Resolution strategy: 
-- <file path>: <REMOTE or LOCAL or MANUAL MERGE> (the choice is based on 5d priority table, if no table rule applies, explain the reasoning behind the choice)
+- <file path>: <REMOTE or LOCAL or MANUAL MERGE> (the choice is based on 6e priority table, if no table rule applies, explain the reasoning behind the choice)
 
 EOF
 )"
 ```
 
-#### 5d: Conflict resolution priorities
+#### 6e: Conflict resolution priorities
 
 | File / Directory | Prefer | Reason |
 |---|---|---|
@@ -216,7 +250,7 @@ EOF
 | `skills/` | **MANUAL MERGE** | May have local skills + upstream skill updates |
 | `workspace/` | **LOCAL** | User work — never overwrite |
 
-#### 5e: Binary or large file conflicts
+#### 6f: Binary or large file conflicts
 
 ```bash
 # Accept local version
@@ -226,7 +260,7 @@ git checkout --ours <file> && git add <file>
 git checkout --theirs <file> && git add <file>
 ```
 
-### Step 6: Restore Stashed Changes
+### Step 7: Restore Stashed Changes
 
 ```bash
 git stash pop
@@ -253,18 +287,18 @@ git stash pop
 > git branch -D temp-local-changes
 > ```
 
-### Step 7: Post-Pull Verification
+### Step 8: Post-Pull Verification & Completion Notice
 
 ```bash
 # 1. Confirm branch state
 git log --oneline -5
 git status
 
-# 2. Check what changed — this informs Steps 8 and 9
+# 2. Check what changed — this informs Steps 9 and 10
 git diff HEAD@{1}..HEAD --name-only
 
-# 3. If seed/install.sh changed → proceed to Step 8
-# 4. If pyproject.toml changed → proceed to Step 9
+# 3. If seed/install.sh changed → proceed to Step 9
+# 4. If pyproject.toml changed → proceed to Step 10
 
 # 5. If portal files changed, verify portal health
 curl -s http://localhost:8081/app/_stcore/health
@@ -273,7 +307,29 @@ curl -s http://localhost:8081/app/_stcore/health
 bash scripts/server_restart.sh --verify
 ```
 
-### Step 8: Install New OS-Level Dependencies (if needed)
+**Inject completion notice into `inbox.json`:**
+
+Once verified healthy, notify that DNA update has completed:
+
+```bash
+uv run python scripts/interact_with_agent.py send-message --name main \
+  --type message \
+  --priority 2 \
+  --source "claw-update-dna" \
+  --content "[DNA UPDATE COMPLETE] Successfully updated DNA from origin/{dna-branch-name}. Portal verified and healthy."
+```
+
+*(If the update failed or was aborted, send an update status message so concurrent cycles know normal operation has resumed)*:
+
+```bash
+uv run python scripts/interact_with_agent.py send-message --name main \
+  --type message \
+  --priority 1 \
+  --source "claw-update-dna" \
+  --content "[DNA UPDATE ABORTED] DNA update from origin/{dna-branch-name} was aborted or failed. Working tree state restored."
+```
+
+### Step 9: Install New OS-Level Dependencies (if needed)
 
 If `seed/install.sh` was modified by the pull, new OS-level dependencies have been introduced and must be installed.
 
@@ -296,7 +352,7 @@ bash seed/install.sh
 
 > **Edge case — partial failure:** If the script fails midway, inspect the output to identify which dependency failed. Fix the issue (e.g., network, permissions) and re-run. Already-installed dependencies will not be affected.
 
-### Step 9: Sync Python Dependencies (if needed)
+### Step 10: Sync Python Dependencies (if needed)
 
 If `pyproject.toml` was modified (either by the pull or in the stash):
 
@@ -309,7 +365,12 @@ This is **mandatory** per constitution — failing to sync after pyproject.toml 
 ## Quick Reference
 
 ```bash
-# Full update in one shot (happy path, no local changes, ≤10 local commits)
+# 1. Always notify inbox before starting rebase/merge
+uv run python scripts/interact_with_agent.py send-message --name main \
+  --type message --priority 1 --source "claw-update-dna" \
+  --content "[DNA UPDATE IN PROGRESS] Starting DNA update from origin/{dna-branch-name}. Rebase/merge underway; portal may be temporarily unhealthy. Do NOT abort git rebase."
+
+# 2. Full update in one shot (happy path, no local changes, ≤10 local commits)
 git fetch origin && git rebase origin/{dna-branch-name}
 
 # Full update when >10 local commits diverge (use merge instead of rebase)
@@ -320,6 +381,12 @@ git stash --include-untracked -m "Auto-stash before pull"
 git fetch origin
 git rebase origin/{dna-branch-name}
 git stash pop
+
+# 3. Post-update verification & completion message
+curl -s http://localhost:8081/app/_stcore/health || bash scripts/server_restart.sh --verify
+uv run python scripts/interact_with_agent.py send-message --name main \
+  --type message --priority 2 --source "claw-update-dna" \
+  --content "[DNA UPDATE COMPLETE] DNA update from origin/{dna-branch-name} completed."
 
 # Nuclear option — discard ALL local uncommitted changes and force-sync
 # (ONLY if user explicitly requests it)
@@ -332,6 +399,7 @@ git reset --hard origin/{dna-branch-name}
 | Situation | Resolution |
 |---|---|
 | No remote changes | `git fetch` shows nothing new — exit early, restore stash |
+| Portal down during rebase | Expected while files/deps diverge. Pre-injected `inbox.json` message prevents other cycles from aborting rebase |
 | Clean rebase (≤10 local commits) | All commits replay without conflict — happy path |
 | >10 local commits diverged | Skip rebase, use merge directly to avoid conflict cascades |
 | Rebase conflict on 1-2 files | Resolve manually, `git add`, `git rebase --continue` |
@@ -347,3 +415,4 @@ git reset --hard origin/{dna-branch-name}
 | `pyproject.toml` changed | Run `uv sync` immediately |
 | Diverged history (force-push on remote) | `git fetch origin && git reset --hard origin/{dna-branch-name}` (destructive — confirm with user) |
 | Authentication failure on fetch | Check GitHub credentials / SSH keys — may need human intervention |
+

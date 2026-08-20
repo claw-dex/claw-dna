@@ -5,6 +5,47 @@
 TOP PRIORITY. Do not work on any other goal until the portal is healthy.
 The portal is your only communication channel with the user.
 
+## Step 0: Check for Active DNA Update (MANDATORY FIRST STEP)
+
+Before attempting any triage, recovery, or file modifications, inspect `/agent/messages/inbox.json` for an active DNA update notice:
+
+```bash
+# Check for DNA update messages in inbox
+grep -E "DNA UPDATE IN PROGRESS|DNA UPDATE COMPLETE|DNA UPDATE ABORTED" /agent/messages/inbox.json 2>/dev/null
+```
+
+### When to Stand Down (Active Update in Progress)
+
+If `[DNA UPDATE IN PROGRESS]` is present in `inbox.json` AND:
+- Neither `[DNA UPDATE COMPLETE]` nor `[DNA UPDATE ABORTED]` is present, AND
+- The message `timestamp` / `received_at` is **recent (< 15 minutes old)**
+
+Then the update is actively underway:
+- **DO NOT attempt self-healing.** Portal downtime or health check failures are expected while git rebase, conflict resolution, or dependency sync is actively underway.
+- **DO NOT run `git rebase --abort`, `git checkout`, `git reset`, or modify/restore any files.** Interfering will disrupt or corrupt the update.
+- **Stand down immediately:**
+  - Keep `state.json:agent_status` as `"idle"`.
+  - Close the cycle via `cycle_close.py` with:
+    `--goal "Self-heal: portal unhealthy"`
+    `--summary "Self-heal deferred: DNA update actively in progress (detected in inbox.json). Awaiting rebase/sync completion."`
+- Exit the cycle cleanly and let the DNA update finish.
+
+### Exceptions — When Self-Heal IS Allowed to Proceed
+
+Self-healing is permitted and required if any of the following exception conditions apply:
+
+1. **Completion or Abort Notice Present:**
+   `inbox.json` contains `[DNA UPDATE COMPLETE]` or `[DNA UPDATE ABORTED]`. The DNA update has finished or aborted, but the portal remains unhealthy (e.g. pending restart, syntax regression, or missing `uv sync`). Proceed to **Step 1** to recover the portal.
+
+2. **Stale / Abandoned Update Notice (> 15 minutes old):**
+   `[DNA UPDATE IN PROGRESS]` has a timestamp older than 15 minutes with no subsequent completion/abort notice. The update has likely hung, crashed, or was abandoned mid-process.
+   - Inspect git state (`git status`).
+   - If stuck in a broken/hung rebase, abort the hung rebase: `git rebase --abort 2>/dev/null || true`
+   - Proceed to **Step 1** to triage and restore the portal.
+
+3. **No DNA Update Notice:**
+   If no DNA update message is present in `inbox.json`, proceed directly to **Step 1**.
+
 ## Step 1: Quick Triage (use existing scripts)
 
 ```bash
