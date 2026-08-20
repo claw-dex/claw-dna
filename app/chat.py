@@ -24,13 +24,17 @@ from app.shared import _write_json_atomic
 import sys as _sys
 from pathlib import Path as _Path
 
-_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "services"))
+_services_dir = str(_Path(__file__).resolve().parent.parent / "services")
+if _services_dir not in _sys.path:
+    _sys.path.insert(0, _services_dir)
 from shared import (  # noqa: E402
     chat_history_path as _chat_history_path,
     ensure_chat_dir as _ensure_chat_dir,
     load_session_id as _shared_load_session_id,
     migrate_chat_layout as _migrate_chat_layout,
     save_session_id as _shared_save_session_id,
+    sdk_buffer_size_kwargs as _sdk_buffer_size_kwargs,
+    FATAL_SDK_ERROR_HINTS as _FATAL_SDK_ERROR_HINTS,
 )
 
 # The portal is the "main" chat surface; everything lives under
@@ -42,6 +46,9 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    CLIConnectionError,
+    CLIJSONDecodeError,
+    ProcessError,
     ResultMessage,
     SystemMessage,
     TextBlock,
@@ -49,6 +56,19 @@ from claude_agent_sdk import (
     ToolUseBlock,
 )
 from claude_agent_sdk.types import StreamEvent
+
+# Failures that mean the `claude` subprocess / its stdout reader is gone. The
+# SDK runs its stdout reader as a background task; when that task dies it
+# pushes one `{"type": "error"}` then `{"type": "end"}` and exits, so every
+# later turn on the same ClaudeSDKClient returns nothing (and can block on
+# `receive_response()` forever). We flag the instance broken and let
+# `_get_or_recreate_chat` rebuild it, resuming the persisted session_id.
+#
+# The isinstance tuple is only a fast path for errors raised directly at us
+# (e.g. `connect()`/`query()` failures); `_FATAL_SDK_ERROR_HINTS` does the real
+# work, because anything surfacing through the reader task arrives as a bare
+# `Exception(str(e))` with the SDK error class stripped.
+_FATAL_SDK_ERRORS = (CLIConnectionError, CLIJSONDecodeError, ProcessError)
 
 SYSTEM_MD = Path("/agent/system.md")
 CONSTITUTION_MD = Path("/agent/constitution.md")
@@ -289,6 +309,9 @@ class ClaudeChat:
         self._lock = threading.Lock()
         self._submit_lock = threading.Lock()
         self._closed = False
+        # Set when the SDK transport dies mid-turn (see _FATAL_SDK_ERRORS).
+        # Makes is_alive() report False so the singleton gets rebuilt.
+        self._broken = False
         self._resume_session_id = resume_session_id
         self._chat_history = chat_history or []
         self._session_id: str | None = None
@@ -359,6 +382,7 @@ class ClaudeChat:
     async def _connect(self) -> None:
         """Create and connect the SDK client."""
         options = ClaudeAgentOptions(
+            **_sdk_buffer_size_kwargs(ClaudeAgentOptions),
             system_prompt=_build_system_prompt(self._chat_history),
             permission_mode="bypassPermissions",
             include_partial_messages=True,
@@ -530,9 +554,44 @@ class ClaudeChat:
                     # Continue iterating in drain mode to catch any late
                     # post-Result messages on this same iterator.
         except Exception as exc:
-            chunk_q.put({"type": "error", "error": str(exc)})
+            chunk_q.put({"type": "error", "error": self._describe_stream_error(exc)})
+            self._mark_broken_if_fatal(exc)
         finally:
             done_event.set()
+
+    @staticmethod
+    def _is_fatal_stream_error(exc: Exception) -> bool:
+        """True if *exc* means this SDK client can no longer serve turns."""
+        if isinstance(exc, _FATAL_SDK_ERRORS):
+            return True
+        text = str(exc)
+        return any(hint in text for hint in _FATAL_SDK_ERROR_HINTS)
+
+    def _mark_broken_if_fatal(self, exc: Exception) -> None:
+        """Flag the instance for rebuild when *exc* killed the transport."""
+        if self._is_fatal_stream_error(exc):
+            with self._lock:
+                self._broken = True
+
+    @classmethod
+    def _describe_stream_error(cls, exc: Exception) -> str:
+        """Human-facing text for a stream failure.
+
+        The SDK's buffer-overflow message ("JSON message exceeded maximum
+        buffer size of N bytes") is opaque on its own, so we say what
+        actually happened and that the session reconnects itself.
+        """
+        text = str(exc)
+        if "maximum buffer size" in text:
+            return (
+                "A tool returned more output than the chat transport could "
+                "buffer, so this turn was cut short. Reconnecting — please "
+                "send the message again, ideally asking for less output at "
+                f"once.\n\n_({text})_"
+            )
+        if cls._is_fatal_stream_error(exc):
+            return f"{text}\n\n_Reconnecting the chat session…_"
+        return text
 
     async def _async_drain(self, total_timeout_s: float) -> list[dict]:
         """Pull any messages the SDK has buffered on its receive channel
@@ -565,19 +624,25 @@ class ClaudeChat:
                 )
                 events.extend(new_events)
         except Exception as exc:
-            events.append({"type": "error", "error": str(exc)})
+            events.append({"type": "error", "error": self._describe_stream_error(exc)})
+            self._mark_broken_if_fatal(exc)
         return events
 
     # ── public API ────────────────────────────────────────────
 
     def send(self, prompt: str, timeout: float = 300) -> str:
-        """Blocking send. Returns full response text."""
-        with self._lock:
-            future = asyncio.run_coroutine_threadsafe(
-                self._async_send(prompt),
-                self._loop,
-            )
-            return future.result(timeout=timeout)
+        """Blocking send. Returns full response text.
+
+        Does NOT hold `_lock` across the wait: `_async_send` takes the same
+        non-reentrant lock on the loop thread to store the session_id, so
+        holding it here would self-deadlock — and would also block
+        `is_alive()` (which takes `_lock`) for the whole timeout.
+        """
+        future = asyncio.run_coroutine_threadsafe(
+            self._async_send(prompt),
+            self._loop,
+        )
+        return future.result(timeout=timeout)
 
     def submit(self, prompt: str) -> None:
         """Non-blocking: start processing prompt in background.
@@ -670,7 +735,17 @@ class ClaudeChat:
                 return []
 
     def is_alive(self) -> bool:
-        """Return True if the background thread is still running."""
+        """Return True if the background thread is running AND the SDK
+        transport is still usable.
+
+        The daemon thread survives a dead `claude` subprocess, so thread
+        liveness alone is not enough: without the `_broken` check the portal
+        would keep handing prompts to a client whose stdout reader has already
+        raised, and every turn would fail the same way.
+        """
+        with self._lock:
+            if self._broken:
+                return False
         return self._thread.is_alive()
 
     @property
@@ -793,6 +868,18 @@ def _get_or_recreate_chat() -> "ClaudeChat | None":
         return chat
 
     dead = chat
+    # Salvage whatever the dead instance still holds — in the broken-transport
+    # case its queue carries the "Reconnecting…" error event for the turn that
+    # just failed. Without this, a full-page rerun that lands before the
+    # streaming fragment ticks would drop the instance (and the explanation)
+    # on the floor, leaving `chat_streaming` stuck True against a fresh
+    # session that has never streamed.
+    try:
+        _drain_streaming_events(dead)
+    except Exception:
+        pass
+    st.session_state.chat_streaming = False
+
     _get_chat_singleton.clear()
     try:
         dead.close()
@@ -816,6 +903,10 @@ def _drain_streaming_events(session) -> None:
     """
     if session is None:
         return
+    # `_get_or_recreate_chat` can call this before render() has initialized the
+    # streaming buffers, so seed them here rather than assuming they exist.
+    st.session_state.setdefault("chat_stream_events", [])
+    st.session_state.setdefault("chat_stream_text", "")
     new_events = session.poll()
     for ev in new_events:
         st.session_state.chat_stream_events.append(ev)

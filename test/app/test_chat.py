@@ -20,6 +20,7 @@ so that regression cannot recur silently.
 from __future__ import annotations
 
 from app.chat import (
+    ClaudeChat,
     _format_tool_call,
     _format_tool_group_label,
     _group_tool_events,
@@ -137,3 +138,59 @@ def test_format_tool_call_unknown_tool_falls_back_to_all_values():
 
 def test_format_tool_call_missing_input_renders_empty_parens():
     assert _format_tool_call("Read", None) == "Read()"
+
+
+# ---------------------------------------------------------------------------
+# Fatal-SDK-error classification.
+#
+# These are pure classmethods, deliberately tested against the *exact* strings
+# the SDK produces. The SDK's stdout reader catches its own exception and
+# re-raises it downstream as a bare `Exception(str(e))` (see
+# claude_agent_sdk/_internal/query.py::_read_messages), so the original error
+# class never reaches us and detection must be substring-based. An earlier fix
+# classified by `isinstance` alone and was therefore a silent no-op — these
+# tests pin the real wire text so that cannot recur.
+#
+# `CLIJSONDecodeError` formats as f"Failed to decode JSON: {line[:100]}..." and
+# `ProcessError` as f"{message} (exit code: {n})".
+# ---------------------------------------------------------------------------
+
+_BUFFER_OVERFLOW_TEXT = (
+    "Failed to decode JSON: JSON message exceeded maximum buffer size of "
+    "1048576 bytes..."
+)
+
+
+def test_buffer_overflow_is_classified_fatal():
+    assert ClaudeChat._is_fatal_stream_error(Exception(_BUFFER_OVERFLOW_TEXT))
+
+
+def test_dead_subprocess_texts_are_classified_fatal():
+    for text in (
+        "Cannot write to terminated process",
+        "Command failed with exit code -9 (exit code: -9)",
+        "BrokenPipeError: [Errno 32] Broken pipe",
+        "process is not running",
+        "Not connected",
+    ):
+        assert ClaudeChat._is_fatal_stream_error(Exception(text)), text
+
+
+def test_ordinary_errors_are_not_classified_fatal():
+    for text in (
+        "model refused to answer",
+        "Tool execution failed: file not found",
+        "rate limit exceeded",
+    ):
+        assert not ClaudeChat._is_fatal_stream_error(Exception(text)), text
+
+
+def test_buffer_overflow_description_explains_the_cause():
+    described = ClaudeChat._describe_stream_error(Exception(_BUFFER_OVERFLOW_TEXT))
+    assert "more output than the chat transport could buffer" in described
+    # The raw SDK text is retained so operators can still grep for it.
+    assert "maximum buffer size" in described
+
+
+def test_non_fatal_description_is_passed_through_verbatim():
+    assert ClaudeChat._describe_stream_error(Exception("boom")) == "boom"

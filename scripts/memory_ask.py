@@ -36,6 +36,14 @@ from pathlib import Path
 from scripts import memory_store as store
 from scripts.memory_store import DEFAULT_DB
 
+# Same sys.path bootstrap as app/chat.py so the bare-name `import shared`
+# style resolves to services/shared.py (the SDK transport tuning lives there
+# so all three SDK call sites stay in lock-step).
+_SERVICES_DIR = str(Path(__file__).resolve().parent.parent / "services")
+if _SERVICES_DIR not in sys.path:
+    sys.path.insert(0, _SERVICES_DIR)
+from shared import sdk_buffer_size_kwargs  # noqa: E402
+
 # Keep hits whose score is at least half the top hit's. Retrieval is scored
 # relative to the best match rather than on an absolute scale, because hybrid
 # fusion scores depend on how many candidates were merged.
@@ -169,6 +177,10 @@ async def ask_claude(question, context, system_prompt):
     )
 
     options = ClaudeAgentOptions(
+        # Raise the stdout buffer ceiling: the SDK default (1 MiB) is smaller
+        # than a single large tool result and fails the turn with "JSON
+        # message exceeded maximum buffer size".
+        **sdk_buffer_size_kwargs(ClaudeAgentOptions),
         system_prompt=system_prompt,
         permission_mode="bypassPermissions",
         cwd="/agent",

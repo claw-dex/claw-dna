@@ -8,6 +8,7 @@ and webhook_receiver's whatsapp sub-handler).
 
 from __future__ import annotations
 
+import dataclasses
 import errno
 import fcntl
 import json
@@ -443,6 +444,97 @@ def append_to_history(items: list, history_file: Path, *, max_entries: int = 500
                 fcntl.flock(lock_f, fcntl.LOCK_UN)
     except Exception as e:
         log.warning(f"Failed to write {history_file.name}: {e}")
+
+
+# ---------------------------------------------------------------------------
+# claude-agent-sdk transport tuning — shared by every SDK call site
+# (app/chat.py, services/internal_agent_chat.py, scripts/memory_ask.py).
+# ---------------------------------------------------------------------------
+
+# Max bytes the SDK buffers while assembling one JSON message from the CLI's
+# stdout. The SDK default is 1 MiB, which a single large tool result (a big
+# Read, a verbose Bash command, a long Write) blows past — surfacing as
+# "JSON message exceeded maximum buffer size of 1048576 bytes" and killing the
+# stream mid-turn.
+#
+# 8 MiB, not more: the SDK's reader speculatively runs `json.loads` on the
+# whole buffer after appending *every* ~64 KiB stdout chunk (see
+# claude_agent_sdk/_internal/transport/subprocess_cli.py::_read_messages_impl),
+# so assembling an N-byte message costs O(N²) scanning, synchronously, on the
+# event loop. At 8 MiB a worst-case message costs ~0.5 GB of parse work; at
+# 64 MiB it would be ~34 GB and would stall the loop (blocking interrupts and
+# control responses) for minutes. 8x the default covers realistic tool
+# payloads while keeping that ceiling bounded.
+MAX_SDK_BUFFER_BYTES = 8 * 1024 * 1024
+
+# Set once we've warned about an SDK build without `max_buffer_size`. The
+# condition is static per process but `sdk_buffer_size_kwargs` is re-invoked
+# on every reconnect, so without this a thrashing agent floods the log.
+_warned_no_buffer_option = False
+
+
+def sdk_buffer_size_kwargs(options_cls) -> dict:
+    """Return ``{"max_buffer_size": ...}`` if *options_cls* supports it.
+
+    `max_buffer_size` only exists on newer `ClaudeAgentOptions` builds;
+    passing it to an older one would raise TypeError and break every SDK call
+    site, so probe the dataclass fields instead of pinning a version. Also
+    returns ``{}`` for non-dataclass stand-ins (e.g. test doubles).
+    """
+    global _warned_no_buffer_option
+    try:
+        names = {f.name for f in dataclasses.fields(options_cls)}
+    except Exception:
+        return {}
+    if "max_buffer_size" in names:
+        return {"max_buffer_size": MAX_SDK_BUFFER_BYTES}
+    if not _warned_no_buffer_option:
+        _warned_no_buffer_option = True
+        log.warning(
+            "claude-agent-sdk build has no max_buffer_size option; "
+            "large tool results may exceed the 1 MiB default buffer"
+        )
+    return {}
+
+
+# Substrings the SDK surfaces when its `claude` subprocess has died (SIGKILL /
+# OOM / closed pipe). The negative `exit code: -` prefix matches SIGKILL (-9),
+# SIGTERM (-15), SIGABRT (-6), etc. without enumerating each signal. Brittle
+# substring matching against exception text — re-validate on SDK upgrades.
+DEAD_SUBPROCESS_HINTS = (
+    "Cannot write to terminated process",
+    "exit code: -",
+    "BrokenPipeError",
+    "process is not running",
+)
+
+# Substrings for a *client-side* reader-task death: when the SDK's stdout
+# reader raises (e.g. a tool result overflows `max_buffer_size`), it logs the
+# exception, pushes one `{"type": "error"}` + `{"type": "end"}` into the
+# message stream, and exits — see query.py::_read_messages. The client object
+# still looks connected but every later turn comes back empty, so it needs a
+# reconnect. It must NOT be retried the way DEAD_SUBPROCESS_HINTS are: the CLI
+# subprocess kept running and may already have executed tools and delivered a
+# reply, so replaying the prompt risks duplicate side effects.
+#
+# Only the CLIJSONDecodeError text is listed. The reader's own log line
+# ("Fatal error in message reader: …") never reaches the consumer — it
+# forwards `str(e)` alone — so matching on it would be dead code.
+READER_DEATH_HINTS = ("Failed to decode JSON",)
+
+# Everything that means "this SDK client can no longer serve turns". Detection
+# has to be text-based: the reader task re-raises downstream as a bare
+# `Exception(str(e))`, so the original SDK error class never survives.
+# "exit code:" (no sign) also catches a non-signal CLI exit, which is fatal for
+# a client even though it is not worth replaying a turn over.
+FATAL_SDK_ERROR_HINTS = (
+    DEAD_SUBPROCESS_HINTS
+    + READER_DEATH_HINTS
+    + (
+        "exit code:",
+        "Not connected",
+    )
+)
 
 
 # ---------------------------------------------------------------------------

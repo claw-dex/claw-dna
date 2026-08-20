@@ -61,6 +61,7 @@ import json
 
 from envelope import make_from
 from shared import (
+    DEAD_SUBPROCESS_HINTS,
     INBOX_FILE,
     MESSAGES_DIR,
     append_to_history,
@@ -72,6 +73,7 @@ from shared import (
     migrate_chat_layout,
     read_json_file,
     save_session_id,
+    sdk_buffer_size_kwargs,
     session_path,
     surface_error,
     write_to_inbox,
@@ -185,12 +187,16 @@ MAX_TURN_ATTEMPTS = 2
 # this is a brittle substring match against exception text. The negative
 # `exit code: -` prefix matches SIGKILL (-9), SIGTERM (-15), SIGABRT (-6),
 # etc. without enumerating each signal individually.
-_DEAD_SUBPROCESS_HINTS = (
-    "Cannot write to terminated process",
-    "exit code: -",
-    "BrokenPipeError",
-    "process is not running",
-)
+#
+# Deliberately excludes the SDK's client-side reader-task failures (see
+# `READER_DEATH_HINTS` in shared.py, e.g. "Failed to decode JSON" from a
+# `max_buffer_size` overflow). Those mean the *reader* died while the CLI
+# subprocess kept running — it may already have executed its tools and
+# delivered a reply via `send_reply`, so replaying the prompt would risk
+# duplicate side effects. They still get a reconnect, just not a retry:
+# `_run_turn_for_group` reconnects for *any* non-None `runner_error` once the
+# assistant record is written.
+_DEAD_SUBPROCESS_HINTS = DEAD_SUBPROCESS_HINTS
 
 
 def _is_dead_subprocess_error(msg: str) -> bool:
@@ -1097,6 +1103,7 @@ class InternalAgentSession:
         )
         routing_server = _build_send_reply_server(self.name, self.cfg)
         return ClaudeAgentOptions(
+            **sdk_buffer_size_kwargs(ClaudeAgentOptions),
             system_prompt=_build_system_prompt(self._chat_history, custom),
             model=model,
             permission_mode="bypassPermissions",
