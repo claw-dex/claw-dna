@@ -9,7 +9,6 @@ from app.data._cache import _register_cache
 from app.data._helpers import _read_json_safe, _read_text_safe, _pid_alive
 from app.shared import LOGS_DIR
 
-
 _LOGS_CACHE = _register_cache()
 _LOG_DETAIL_CACHE = _register_cache()
 
@@ -97,7 +96,11 @@ def load_log_detail(num):
     cached = _LOG_DETAIL_CACHE.get(num)
     if cached is not None:
         result, c_meta_m, c_out_m, c_err_m = cached
-        if c_meta_m == meta_mtime and c_out_m == stdout_mtime and c_err_m == stderr_mtime:
+        if (
+            c_meta_m == meta_mtime
+            and c_out_m == stdout_mtime
+            and c_err_m == stderr_mtime
+        ):
             return result
 
     if meta.get("status") == "running" and not _pid_alive(meta.get("pid")):
@@ -115,5 +118,3 @@ def load_log_detail(num):
 
 
 load_log_detail.clear = _LOG_DETAIL_CACHE.clear
-
-

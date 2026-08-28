@@ -1,14 +1,35 @@
-"""Tab: Memory — consolidated Journal + Logs + Goals + Memory Files with top-level search."""
+"""Tab: Memory — consolidated Journal + Logs + Goals + Memory Files."""
 
 import io
+import re
 
 import streamlit as st
+
+from app.shared import (
+    _STATUS_COLORS,
+    _STATUS_MD_COLORS,
+    _badge,
+    message_source,
+)
+
+
+def _format_size(num_bytes) -> str:
+    if num_bytes is None:
+        return "—"
+    for unit in ("B", "KB", "MB", "GB"):
+        if num_bytes < 1024:
+            return (
+                f"{num_bytes:.0f} {unit}" if unit == "B" else f"{num_bytes:.1f} {unit}"
+            )
+        num_bytes /= 1024
+    return f"{num_bytes:.1f} TB"
 
 
 def _show_image(path: str, caption: str) -> None:
     """Render an image from a local file path using PIL bytes (most robust approach)."""
     try:
         from PIL import Image
+
         with open(path, "rb") as f:
             data = f.read()
         img = Image.open(io.BytesIO(data))
@@ -18,41 +39,45 @@ def _show_image(path: str, caption: str) -> None:
 
 
 def render():
+    from app.data.metrics import load_memory_overview
     from app.data import (
-        load_journal, load_goals, load_logs, load_log_detail,
-        load_history, load_cycles, load_memory_files, read_memory_file,
-        search as do_search,
+        load_journal,
+        load_goals,
+        load_logs,
+        load_log_detail,
+        load_inbox_history,
+        load_cycles,
+        load_memory_files,
+        read_memory_file,
     )
 
-    # ── Top-level search bar ──────────────────────────────────
-    query = st.text_input(
-        "Search journal, goals, cycles, history",
-        placeholder="min 2 characters...",
-        key="mem_search",
-    )
+    # ── Memory Overview (top section) ─────────────────────────
+    # Pre-computed by scripts/metrics_db.py — these are counts over journal,
+    # cycles, and the message histories, plus a walk of the LanceDB store.
+    # Deriving them here meant six full JSON parses per render.
+    overview = load_memory_overview()
+    journal_n = overview["journal_active"]
+    archive_n = overview["journal_archived"]
+    cycles_n = overview["cycles_active"]
+    cycles_archive_n = overview["cycles_archived"]
 
-    if query and len(query) >= 2:
-        with st.spinner("Searching..."):
-            results = do_search(query)
-        st.subheader(f"Search results for '{query}' ({results.get('count', 0)} found)")
-        if not results.get("results"):
-            st.info("No results found.")
-        else:
-            for r in results["results"]:
-                source = r.get("source", "")
-                icon = {"journal": "📓", "goal": "🎯", "cycle": "🔄", "history": "📜"}.get(source, "•")
-                with st.expander(f"{icon} [{source}] {r.get('title', '')[:80]}"):
-                    st.write(r.get("snippet", ""))
-                    meta = []
-                    if r.get("cycle"):
-                        meta.append(f"Cycle: {r['cycle']}")
-                    if r.get("status"):
-                        meta.append(f"Status: {r['status']}")
-                    if r.get("timestamp"):
-                        meta.append(f"Time: {str(r['timestamp'])[:19]}")
-                    if meta:
-                        st.caption(" | ".join(meta))
-        return  # early-return on active search
+    st.subheader("Memory Overview")
+    o1, o2, o3, o4, o5 = st.columns(5)
+    with o1:
+        st.metric("Long-term Memory", _format_size(overview["ltm_bytes"]))
+        st.caption("long_term_memory.lancedb")
+    with o2:
+        st.metric("Journal Entries", f"{journal_n + archive_n}")
+        st.caption(f"{journal_n} active · {archive_n} archived")
+    with o3:
+        st.metric("Inbox History", f"{overview['inbox_history']}")
+        st.caption(_format_size(overview["inbox_history_bytes"]))
+    with o4:
+        st.metric("Outbox History", f"{overview['outbox_history']}")
+        st.caption(_format_size(overview["outbox_history_bytes"]))
+    with o5:
+        st.metric("Cycles", f"{cycles_n + cycles_archive_n}")
+        st.caption(f"{cycles_n} active · {cycles_archive_n} archived")
 
     st.divider()
 
@@ -79,19 +104,31 @@ def render():
             st.info("No journal entries yet. The agent writes here after each cycle.")
         else:
             for entry in entries:
-                cycle = entry.get("cycle", "?")
-                goal = entry.get("goal", "Unknown")
-                status = entry.get("status", "completed")
+                cycle = entry.get("cycle_number", "?")
+                goal = entry.get("cycle_goal", "Unknown")
+                status = entry.get("cycle_status", "completed")
                 ts = str(entry.get("timestamp", ""))[:19].replace("T", " ")
-                status_icon = {"completed": "✅", "failed": "❌", "in_progress": "🔄"}.get(status, "⏳")
+                status_icon = {
+                    "completed": "✅",
+                    "failed": "❌",
+                    "in_progress": "🔄",
+                }.get(status, "⏳")
+                status_md_color = _STATUS_MD_COLORS.get(status, "gray")
+                status_label = (status or "pending").replace("_", " ")
 
-                with st.expander(f"{status_icon} Cycle {cycle} — {goal[:60]} `{ts}`"):
-                    entry_type = entry.get("type", "")
-                    category = entry.get("category", "")
+                with st.expander(
+                    f"{status_icon} :{status_md_color}[**{status_label}**] · "
+                    f"Cycle {cycle} — {goal[:60]} `{ts}`"
+                ):
+                    entry_type = entry.get("cycle_type", "")
+                    category = entry.get("cycle_category", "")
                     actions = entry.get("actions", [])
                     summary = entry.get("summary") or entry.get("outcome", "")
                     if entry_type:
-                        st.caption(f"Type: {entry_type}" + (f" · Category: {category}" if category else ""))
+                        st.caption(
+                            f"Type: {entry_type}"
+                            + (f" · Category: {category}" if category else "")
+                        )
                     st.markdown(f"**Goal:** {goal}")
                     if actions:
                         st.markdown("**Actions:**")
@@ -136,28 +173,43 @@ def render():
                 duration = log.get("duration_seconds")
                 dur_str = f" ({duration}s)" if duration is not None else ""
 
-                status_badge = {"completed": "✅", "failed": "❌", "running": "⏳", "exited": "⚠️"}.get(status, "•")
+                status_badge = {
+                    "completed": "✅",
+                    "failed": "❌",
+                    "running": "⏳",
+                    "exited": "⚠️",
+                }.get(status, "•")
 
                 col1, col2 = st.columns([4, 1])
                 with col1:
-                    st.markdown(f"{status_badge} **#{num}** `{cmd}` — {started}{dur_str}")
+                    st.markdown(
+                        f"{status_badge} **#{num}** `{cmd}` — {started}{dur_str}"
+                    )
                 detail_key = f"mem_show_log_{num}"
                 with col2:
                     if st.button("Details", key=f"mem_log_detail_btn_{i}_{num}"):
-                        st.session_state[detail_key] = not st.session_state.get(detail_key, False)
+                        st.session_state[detail_key] = not st.session_state.get(
+                            detail_key, False
+                        )
 
                 if st.session_state.get(detail_key, False):
                     detail = load_log_detail(num)
                     if detail:
                         with st.container():
-                            st.caption(f"PID: {detail.get('pid')} | Exit code: {detail.get('exit_code', 'N/A')}")
+                            st.caption(
+                                f"PID: {detail.get('pid')} | Exit code: {detail.get('exit_code', 'N/A')}"
+                            )
                             tab_out, tab_err = st.tabs(["stdout", "stderr"])
                             with tab_out:
                                 stdout = detail.get("stdout", "")
-                                st.code(stdout if stdout else "(empty)", language="text")
+                                st.code(
+                                    stdout if stdout else "(empty)", language="text"
+                                )
                             with tab_err:
                                 stderr = detail.get("stderr", "")
-                                st.code(stderr if stderr else "(empty)", language="text")
+                                st.code(
+                                    stderr if stderr else "(empty)", language="text"
+                                )
                             if st.button("Refresh", key=f"mem_refresh_log_{num}"):
                                 load_log_detail.clear()
                                 st.rerun()
@@ -166,22 +218,28 @@ def render():
 
         st.divider()
 
-        # Command history
+        # Command history — sourced from inbox_history.json (archived inbox
+        # captures portal submissions plus Telegram / agent-forwarded inputs).
         st.subheader("Command History")
-        history = load_history() or []
+        history = load_inbox_history() or []
 
         if not history:
             st.caption("No command history yet.")
         else:
             type_icons = {"goal": "🎯", "message": "💬", "bash": "💻"}
             for cmd in reversed(history[-30:]):
+                if not isinstance(cmd, dict):
+                    continue
                 cmd_type = cmd.get("type", "?")
                 icon = type_icons.get(cmd_type, "•")
-                content = (cmd.get("content") or "")[:80]
-                cmd_result = cmd.get("result", "")
+                raw = cmd.get("content") or ""
+                if not isinstance(raw, str):
+                    raw = str(raw)
+                content = raw[:80]
+                source = message_source(cmd) or cmd.get("channel") or ""
                 ts = str(cmd.get("timestamp", ""))[:19].replace("T", " ")
                 st.markdown(f"{icon} **[{cmd_type}]** {content}")
-                st.caption(f"{cmd_result} | {ts}")
+                st.caption(f"{source} | {ts}" if source else ts)
 
         st.divider()
 
@@ -201,7 +259,11 @@ def render():
                     c_status = cycle.get("status", "unknown")
                     dur = cycle.get("duration_seconds")
                     cycle_type = cycle.get("type", "")
-                    c_icon = {"completed": "✅", "failed": "❌", "in_progress": "🔄"}.get(c_status, "⏳")
+                    c_icon = {
+                        "completed": "✅",
+                        "failed": "❌",
+                        "in_progress": "🔄",
+                    }.get(c_status, "⏳")
                     st.markdown(f"{c_icon} **#{cycle_num}**")
                     if cycle_type:
                         st.caption(cycle_type[:12])
@@ -211,14 +273,16 @@ def render():
             with st.expander(f"All {len(cycles)} cycles"):
                 rows = []
                 for c in reversed(cycles):
-                    rows.append({
-                        "Cycle": c.get("cycle", ""),
-                        "Type": c.get("type", ""),
-                        "Status": c.get("status", ""),
-                        "Duration (s)": c.get("duration_seconds"),
-                        "Goal": (c.get("goal") or "")[:60],
-                        "Start": str(c.get("start", ""))[:19].replace("T", " "),
-                    })
+                    rows.append(
+                        {
+                            "Cycle": c.get("cycle_number", ""),
+                            "Type": c.get("cycle_type", ""),
+                            "Status": c.get("cycle_status", ""),
+                            "Duration (s)": c.get("duration_seconds"),
+                            "Goal": (c.get("cycle_goal") or "")[:60],
+                            "Start": str(c.get("start", ""))[:19].replace("T", " "),
+                        }
+                    )
                 st.dataframe(rows, width="stretch")
 
     # ── Goals sub-tab ─────────────────────────────────────────
@@ -236,9 +300,18 @@ def render():
                 ["all"] + all_statuses,
                 key="mem_goal_status_filter",
             )
-            filtered = goals if selected_status == "all" else [g for g in goals if g.get("status") == selected_status]
+            filtered = (
+                goals
+                if selected_status == "all"
+                else [g for g in goals if g.get("status") == selected_status]
+            )
 
-            status_icons = {"completed": "✅", "failed": "❌", "in_progress": "🔄", "pending": "⏳"}
+            status_icons = {
+                "completed": "✅",
+                "failed": "❌",
+                "in_progress": "🔄",
+                "pending": "⏳",
+            }
 
             # Summary metrics
             total = len(goals)
@@ -265,33 +338,36 @@ def render():
                 g_status = g.get("status", "unknown")
                 icon = status_icons.get(g_status, "•")
                 content = g.get("content") or g.get("goal") or ""
-                created = (g.get("created_at") or g.get("source_timestamp") or "")[:19].replace("T", " ")
+                created = (g.get("created_at") or g.get("source_timestamp") or "")[
+                    :19
+                ].replace("T", " ")
                 with st.expander(f"{icon} {content[:80]} `{g_status}`"):
+                    s_color = _STATUS_COLORS.get(g_status, "#666")
+                    st.markdown(
+                        _badge(g_status.replace("_", " "), s_color),
+                        unsafe_allow_html=True,
+                    )
                     st.markdown(f"**Goal:** {content}")
-                    st.caption(f"Status: {g_status} | Created: {created}")
+                    st.caption(f"Created: {created}")
                     if g.get("id"):
                         st.caption(f"ID: {g['id']}")
 
     # ── Memory Files sub-tab ──────────────────────────────────
     with tab_memfiles:
         st.subheader("Memory Files")
-        memory_files = load_memory_files() or []
+        memory_files = [f for f in (load_memory_files() or []) if f.endswith(".md")]
 
         if not memory_files:
-            st.caption("No memory files found in /agent/memory/")
+            st.caption("No markdown memory files found in /agent/memory/")
         else:
-            selected_mem = st.selectbox("Select file", memory_files, key="mem_file_select")
+            selected_mem = st.selectbox(
+                "Select file", memory_files, key="mem_file_select"
+            )
             if selected_mem:
                 content = read_memory_file(selected_mem)
                 if content is None:
                     st.error(f"Could not read: {selected_mem}")
-                elif isinstance(content, dict) and content.get("__type__") == "image":
-                    _show_image(content["path"], selected_mem)
                 else:
-                    if selected_mem.endswith(".json"):
-                        st.code(content, language="json")
-                    elif selected_mem.endswith(".md"):
-                        st.markdown(content)
-                    else:
-                        st.code(content, language="text")
+                    fixed = re.sub(r"(?<![A-Za-z0-9_/])/agent/", "/_/agent/", content)
+                    st.markdown(fixed)
                     st.caption(f"Size: {len(content)} chars")

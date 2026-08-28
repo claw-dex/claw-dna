@@ -4,12 +4,16 @@ cycle_close.py — One-command cycle close automation.
 
 Automates the repetitive boilerplate from cycle-close.md:
   1. Marks the in-progress cycles.json entry as completed (computes duration)
-  2. Updates state.json (cycle_number, status, last_cycle_summary, last_cycle_type)
+  2. Updates state.json (cycle_number, status, last_cycle_summary; clears current_goal)
   3. Appends a journal entry to journal.json
   4. Normalizes cycles.json schema (inlined — no subprocess)
-  5. (Removed — outbox archiving is now manual via the portal)
-  6. Checks for stale tab/test/script counts and warns when drift is found
-  7. Auto-backs up memory files if last backup >1h old (inlined — no subprocess)
+  5. Archives inbox.json items to inbox_history.json, then clears inbox.json
+  6. Auto-backs up memory files if last backup >1h old (inlined — no subprocess)
+  7. Dispatches the long-term-memory flush in a detached background process
+     so the script returns immediately. The store becomes durable a few
+     seconds after "Done." prints. Logs to /agent/memory/.ltm_flush.log.
+     Use --no-bg-ltm to flush inline (e.g., when a downstream caller needs
+     the store fully written before exit).
   8. Reports what was written
 
 Usage:
@@ -17,7 +21,7 @@ Usage:
         --type evolve \\
         --category efficiency \\
         --summary "Built cycle_close.py to automate end-of-cycle boilerplate" \\
-        --actions "Built scripts/cycle_close.py" "Updated AGENTS.md" "Tested portal health" \\
+        --actions "Built scripts/cycle_close.py" "Tested portal health" \\
         --status completed
 
     # --cycle is OPTIONAL: auto-detected from state.json (state.cycle_number + 1)
@@ -27,41 +31,39 @@ Usage:
     uv run python scripts/cycle_close.py --help
 
 Required flags:
-    --type TYPE           Cycle type: evolve | goal | self-heal (see prompts/enum.md → Cycle Type)
+    --type TYPE           Cycle type: evolve | goal | self-heal | dream (see prompts/enum.md → Cycle Type)
     --summary TEXT        1-2 sentence summary of what was done and why it matters
 
 Optional flags:
     --cycle N             Cycle number (integer). Default: auto-detected from state.json
                             (state.cycle_number + 1, or max cycle in cycles.json + 1)
-    --category CAT        Evolve category (required when --type evolve):
+    --category CAT        Evolve / dream category (required when --type is evolve or dream):
                             reliability | observability | capability | efficiency | prompt_evolution
+                            | memory_consolidation | sleep
+                            (memory_consolidation and deep_sleep are dream-only)
     --actions TEXT…       One or more action strings (space-separated, each in quotes)
     --status STATUS       Cycle status: completed | failed (default: completed)
-    --goal TEXT           What you worked on (defaults to --summary)
+    --goal TEXT           What you set out to do. Defaults to `cycle_goal` on
+                          the in-progress cycle entry (set by cycle_start.py).
+                          Pass explicitly to override what cycle_start recorded.
+                          state.current_goal is the dynamic in-flight task and
+                          is NOT consulted here.
     --no-normalize        Skip cycles.json normalization after writing
+    --no-bg-ltm           Run the long-term-memory flush inline instead of in a
+                            detached background process (default: background)
     --dry-run             Print what would be written, but write nothing
 
 Exit codes: 0 = success, 1 = error (missing required args, write failure)
 
-Added in cycle 24 (efficiency): replaces manual Python one-liners at end of every cycle.
-Enhanced in cycle 66 (efficiency): fixed python3→uv run python.
-Enhanced in cycle 79 (efficiency): stub start uses state.last_heartbeat for accurate durations.
-Enhanced in cycle 86 (efficiency): --cycle is now optional (auto-detected from state.json).
-Enhanced in cycle 114 (prompt_evolution): auto stale-count check runs every cycle — warns when
-    tab count, test count, or script count in AGENTS.md/prompts diverges from actual values.
-Enhanced in cycle 117 (efficiency): test count cached by self_test.py mtime — avoids 1.4s
-    subprocess on cycles where self_test.py hasn't changed (typical case).
-Enhanced in cycle 119 (efficiency): inlined normalize_cycles and outbox-history logic —
-    eliminates 2 `uv run python` subprocesses per cycle (~150ms overhead removed).
-Enhanced in cycle 167 (efficiency): auto-backup memory files if last backup >1h old —
-    eliminates the recurring ⚠ STALE BACKUP warning in cycle_start.py.
+Enum Reference: See prompts/enum.md for agent status values and other enums.
 """
 
+import fcntl
 import json
-import glob as glob_mod
 import os
 import re
 import shutil
+import shlex
 import subprocess
 import sys
 from datetime import datetime, timezone, timedelta
@@ -69,46 +71,73 @@ from pathlib import Path
 
 MEMORY = Path("/agent/memory")
 SCRIPTS = Path("/agent/scripts")
+INBOX_FILE = Path("/agent/messages/inbox.json")
+INBOX_HISTORY_FILE = Path("/agent/messages/inbox_history.json")
 
 
 # ── Inlined: normalize_cycles logic ─────────────────────────────────────────
 
+
 def _normalize_cycle_entry(entry: dict) -> tuple:
     """Normalize a single cycles.json entry. Returns (normalized_entry, changes_count).
 
-    Handles legacy fields from early cycles:
+    Handles legacy fields:
       - "timestamp" → "start"
-      - "goal" → "summary"
+      - rename legacy keys to current schema (cycle → cycle_number,
+        status → cycle_status, type → cycle_type, category → cycle_category,
+        goal → cycle_goal) via repair_memory_files.migrate_cycle_entry
+      - drop "summary" — summaries live on journal.json now, mirroring them
+        onto cycles.json was redundant
       - computes duration_seconds when start+end present but duration missing
-      - adds default status/type if absent
+      - adds default cycle_status/cycle_type if absent
     """
+    from scripts.repair_memory_files import migrate_cycle_entry
+
     c = dict(entry)
     n = 0
 
     if "timestamp" in c and "start" not in c:
-        c["start"] = c.pop("timestamp"); n += 1
+        c["start"] = c.pop("timestamp")
+        n += 1
     elif "timestamp" in c:
-        del c["timestamp"]; n += 1
+        del c["timestamp"]
+        n += 1
 
-    if "goal" in c and "summary" not in c:
-        c["summary"] = c.pop("goal"); n += 1
-    elif "goal" in c and "summary" in c:
-        del c["goal"]; n += 1
+    # Apply schema-key renames (idempotent; counts a change if anything moved).
+    before_keys = set(c.keys())
+    migrate_cycle_entry(c)
+    if set(c.keys()) != before_keys:
+        n += 1
+
+    # "summary" no longer belongs on cycle records — it lives on journal.json.
+    if "summary" in c:
+        del c["summary"]
+        n += 1
 
     if "start" in c and "end" in c and "duration_seconds" not in c:
         try:
-            dur = round((datetime.fromisoformat(c["end"]) - datetime.fromisoformat(c["start"])).total_seconds(), 1)
-            c["duration_seconds"] = dur; n += 1
+            dur = round(
+                (
+                    datetime.fromisoformat(c["end"])
+                    - datetime.fromisoformat(c["start"])
+                ).total_seconds(),
+                1,
+            )
+            c["duration_seconds"] = dur
+            n += 1
         except (ValueError, TypeError):
             pass
 
-    if "status" not in c:
-        c["status"] = "completed"; n += 1
-    if "type" not in c:
-        c["type"] = "evolve"; n += 1
-    if "cycle" in c and not isinstance(c["cycle"], int):
+    if "cycle_status" not in c:
+        c["cycle_status"] = "completed"
+        n += 1
+    if "cycle_type" not in c:
+        c["cycle_type"] = "evolve"
+        n += 1
+    if "cycle_number" in c and not isinstance(c["cycle_number"], int):
         try:
-            c["cycle"] = int(c["cycle"]); n += 1
+            c["cycle_number"] = int(c["cycle_number"])
+            n += 1
         except (ValueError, TypeError):
             pass
 
@@ -140,7 +169,166 @@ def _run_normalize_inlined(cycles_path: Path, verbose: bool = True) -> int:
         return 0
 
 
+# ── Inbox archiving ─────────────────────────────────────────────────────────
+
+
+def _inbox_chunks_for_ltm(items: list) -> list:
+    """Convert archived inbox messages into ingest chunks (no I/O).
+
+    Returns a list of chunk dicts ready for ``memory_ingest.append_many``.
+    Skipped messages (too short / not a dict) are silently dropped to mirror
+    the previous per-message ingest semantics.
+    """
+    if not items:
+        return []
+    try:
+        from scripts.memory_ingest import transform_inbox_entry
+    except Exception as e:
+        print(f"  ⚠ inbox ltm — import skipped: {e}")
+        return []
+    out = []
+    for msg in items:
+        c = transform_inbox_entry(msg)
+        if c is not None:
+            out.append(c)
+    return out
+
+
+def _parse_iso(ts):
+    """Parse an ISO-8601 timestamp; return None if missing or unparseable."""
+    if not ts or not isinstance(ts, str):
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _is_pre_cycle_item(msg, cutoff_dt):
+    """True when an inbox item should be archived (predates the cycle start).
+
+    Items missing or with unparseable ``received_at`` are treated as
+    pre-existing (legacy items written before this field was required).
+    When ``cutoff_dt`` is None, falls back to archiving everything.
+    """
+    if cutoff_dt is None:
+        return True
+    if not isinstance(msg, dict):
+        return True
+    ra_dt = _parse_iso(msg.get("received_at"))
+    if ra_dt is None:
+        return True
+    return ra_dt <= cutoff_dt
+
+
+def _archive_inbox(
+    cycle_start_ts=None,
+    ingest_buffer: list = None,
+    cycle_number: int | None = None,
+):
+    """Archive pre-cycle items in /agent/messages/inbox.json to inbox_history.json.
+
+    Items whose ``received_at`` is on or before ``cycle_start_ts`` are archived
+    and ingested into long-term memory (best-effort). Items that arrived
+    mid-cycle (after ``cycle_start_ts``) are left in inbox.json so the next
+    cycle can process them.
+
+    When ``cycle_number`` is provided, each archived item gets ``cycle_number``
+    stamped on it (if absent) before being written to ``inbox_history.json`` and
+    converted to an ingest chunk, so the value is preserved on both the rebuild
+    path (read back from inbox_history.json) and the live append path.
+
+    All inbox read/partition/rewrite happens under an exclusive lock on
+    ``inbox.json.lock`` (the same lock used by ``services.shared.write_to_inbox``
+    and ``app.shared.AtomicJSON``), so concurrent appenders cannot have their
+    messages dropped or double-archived. inbox.json is rewritten *before*
+    inbox_history.json is updated, so a failure during rewrite cannot leave
+    items duplicated across both files.
+
+    Returns the number of items archived, or -1 on failure. Returns 0 when
+    inbox is missing or has no archivable items.
+    """
+    inbox_path = INBOX_FILE
+    history_path = INBOX_HISTORY_FILE
+    lock_path = str(inbox_path) + ".lock"
+
+    if not inbox_path.exists():
+        return 0
+
+    cutoff_dt = _parse_iso(cycle_start_ts)
+    to_archive = []
+
+    try:
+        with open(lock_path, "a+") as lock_f:
+            fcntl.flock(lock_f, fcntl.LOCK_EX)
+            try:
+                try:
+                    items = json.loads(inbox_path.read_text())
+                except Exception as e:
+                    print(f"  ⚠ inbox archive — failed to read inbox.json: {e}")
+                    return -1
+                if not isinstance(items, list) or not items:
+                    return 0
+
+                to_archive = [m for m in items if _is_pre_cycle_item(m, cutoff_dt)]
+                if not to_archive:
+                    return 0
+
+                kept = [m for m in items if not _is_pre_cycle_item(m, cutoff_dt)]
+
+                # Stamp the closing cycle number onto each archived message so
+                # the value travels into both inbox_history.json and the
+                # ingest chunk (transform_inbox_entry reads entry["cycle_number"]).
+                if cycle_number is not None:
+                    for m in to_archive:
+                        if isinstance(m, dict) and "cycle_number" not in m:
+                            m["cycle_number"] = cycle_number
+
+                # Rewrite inbox.json FIRST (still under the lock). If this
+                # fails we abort without touching history, so no duplicates.
+                tmp_inbox = inbox_path.with_suffix(inbox_path.suffix + ".tmp")
+                try:
+                    tmp_inbox.write_text(json.dumps(kept, indent=2))
+                    tmp_inbox.rename(inbox_path)
+                except Exception as e:
+                    tmp_inbox.unlink(missing_ok=True)
+                    print(f"  ⚠ inbox archive — failed to rewrite inbox.json: {e}")
+                    return -1
+            finally:
+                fcntl.flock(lock_f, fcntl.LOCK_UN)
+    except Exception as e:
+        print(f"  ⚠ inbox archive — lock acquisition failed: {e}")
+        return -1
+
+    # From here, inbox.json no longer contains the archived items. Append
+    # them to history and ingest into long-term memory (best-effort, non-fatal).
+    history = []
+    if history_path.exists():
+        try:
+            loaded = json.loads(history_path.read_text())
+        except Exception as e:
+            print(f"  ⚠ inbox archive — failed to read inbox_history.json: {e}")
+            return -1
+        if not isinstance(loaded, list):
+            print(
+                "  ⚠ inbox archive — inbox_history.json is not a list; aborting to avoid overwriting"
+            )
+            return -1
+        history = loaded
+
+    history.extend(to_archive)
+    write_atomic(history_path, history)
+
+    # Buffer the archived items for the single end-of-cycle long-term-memory write.
+    # If no buffer is provided, fall through silently — main() owns the flush.
+    if ingest_buffer is not None:
+        ingest_buffer.extend(_inbox_chunks_for_ltm(to_archive))
+
+    return len(to_archive)
+
+
 # ── Argument parsing (no external deps) ─────────────────────────────────────
+
 
 def parse_args(argv):
     args = argv[1:]
@@ -153,6 +341,7 @@ def parse_args(argv):
         "actions": [],
         "status": "completed",
         "no_normalize": False,
+        "no_bg_ltm": False,
         "dry_run": False,
         "help": False,
     }
@@ -190,6 +379,8 @@ def parse_args(argv):
             continue
         elif a == "--no-normalize":
             result["no_normalize"] = True
+        elif a == "--no-bg-ltm":
+            result["no_bg_ltm"] = True
         elif a == "--dry-run":
             result["dry_run"] = True
         i += 1
@@ -222,148 +413,15 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-# ── Stale-count check ────────────────────────────────────────────────────────
-
-def check_stale_counts():
-    """Auto-detect mismatched counts in AGENTS.md and prompts.
-
-    Recurring failure mode: cycle adds a tab/script but AGENTS.md and
-    server.md still show the old number. This check runs every cycle so
-    drift is caught immediately rather than lingering until the next
-    prompt_evolution cycle.
-
-    Prints a warning with exact fix commands only when a mismatch is found.
-    Silent (no output) when everything matches — avoids noise in normal runs.
-    """
-    issues = []
-
-    # ── 1. Tab count ─────────────────────────────────────────────────────────
-    server_py = Path("/agent/server.py")
-    if server_py.exists():
-        src = server_py.read_text()
-        idx = src.find("TAB_REGISTRY = [")
-        if idx != -1:
-            body = src[idx:]
-            actual_tabs = body[: body.find("]")].count("(")
-        else:
-            actual_tabs = None
-
-        if actual_tabs is not None:
-            # Check prompts/server.md for tab count references
-            server_md = Path("/agent/prompts/server.md")
-            if server_md.exists():
-                md_text = server_md.read_text()
-                matches = re.findall(r"(\d+)\s+tab", md_text)
-                for m in matches:
-                    if int(m) != actual_tabs:
-                        issues.append(
-                            f"  ⚠ Tab count mismatch: server.md says '{m} tab*' but "
-                            f"TAB_REGISTRY has {actual_tabs} tabs"
-                        )
-                        break
-
-            # Check AGENTS.md for tab count
-            agents_md = Path("/agent/AGENTS.md")
-            if agents_md.exists():
-                md_text = agents_md.read_text()
-                matches = re.findall(r"(\d+)\s+tabs?\s+total", md_text)
-                for m in matches:
-                    if int(m) != actual_tabs:
-                        issues.append(
-                            f"  ⚠ Tab count mismatch: AGENTS.md says '{m} tabs total' but "
-                            f"TAB_REGISTRY has {actual_tabs} tabs"
-                        )
-                        break
-
-    # ── 2. Self-test count ───────────────────────────────────────────────────
-    self_test = Path("/agent/scripts/self_test.py")
-    error_triage = Path("/agent/prompts/error-triage.md")
-    self_heal_md = Path("/agent/prompts/self-heal.md")
-
-    if self_test.exists():
-        # Get test count using mtime-based cache to avoid 1.4s subprocess on every cycle.
-        # Cache file: /agent/memory/self_test_count.json → {mtime: float, count: int}
-        # Only re-runs self_test.py when the file has actually changed.
-        _count_cache = MEMORY / "self_test_count.json"
-        actual_tests = None
-        try:
-            current_mtime = self_test.stat().st_mtime
-            # Check cache
-            cached = None
-            if _count_cache.exists():
-                try:
-                    cached = json.loads(_count_cache.read_text())
-                except Exception:
-                    cached = None
-            if cached and abs(cached.get("mtime", 0) - current_mtime) < 0.001:
-                # Cache hit — self_test.py unchanged, use stored count
-                actual_tests = cached.get("count")
-            else:
-                # Cache miss — run self_test and cache result
-                try:
-                    if "/agent" not in sys.path:
-                        sys.path.insert(0, "/agent")
-                    import importlib.util
-                    spec = importlib.util.spec_from_file_location("self_test", str(self_test))
-                    self_test_mod = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(self_test_mod)
-                    self_test_mod.run_all()
-                    actual_tests = len(self_test_mod.results)
-                    if actual_tests:
-                        _count_cache.write_text(json.dumps({"mtime": current_mtime, "count": actual_tests}))
-                except Exception:
-                    pass
-        except Exception:
-            actual_tests = None
-
-        if actual_tests is not None:
-            for prompt_path in [error_triage, self_heal_md]:
-                if prompt_path.exists():
-                    prompt_text = prompt_path.read_text()
-                    matches = re.findall(r"(\d+)[\s-]test", prompt_text)
-                    for pm in matches:
-                        if int(pm) != actual_tests:
-                            issues.append(
-                                f"  ⚠ Test count mismatch: {prompt_path.name} says '{pm} test*' but "
-                                f"self_test.py reports {actual_tests} tests — update the prompt"
-                            )
-                            break  # one warning per file is enough
-
-    # ── 3. Script count ──────────────────────────────────────────────────────
-    scripts_dir = Path("/agent/scripts")
-    if scripts_dir.exists():
-        actual_scripts = len(
-            glob_mod.glob(str(scripts_dir / "*.py")) +
-            glob_mod.glob(str(scripts_dir / "*.sh"))
-        )
-        agents_md = Path("/agent/AGENTS.md")
-        if agents_md.exists():
-            md_text = agents_md.read_text()
-            # Look for "N scripts" patterns in capabilities section
-            matches = re.findall(r"(\d+)\s+scripts?\b", md_text)
-            for m in matches:
-                if int(m) != actual_scripts and abs(int(m) - actual_scripts) > 1:
-                    issues.append(
-                        f"  ⚠ Script count: AGENTS.md references '{m} scripts' but "
-                        f"/agent/scripts/ has {actual_scripts} files — run sync-capabilities.py"
-                    )
-                    break
-
-    # ── Output ───────────────────────────────────────────────────────────────
-    if issues:
-        print("\n[STALE COUNTS DETECTED] Fix before closing:")
-        for issue in issues:
-            print(issue)
-        print("  → Update AGENTS.md and prompts/ to match actual counts (takes ~30s)")
-    # Silent when all counts match
-
-
 # ── Auto-backup ──────────────────────────────────────────────────────────────
 
-# Files to backup (mirrors BACKUP_FILES + OPTIONAL_FILES in memory_backup.py)
+# Files included in each cycle-close memory snapshot.
 _BACKUP_FILES = [
-    "state.json", "cycles.json",
-    "goal.json", "journal.json", "server_errors.json", "command_history.json",
+    "state.json",
+    "cycles.json",
+    "goal.json",
+    "journal.json",
+    "server_errors.json",
     "bootstrap.json",
 ]
 _BACKUP_OPTIONAL = []
@@ -372,15 +430,12 @@ _BACKUP_OPTIONAL = []
 def _auto_backup_if_stale(dry_run: bool = False) -> None:
     """Create a memory backup if the last one is >1h old.
 
-    Inlined to avoid subprocess overhead (~100ms for uv run python memory_backup.py).
-    Mirrors the core logic of memory_backup.py: create a timestamped snapshot dir,
-    copy critical files, prune if >20 backups exist.
-
-    cycle_start.py shows ⚠ STALE when the last backup is >1h old. Running this
-    at cycle-close time keeps that warning quiet and protects against data loss.
+    Creates a timestamped snapshot dir, copies critical files, prunes if >20
+    backups exist. cycle_start.py shows ⚠ STALE when the last backup is >1h
+    old; running this at cycle-close keeps that warning quiet.
     """
-    backup_root = MEMORY / "backups"
-    backup_root.mkdir(exist_ok=True)
+    backup_root = Path("/agent/backup/memory")
+    backup_root.mkdir(parents=True, exist_ok=True)
 
     # Find the most recent backup by listing dirs (format: YYYYMMDDTHHMMSSZ)
     existing = sorted(
@@ -391,8 +446,12 @@ def _auto_backup_if_stale(dry_run: bool = False) -> None:
     if existing:
         latest = existing[-1]
         try:
-            latest_dt = datetime.strptime(latest.name, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
-            last_backup_age_secs = (datetime.now(timezone.utc) - latest_dt).total_seconds()
+            latest_dt = datetime.strptime(latest.name, "%Y%m%dT%H%M%SZ").replace(
+                tzinfo=timezone.utc
+            )
+            last_backup_age_secs = (
+                datetime.now(timezone.utc) - latest_dt
+            ).total_seconds()
         except ValueError:
             pass
 
@@ -403,9 +462,12 @@ def _auto_backup_if_stale(dry_run: bool = False) -> None:
         return
 
     if dry_run:
-        print(f"  [dry-run] backup — would create snapshot (last backup "
-              f"{int(last_backup_age_secs/60)}m ago)" if last_backup_age_secs else
-              f"  [dry-run] backup — would create snapshot (no prior backup)")
+        print(
+            f"  [dry-run] backup — would create snapshot (last backup "
+            f"{int(last_backup_age_secs/60)}m ago)"
+            if last_backup_age_secs
+            else f"  [dry-run] backup — would create snapshot (no prior backup)"
+        )
         return
 
     # Create timestamped snapshot directory
@@ -432,56 +494,367 @@ def _auto_backup_if_stale(dry_run: bool = False) -> None:
         shutil.rmtree(str(old), ignore_errors=True)
         pruned += 1
 
-    age_str = f"{int(last_backup_age_secs/60)}m ago" if last_backup_age_secs else "first backup"
+    age_str = (
+        f"{int(last_backup_age_secs/60)}m ago"
+        if last_backup_age_secs
+        else "first backup"
+    )
     prune_str = f", pruned {pruned}" if pruned else ""
     print(f"  ✓ backup — created {ts} ({copied} files{prune_str}; last was {age_str})")
 
 
 # ── Auto Memory Sync ──────────────────────────────────────────────────────
 
+
 def _sync_auto_memory() -> None:
-    """Sync JSON memory → .md files via memory_sync.py.
+    """Sync JSON memory → .md files via sync_memory_files.py.
 
     Non-fatal: if sync fails, cycle-close prints a warning but exits 0.
     """
     try:
-        if "/agent" not in sys.path:
-            sys.path.insert(0, "/agent")
-        from scripts.memory_sync import sync_all
+        from scripts.sync_memory_files import sync_all
+
         sync_all()
-        print(f"  ✓ auto memory — synced via memory_sync.py")
+        print(f"  ✓ auto memory — synced via sync_memory_files.py")
     except Exception as e:
         print(f"  ⚠ auto memory sync failed (non-fatal): {e}")
 
 
-# ── Long-term memory (memvid via memory_ingest.py) ───────────────────────────
+# ── Long-term memory (LanceDB via memory_ingest.py) ─────────────────────────
 
-def _store_to_memvid(journal_entry: dict) -> None:
-    """Store a journal entry into long-term semantic memory via memory_ingest.py.
 
-    Calls memory_ingest.py --append-json with the journal entry JSON. Uses the memvid
-    CLI with bge-base embeddings (no Python SDK or fastembed dependency needed).
+def _entry_chunks_for_ltm(entry: dict) -> list:
+    """Convert a cycle/journal/goal entry into ingest chunks (no I/O).
 
-    Non-fatal: if the ingest fails, prints a warning but exits normally.
+    Routes through ``memory_ingest._detect_and_transform`` so the chunk
+    schema matches the rebuild path exactly. Returns ``[]`` on import
+    failure or when the entry produced no ingestible chunk.
     """
-    cycle = journal_entry.get("cycle", "?")
-    entry_json = json.dumps(journal_entry)
+    if not entry:
+        return []
+    try:
+        from scripts.memory_ingest import _detect_and_transform
+    except Exception as e:
+        print(f"  ⚠ ltm — import skipped: {e}")
+        return []
+    try:
+        chunk = _detect_and_transform(entry)
+    except Exception as e:
+        print(f"  ⚠ ltm — transform failed: {e}")
+        return []
+    return [chunk] if chunk is not None else []
+
+
+def _flush_ltm_buffer(chunks: list) -> None:
+    """Write all buffered chunks to the store in a single batched write.
+
+    cycle_close batches every record it would ingest (inbox messages +
+    journal entry) into a single buffer and flushes them here at the end
+    of the cycle. Cycle records are not buffered — cycles.json is excluded
+    from long-term memory.
+
+    ``append_many`` embeds the whole batch in one pass and writes it in one
+    transaction, then rebuilds the search indexes once enough rows have
+    accumulated outside them.
+
+    On first run the store doesn't exist; we run a one-shot ``build()`` from
+    the source JSON files (journal/journal_archive/inbox_history). Steps 1,
+    3, and 5 of ``main()`` have already flushed those files to disk, so
+    build() ingests this cycle's records via the source JSON. The buffered
+    chunks are therefore **intentionally discarded** on this branch —
+    re-ingesting them would be redundant.
+    """
+    try:
+        from scripts.memory_ingest import (
+            DEFAULT_DB,
+            append_many,
+            build,
+            store_ready,
+        )
+    except Exception as e:
+        print(f"  ⚠ ltm — import skipped: {e}")
+        return
+
+    # Ask the store, not the filesystem: an empty or half-removed .lancedb/
+    # directory exists but holds no table, and treating that as "already built"
+    # would make every future flush a silent no-op.
+    try:
+        ready = store_ready(DEFAULT_DB)
+    except Exception as e:
+        print(f"  ⚠ ltm — store unreadable ({e}); skipping ingest")
+        return
+
+    if not ready:
+        try:
+            build(MEMORY, DEFAULT_DB, quiet=True)
+            print(
+                f"  ✓ ltm — built new {DEFAULT_DB.name} "
+                f"(this cycle's records included via source JSON)"
+            )
+            return
+        except SystemExit as e:
+            print(f"  ⚠ ltm — build failed (exit {e.code}); skipping ingest")
+            return
+        except Exception as e:
+            print(f"  ⚠ ltm — build failed: {e}; skipping ingest")
+            return
+
+    if not chunks:
+        return
 
     try:
-        if "/agent" not in sys.path:
-            sys.path.insert(0, "/agent")
-        from scripts.memory_ingest import append_json, DEFAULT_MV2
-        append_json(DEFAULT_MV2, entry_json, quiet=True)
-        print(f"  ✓ memvid — stored cycle {cycle} to long_term_memory.mv2")
+        ok, fail = append_many(DEFAULT_DB, chunks, quiet=True)
+        if ok == 0:
+            # chunks is non-empty here, so writing nothing means the store
+            # refused the batch. Say so — a success marker would hide the loss.
+            print(f"  ⚠ ltm — wrote 0 of {len(chunks)} chunk(s); nothing ingested")
+            return
+        msg = f"  ✓ ltm — wrote {ok} chunk(s)"
+        if fail:
+            msg += f" ({fail} failed)"
+        print(msg)
     except SystemExit as e:
-        print(f"  ⚠ memvid store failed (non-fatal): exit {e.code}")
+        print(f"  ⚠ ltm flush — exit {e.code}")
     except Exception as e:
-        print(f"  ⚠ memvid store failed (non-fatal): {e}")
+        print(f"  ⚠ ltm flush — failed: {e}")
+
+
+# ── Background flush dispatcher ──────────────────────────────────────────────
+
+
+def _sweep_stale_ltm_buffers() -> None:
+    """Delete leftover buffer temp files older than 1h.
+
+    Defensive cleanup in case a prior background child died before unlinking
+    its buffer. The legacy `.memvid_buffer_*` glob is swept too so buffers
+    staged by the previous backend before an upgrade don't linger forever.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+    try:
+        stale = list(MEMORY.glob(".ltm_buffer_*.json")) + list(
+            MEMORY.glob(".memvid_buffer_*.json")
+        )
+        for p in stale:
+            try:
+                mtime = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)
+                if mtime < cutoff:
+                    p.unlink(missing_ok=True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _dispatch_ltm_flush_bg(chunks: list, cycle_n: int) -> None:
+    """Spawn a detached subprocess to run ``_flush_ltm_buffer`` and return.
+
+    Cycle-close has no remaining steps after the memory flush, so blocking on
+    its 5–10s commit just delays the user-facing "done" message. We stage the
+    chunks to a JSON temp file and launch a detached child process to run the
+    actual flush in the background. Failures fall back to an inline flush.
+    """
+    try:
+        from scripts.memory_ingest import DEFAULT_DB
+    except Exception as e:
+        print(f"  ⚠ ltm bg — import failed ({e}); flushing inline")
+        _flush_ltm_buffer(chunks)
+        return
+
+    if not chunks and DEFAULT_DB.exists():
+        return
+
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    buf_path = MEMORY / f".ltm_buffer_{cycle_n}_{ts}.json"
+    log_path = MEMORY / ".ltm_flush.log"
+
+    try:
+        buf_path.write_text(json.dumps(chunks))
+    except Exception as e:
+        print(f"  ⚠ ltm bg — failed to stage buffer ({e}); flushing inline")
+        _flush_ltm_buffer(chunks)
+        return
+
+    try:
+        with open(log_path, "ab") as log_f:
+            proc = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "--__flush-ltm",
+                    str(buf_path),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=log_f,
+                stderr=log_f,
+                start_new_session=True,
+                close_fds=True,
+            )
+        print(
+            f"  ✓ ltm — flush dispatched in background "
+            f"(pid={proc.pid}, durable in ~5–10s, log={log_path})"
+        )
+    except Exception as e:
+        print(f"  ⚠ ltm bg — spawn failed ({e}); flushing inline")
+        buf_path.unlink(missing_ok=True)
+        _flush_ltm_buffer(chunks)
+
+
+def _tick_nudge_counters() -> None:
+    """Increment cycles_since_skill_{review,create} by 1, under an exclusive
+    file lock so it can't race with `skill_manage create/patch` resetting the
+    same counters. Quiet on any error — nudges.json is non-essential context
+    and must never fail cycle-close.
+    """
+    try:
+        from scripts.skill_manage import _mutate_nudges
+
+        def _tick(data):
+            for k in ("cycles_since_skill_review", "cycles_since_skill_create"):
+                data[k] = int(data.get(k, 0)) + 1
+
+        _mutate_nudges(_tick)
+    except Exception:
+        pass
+
+
+_SKILL_BUMP_DELAY_SECS = 30
+
+
+def _dispatch_skill_bump_bg(cycle_n: int) -> None:
+    """Spawn a detached subprocess that sleeps then runs `skill_manage
+    bump-usage`. The delay (default 30s) gives the transcript writer time
+    to flush the final entries of this cycle to disk before parsing kicks
+    in — without it, the bump would routinely miss the tail of long cycles.
+
+    Best-effort: any failure (missing transcript, import error, parse error)
+    is silently absorbed so cycle-close stays atomic. Mirrors the memory
+    flush dispatch pattern.
+    """
+    script = SCRIPTS / "skill_manage.py"
+    if not script.exists():
+        return
+    log_path = MEMORY / ".skill_bump.log"
+    cmd = (
+        f"sleep {_SKILL_BUMP_DELAY_SECS} && "
+        f"{shlex.quote(sys.executable)} {shlex.quote(str(script))} "
+        f"bump-usage --cycle {int(cycle_n)}"
+    )
+    try:
+        with open(log_path, "ab") as log_f:
+            proc = subprocess.Popen(
+                ["/bin/sh", "-c", cmd],
+                stdin=subprocess.DEVNULL,
+                stdout=log_f,
+                stderr=log_f,
+                start_new_session=True,
+                close_fds=True,
+            )
+        print(
+            f"  ✓ skill bump — dispatched in background "
+            f"(pid={proc.pid}, delay={_SKILL_BUMP_DELAY_SECS}s, log={log_path})"
+        )
+    except Exception as e:
+        print(f"  ⚠ skill bump — spawn failed ({e}); skipping")
+
+
+def _dispatch_metrics_refresh_bg() -> None:
+    """Spawn a detached `metrics_db.py --refresh` so the portal sees this cycle.
+
+    The metrics_daemon already polls, but a cycle close is exactly when every
+    Overview metric changes at once — refreshing here removes the poll-interval
+    lag. Best-effort: cycle-close never blocks on or fails because of it.
+    """
+    script = SCRIPTS / "metrics_db.py"
+    if not script.exists():
+        return
+    log_path = MEMORY / ".metrics_refresh.log"
+    try:
+        with open(log_path, "ab") as log_f:
+            proc = subprocess.Popen(
+                [sys.executable, str(script), "--refresh"],
+                stdin=subprocess.DEVNULL,
+                stdout=log_f,
+                stderr=log_f,
+                start_new_session=True,
+                close_fds=True,
+            )
+        print(f"  ✓ metrics refresh — dispatched in background (pid={proc.pid})")
+    except Exception as e:
+        print(f"  ⚠ metrics refresh — spawn failed ({e}); skipping")
+
+
+def _flush_ltm_child(buf_path: Path) -> int:
+    """Background-mode entry point: load chunks and flush them under a lock.
+
+    Holds an exclusive ``flock`` on ``MEMORY/.ltm_flush.lock`` for the duration
+    of the flush so a back-to-back cycle-close can't have two children writing
+    the same store concurrently. The lock lives beside the store rather than
+    inside it, because the store is a directory that --build swaps wholesale.
+    The lock waits rather than fails — cycles are sequential in normal
+    operation, so contention is rare and serialization is the correct behavior.
+    """
+
+    started = datetime.now(timezone.utc).isoformat()
+    print(f"[{started}] ltm bg flush starting (buf={buf_path.name})", flush=True)
+
+    # Validate buf_path: must live under MEMORY and match the staging pattern.
+    # The flag is internal, but defending against a stray invocation prevents
+    # the finally-block unlink from touching arbitrary files.
+    try:
+        resolved = buf_path.resolve()
+        if (
+            resolved.parent != MEMORY.resolve()
+            or not resolved.name.startswith(".ltm_buffer_")
+            or not resolved.name.endswith(".json")
+        ):
+            print(
+                f"[{started}] ⚠ bg flush — refusing buf path outside MEMORY: {resolved}",
+                flush=True,
+            )
+            return 1
+    except Exception as e:
+        print(f"[{started}] ⚠ bg flush — buf path validation failed: {e}", flush=True)
+        return 1
+
+    try:
+        chunks = json.loads(buf_path.read_text()) if buf_path.exists() else []
+    except Exception as e:
+        print(f"[{started}] ⚠ bg flush — failed to read buffer: {e}", flush=True)
+        chunks = []
+
+    lock_path = str(MEMORY / ".ltm_flush.lock")
+    rc = 0
+    try:
+        with open(lock_path, "a+") as lock_f:
+            fcntl.flock(lock_f, fcntl.LOCK_EX)
+            try:
+                _flush_ltm_buffer(chunks)
+            finally:
+                fcntl.flock(lock_f, fcntl.LOCK_UN)
+    except Exception as e:
+        print(f"[{started}] ⚠ bg flush — failed: {e}", flush=True)
+        rc = 1
+    finally:
+        try:
+            buf_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        ended = datetime.now(timezone.utc).isoformat()
+        print(f"[{ended}] ltm bg flush done (rc={rc})", flush=True)
+    return rc
 
 
 # ── Main ────────────────────────────────────────────────────────────────────
 
+
 def main():
+    # Internal re-entry: background long-term-memory flush spawned by
+    # _dispatch_ltm_flush_bg. Runs only the flush, then exits.
+    if len(sys.argv) >= 3 and sys.argv[1] == "--__flush-ltm":
+        sys.exit(_flush_ltm_child(Path(sys.argv[2])))
+
+    _sweep_stale_ltm_buffers()
+
     opts = parse_args(sys.argv)
 
     if opts["help"]:
@@ -490,34 +863,61 @@ def main():
 
     # Validate required args
     if not opts["type"]:
-        die("--type TYPE is required (evolve | goal | self-heal)")
+        die("--type TYPE is required (evolve | goal | self-heal | dream)")
     if not opts["summary"]:
         die("--summary TEXT is required")
-    if opts["type"] == "evolve" and not opts["category"]:
-        die("--category CAT is required when --type is evolve")
+    if opts["type"] in ("evolve", "dream") and not opts["category"]:
+        die(f"--category CAT is required when --type is {opts['type']}")
 
-    valid_types = {"evolve", "goal", "self-heal"}
+    valid_types = {"evolve", "goal", "self-heal", "dream"}
     if opts["type"] not in valid_types:
         die(f"--type must be one of: {', '.join(sorted(valid_types))}")
 
-    valid_cats = {"reliability", "observability", "capability", "efficiency", "prompt_evolution"}
-    if opts["category"] and opts["category"] not in valid_cats:
-        die(f"--category must be one of: {', '.join(sorted(valid_cats))}")
+    evolve_cats = {
+        "reliability",
+        "observability",
+        "capability",
+        "efficiency",
+        "prompt_evolution",
+    }
+    dream_cats = {"memory_consolidation", "deep_sleep"}
+    valid_cats = evolve_cats | dream_cats
+    if opts["category"]:
+        if opts["category"] not in valid_cats:
+            die(f"--category must be one of: {', '.join(sorted(valid_cats))}")
+        if opts["type"] == "evolve" and opts["category"] not in evolve_cats:
+            die(
+                f"--category {opts['category']} is dream-only; evolve cycles must use one of: "
+                f"{', '.join(sorted(evolve_cats))}"
+            )
+        if opts["type"] == "dream" and opts["category"] not in dream_cats:
+            die(
+                f"--category {opts['category']} is evolve-only; dream cycles must use one of: "
+                f"{', '.join(sorted(dream_cats))}"
+            )
 
     valid_statuses = {"completed", "failed"}
     if opts["status"] not in valid_statuses:
         die(f"--status must be one of: {', '.join(sorted(valid_statuses))}")
 
     now = now_iso()
-    goal_text = opts["goal"] or opts["summary"]
+    # Resolution order: explicit --goal > cycle_entry.cycle_goal (set by
+    # cycle_start.py at the start of the cycle) > legacy cycle_entry.goal
+    # (in-progress entries written before the cycle_goal rename). Never fall
+    # back to --summary — goal (planned) and summary (delivered) are
+    # different concepts. We deliberately do NOT read state.current_goal:
+    # the agent may rewrite it mid-cycle as it picks up sub-tasks, but the
+    # journal entry should record the original cycle goal, not the last
+    # in-flight task.
+    goal_text = opts["goal"]
 
     # ── Load existing data ───────────────────────────────────────────────────
     cycles_path = MEMORY / "cycles.json"
-    state_path  = MEMORY / "state.json"
+    state_path = MEMORY / "state.json"
     journal_path = MEMORY / "journal.json"
 
-    cycles  = load_json(cycles_path)
-    state   = load_json(state_path)
+    cycles = load_json(cycles_path)
+    state = load_json(state_path)
     journal = load_json(journal_path)
 
     if not isinstance(cycles, list):
@@ -527,28 +927,54 @@ def main():
     if not isinstance(journal, list):
         die("journal.json is not a list")
 
+    # Migrate legacy field names in memory before any reads so the rest of
+    # this function only sees the current schema. Disk gets rewritten when
+    # we save updates below.
+    from scripts.repair_memory_files import (
+        migrate_cycles_list,
+        migrate_journal_list,
+        migrate_state_dict,
+    )
+
+    migrate_state_dict(state)
+    migrate_cycles_list(cycles)
+    migrate_journal_list(journal)
+
     # ── Auto-detect cycle number if not provided ─────────────────────────────
     if opts["cycle"] is None:
-        # Use state.cycle_number + 1 as the current cycle.
-        # state.cycle_number holds the LAST COMPLETED cycle, so the running
-        # cycle is always +1. Fall back to max(cycles)+1 if state is missing.
-        state_cycle = state.get("cycle_number")
-        if state_cycle is not None and isinstance(state_cycle, int):
-            detected = state_cycle + 1
-        elif cycles:
-            detected = max(c.get("cycle", 0) for c in cycles) + 1
+        # Prefer the most recent in_progress entry — cycle_start.py always writes one.
+        # This is immune to state.cycle_number being pre-updated by the agent.
+        ip_entries = [
+            c
+            for c in cycles
+            if c.get("cycle_status") == "in_progress" and c.get("cycle_number")
+        ]
+        if ip_entries:
+            detected = max(c["cycle_number"] for c in ip_entries)
+            print(
+                f"  ℹ  --cycle not specified — auto-detected from in_progress entry: {detected}"
+            )
         else:
-            detected = 1
+            # Fallback: state.cycle_number + 1 (no in_progress entry means cycle_start.py didn't run)
+            state_cycle = state.get("cycle_number")
+            if state_cycle is not None and isinstance(state_cycle, int):
+                detected = state_cycle + 1
+            elif cycles:
+                detected = max(c.get("cycle_number", 0) for c in cycles) + 1
+            else:
+                detected = 1
+            print(
+                f"  ℹ  --cycle not specified — auto-detected from state: {detected} "
+                f"(no in_progress entry found)"
+            )
         opts["cycle"] = detected
-        print(f"  ℹ  --cycle not specified — auto-detected: {detected} "
-              f"(state.cycle_number={state_cycle})")
 
     cycle_n = opts["cycle"]
 
     # ── Find this cycle's entry and compute duration ─────────────────────────
     cycle_entry = None
     for c in cycles:
-        if c.get("cycle") == cycle_n:
+        if c.get("cycle_number") == cycle_n:
             cycle_entry = c
             break
 
@@ -558,13 +984,20 @@ def main():
         # `now` only if state.json is missing or corrupt (gives duration=0 in that case).
         stub_start = state.get("last_cycle_run") or state.get("last_heartbeat") or now
         cycle_entry = {
-            "cycle": cycle_n,
+            "cycle_number": cycle_n,
             "start": stub_start,
-            "type": opts["type"],
-            "status": "in_progress",
+            "cycle_type": opts["type"],
+            "cycle_status": "in_progress",
         }
         cycles.append(cycle_entry)
-        print(f"  ⚠  No existing entry for cycle {cycle_n} — created stub (start={stub_start[:19]})")
+        print(
+            f"  ⚠  No existing entry for cycle {cycle_n} — created stub (start={stub_start[:19]})"
+        )
+
+    # Pull goal from the in-progress cycle entry (written by cycle_start.py
+    # under the `cycle_goal` field) when --goal wasn't passed at close time.
+    if not goal_text:
+        goal_text = cycle_entry.get("cycle_goal")
 
     start_ts = cycle_entry.get("start")
     duration = None
@@ -576,44 +1009,53 @@ def main():
             pass
 
     # ── Build updated values ─────────────────────────────────────────────────
+    # `summary` is intentionally omitted — it lives on the journal entry and
+    # mirroring it onto cycles.json was redundant.
     cycle_update = {
         "end": now,
-        "status": opts["status"],
-        "summary": opts["summary"],
-        "type": opts["type"],
+        "cycle_status": opts["status"],
+        "cycle_type": opts["type"],
     }
     if opts["category"]:
-        cycle_update["category"] = opts["category"]
+        cycle_update["cycle_category"] = opts["category"]
     if duration is not None:
         cycle_update["duration_seconds"] = duration
 
+    # state.current_goal is the dynamic in-flight sub-task (the agent
+    # rewrites it mid-cycle as it picks up tasks). Cycle is now idle, so
+    # clear it to None — the planned cycle goal already lives on
+    # cycles.json:cycle_goal and on the journal entry. The next cycle's
+    # agent will repopulate current_goal as soon as it picks up a sub-task.
     state_update = {
         "cycle_number": cycle_n,
-        "status": "idle",
-        "current_goal": goal_text if goal_text else None,
+        "agent_status": "idle",
+        "current_goal": None,
         "last_cycle_summary": opts["summary"],
-        "last_cycle_type": opts["type"],
-        "last_cycle_end": now,
     }
-    if opts["category"]:
-        state_update["last_cycle_category"] = opts["category"]
 
     journal_entry = {
-        "cycle": cycle_n,
+        "cycle_number": cycle_n,
         "timestamp": now,
-        "status": opts["status"],
-        "type": opts["type"],
-        "goal": goal_text,
+        "cycle_status": opts["status"],
+        "cycle_type": opts["type"],
         "actions": opts["actions"],
         "summary": opts["summary"],
     }
+    # Record the planned goal on the journal entry. Resolution already
+    # preferred --goal over cycle_entry.cycle_goal above; we just persist it
+    # if anything was found. --goal at close acts as an explicit override of
+    # whatever cycle_start.py recorded.
+    if goal_text:
+        journal_entry["cycle_goal"] = goal_text
     if opts["category"]:
-        journal_entry["category"] = opts["category"]
+        journal_entry["cycle_category"] = opts["category"]
 
     # ── Print plan ───────────────────────────────────────────────────────────
-    print(f"\n[cycle-close] Cycle {cycle_n} — {opts['type']}" +
-          (f" / {opts['category']}" if opts['category'] else "") +
-          f" — {opts['status']}")
+    print(
+        f"\n[cycle-close] Cycle {cycle_n} — {opts['type']}"
+        + (f" / {opts['category']}" if opts["category"] else "")
+        + f" — {opts['status']}"
+    )
     if duration is not None:
         m, s = divmod(duration, 60)
         print(f"  Duration:  {m}m {s}s ({duration}s)")
@@ -631,6 +1073,12 @@ def main():
         sys.exit(0)
 
     # ── Apply updates ────────────────────────────────────────────────────────
+    # All long-term-memory writes for this cycle are buffered into one list
+    # and flushed as a single batch at the end. Each write is a new table
+    # version, and each batch pays one embedding pass — batching keeps both
+    # the version count and the embedding cost down.
+    ltm_buffer: list = []
+
     # 1. Update cycles.json
     cycle_entry.update(cycle_update)
     write_atomic(cycles_path, cycles)
@@ -642,9 +1090,15 @@ def main():
     print(f"  ✓ state.json updated (cycle_number={cycle_n})")
 
     # 3. Append journal entry
-    journal.append(journal_entry)
-    write_atomic(journal_path, journal)
-    print(f"  ✓ journal.json — appended entry (total: {len(journal)})")
+    already_in_journal = any(e.get("cycle_number") == cycle_n for e in journal)
+    if already_in_journal:
+        print(
+            f"  ⚠ journal.json — entry for cycle {cycle_n} already exists, skipping duplicate write"
+        )
+    else:
+        journal.append(journal_entry)
+        write_atomic(journal_path, journal)
+        print(f"  ✓ journal.json — appended entry (total: {len(journal)})")
 
     # 4. Normalize cycles (optional) — inlined to avoid subprocess overhead
     if not opts["no_normalize"]:
@@ -657,20 +1111,48 @@ def main():
         except Exception as e:
             print(f"  ⚠ normalize failed (non-fatal): {e}")
 
-    # 5. (Removed) Outbox archiving is now manual via the portal's "Clear All" button,
-    #    which archives to outbox_history.json before clearing.
+    # 5. Archive inbox.json → inbox_history.json (goal cycles only;
+    #    evolve/self-heal/dream cycles must not touch inbox so pending user commands survive)
+    if opts["type"] == "goal":
+        archived_n = _archive_inbox(
+            cycle_start_ts=cycle_entry.get("start"),
+            ingest_buffer=ltm_buffer,
+            cycle_number=cycle_n,
+        )
+        if archived_n > 0:
+            print(
+                f"  ✓ inbox archive — {archived_n} pre-cycle item(s) appended to inbox_history.json; mid-cycle arrivals carried forward"
+            )
+        elif archived_n < 0:
+            print(
+                "  ⚠ inbox archive — FAILED; inbox left intact for next cycle to retry"
+            )
 
-    # 6. Stale-count check (always — catches drift from any cycle type)
-    check_stale_counts()
-
-    # 7. Auto-backup memory files if last backup >1h old (eliminates manual step 6)
+    # 6. Auto-backup memory files if last backup >1h old (eliminates manual step 6)
     _auto_backup_if_stale(dry_run=False)
 
-    # 8. Sync auto memory (markdown files for agent native memory)
+    # 7. Sync auto memory (markdown files for agent native memory)
     _sync_auto_memory()
 
-    # 9. Store journal entry to long-term semantic memory (memvid)
-    _store_to_memvid(journal_entry)
+    # 8. Buffer the journal entry, then flush every long-term-memory write for
+    #    this cycle as one batch (inbox messages + journal entry). Cycle
+    #    records are no longer ingested — cycles.json is excluded from
+    #    long-term memory.
+    ltm_buffer.extend(_entry_chunks_for_ltm(journal_entry))
+    if opts["no_bg_ltm"]:
+        _flush_ltm_buffer(ltm_buffer)
+    else:
+        _dispatch_ltm_flush_bg(ltm_buffer, cycle_n)
+
+    # 9. Skill use-count bump (detached; transcript-driven, best-effort).
+    _dispatch_skill_bump_bg(cycle_n)
+
+    # 10. Tick nudge counters (cycles_since_*). Best-effort; never fatal.
+    _tick_nudge_counters()
+
+    # 11. Refresh the DuckDB metrics store so the portal's Overview tab reflects
+    #     this cycle immediately instead of waiting for the metrics_daemon poll.
+    _dispatch_metrics_refresh_bg()
 
     print(f"\n[cycle-close] Done. Cycle {cycle_n} closed.\n")
 

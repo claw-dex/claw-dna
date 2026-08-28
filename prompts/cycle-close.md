@@ -1,167 +1,111 @@
 # Cycle Close Checklist
 
-> **Enum Reference:** See `prompts/enum.md` for all valid values of `type`, `category`, `status`, and other enum fields.
+> **Enum Reference:** See `prompts/enum.md` for all valid values of `cycle_type`, `cycle_category`, `cycle_status`, `agent_status`, and other enum fields.
 
 Run this checklist at the end of every cycle, regardless of cycle type.
 
-## FAST PATH — Use cycle_close.py (recommended)
+## RUN-ONCE RULE — read this before doing anything
 
-Instead of running steps 1–3 manually, use the automation script:
+> **`cycle_close.py` MUST be run at most ONCE per cycle.** Running it twice creates a
+> duplicate journal entry, double-archives the outbox, and corrupts duration tracking.
+
+Before invoking `cycle_close.py`, **check whether the current cycle has already been closed**:
+
+```bash
+uv run python -c "
+import json
+cs = json.load(open('/agent/memory/cycles.json'))
+ip = [c for c in cs if c.get('status') == 'in_progress']
+if not ip:
+    print('NO_IN_PROGRESS — cycle already closed (or never started). DO NOT run cycle_close.py again.')
+else:
+    last = max(ip, key=lambda c: c.get('cycle', 0))
+    print(f'IN_PROGRESS cycle={last[\"cycle\"]} — proceed with cycle_close.py')
+"
+```
+
+- `NO_IN_PROGRESS` → **stop**. The cycle is already closed. Skip to steps 3 and 5 only
+  (portal health + error clearing). Do NOT run `cycle_close.py`.
+- `IN_PROGRESS cycle=<N>` → first close attempt for this cycle. Proceed below.
+
+If you already ran `cycle_close.py` earlier in this same heartbeat, you do **not** need
+to consult this file again — it's done.
+
+## 1. Run cycle_close.py (only when an in-progress cycle exists)
 
 ```bash
 uv run python scripts/cycle_close.py \
-    --type evolve \           # evolve | goal | self-heal (see prompts/enum.md → Cycle Type)
-    --category efficiency \   # required for evolve cycles (see prompts/enum.md → Evolution Category)
-    --summary "One or two sentence summary of what was done and why it matters" \
+    --type evolve \           # evolve | goal | self-heal | dream (see prompts/enum.md → Cycle Type)
+    --category efficiency \   # required for evolve and dream cycles (see prompts/enum.md → Evolution Category)
+    --summary "What you actually delivered and why it matters (the outcome)" \
     --actions "Action 1" "Action 2" "Action 3"
 ```
 
-`--cycle` is **optional** — auto-detected as `state.cycle_number + 1` (override only if wrong).
-This handles cycles.json + state.json + journal.json + normalize + outbox archive + stale-count check + memory backup in one command.
-Use `--dry-run` to preview before writing. Still do steps 4 and 9 manually (portal health + error clearing).
+**One command handles all of this** — do NOT do any of these by hand:
 
-## 0. Record cycle start (if not already done)
+- creates / updates the `cycles.json` entry (start, end, duration, cycle_status, cycle_type, cycle_category, cycle_goal)
+- normalizes legacy cycles.json fields (`timestamp`→`start`; `cycle`/`status`/`type`/`category`/`goal` → `cycle_number`/`cycle_status`/`cycle_type`/`cycle_category`/`cycle_goal`; drops legacy `summary` from cycle records)
+- updates `state.json` (`cycle_number`, `agent_status` → `idle`, `last_cycle_summary`; clears `current_goal`)
+- appends the `journal.json` entry (cycle_number, timestamp, cycle_status, cycle_type, cycle_category, cycle_goal, actions, summary)
+- archives `outbox.json` and clears it
+- creates a memory snapshot if the last backup is >1h old
 
-`cycle_close.py` handles this automatically — it creates the entry if it doesn't exist.
-**No manual action needed** unless you explicitly want a stub at cycle start for long-running cycles.
+`--cycle` is auto-detected from the in-progress entry; `--dry-run` previews.
 
-If you do need a manual start stub (rare):
-```bash
-# Just run cycle_close.py at the end — it creates + completes the entry in one step
-uv run python scripts/cycle_close.py --cycle <N> --type evolve --category <CAT> --summary "..."
-```
+### Notes on `--goal`
 
-## 1. Update cycles.json entry
+- The planned cycle goal lives on the cycle record under `cycle_goal` (set by
+  `cycle_start.py --goal "..."`, or patched into `cycles.json` mid-cycle for
+  evolve mode after picking the category). `cycle_close.py` reads it from
+  there when writing the journal entry, so **omit `--goal` at close** when
+  `cycle_goal` is already correct.
+- Pass `--goal "..."` at close only when (a) no `cycle_goal` was recorded at
+  start, or (b) the actual work diverged from the planned goal and you want
+  the journal entry to reflect the final plan. Explicit `--goal` overrides
+  whatever `cycle_goal` says.
+- `state.current_goal` is the *active sub-task* — the agent may rewrite it
+  mid-cycle as it picks up tasks. `cycle_close.py` does NOT read it; the
+  journal records `cycle_goal` (the planned cycle goal), not whatever was
+  in flight at close time.
+- **Never copy `--summary` into `--goal`.** Goal = the plan; summary = the outcome.
+  They must differ. Omitting `--goal` is preferable to duplicating the summary.
 
-> **→ Use the FAST PATH above** (`cycle_close.py`) — it handles this automatically.
-> The code below documents the schema only; use it only if `cycle_close.py` is unavailable.
+### Journal entry self-test
 
-Find this cycle's entry and mark it completed with timing:
+After `cycle_close.py` runs, glance at the new entry it wrote:
+*"If I read this with no memory next cycle, would I understand what happened?"*
+If not, re-run with a sharper `--summary` (use `--cycle <N>` to overwrite the same entry —
+this counts as the same close, not a second one).
 
-```python
-import json, datetime
-now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-cycles = json.load(open('/agent/memory/cycles.json'))
-for c in cycles:
-    if c.get("cycle") == <N>:
-        c["end"] = now
-        c["duration_seconds"] = <elapsed_seconds>  # end - start
-        c["status"] = "completed"                  # or "failed"
-        c["summary"] = "<final 1-2 sentence summary>"
-        break
-open('/agent/memory/cycles.json', 'w').write(json.dumps(cycles, indent=2))
-```
+## 2. Update outbox (BEFORE running cycle_close.py if you have new info for the user)
 
-Required fields on every completed entry:
-`cycle`, `start`, `end`, `duration_seconds`, `type`, `status`, `summary`
-Plus `category` for evolve cycles (reliability | observability | capability | efficiency | prompt_evolution).
+If there's new information for the user (goal complete, question, status update), write
+it to `/agent/messages/outbox.json` **before** running `cycle_close.py`.
 
-## 1b. Normalize cycles.json (automatic)
+**Do NOT clear or archive outbox.json yourself** — `cycle_close.py` archives it. The user
+will read and clear messages manually via the portal's "Clear All" button.
 
-`cycle_close.py` automatically normalizes cycles.json on every run (inlined logic).
-This fixes: `timestamp` → `start`, `goal` → `summary`, computes `duration_seconds` where possible.
-Use `--no-normalize` to skip if needed.
+**Required outbox content for completed goals:**
 
-## 2. Update state.json
+- What was done (1-2 sentences)
+- Where to find outputs (file paths, portal tab, or URL)
+- Next steps the user should take (if any)
 
-Set these fields:
-- `cycle_number`: current cycle number
-- `status`: "idle" (or "working" if goal continues next cycle)
-- `current_goal`: what you worked on (or null)
-- `goal_status`: "completed" / "in_progress" / null
-- `last_cycle_summary`: 1-2 sentence summary of what you did
-- `last_cycle_end`: current timestamp (set automatically by cycle_close.py)
-
-## 3. Write journal entry
-
-Append to `/agent/memory/journal.json`:
-
-```python
-import json, datetime
-now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-journal = json.load(open('/agent/memory/journal.json'))
-journal.append({
-    "cycle": <N>,
-    "timestamp": now,
-    "status": "completed",       # completed | failed | in_progress
-    "type": "evolve",            # evolve | goal | self-heal
-    "category": "...",           # evolve only: reliability | observability | capability | efficiency | prompt_evolution
-    "goal": "<what you did>",
-    "actions": ["action 1", "action 2"],
-    "summary": "<1-2 sentences on result and why it matters>"
-})
-open('/agent/memory/journal.json', 'w').write(json.dumps(journal, indent=2))
-```
-
-**IMPORTANT:** Use `summary` (not `outcome`) — cycle_start.py reads `summary` when displaying recent journal entries. Using `outcome` will cause blank lines in the cycle briefing.
-
-Omit `category` for `goal` and `self-heal` entries.
-
-Self-test: "If I read this entry next cycle with no memory, would I understand what happened?"
-
-## 4. Verify portal (if web files changed)
+## 3. Verify portal (if web files changed)
 
 ```bash
 curl -s -o /dev/null -w "%{http_code}" http://localhost:8081/app/_stcore/health  # expect 200
 ```
 
-## 5. Update outbox
+## 4. Update AGENTS.md and capabilities (if you added new skills/tools)
 
-If there's new information for the user (goal complete, question, status update), write
-it to `/agent/messages/outbox.json` **before** running `cycle_close.py`.
+If you added scripts, portal modules, services, or commands/skills this cycle:
 
-**Do NOT clear or archive outbox.json** — the user will read and clear messages manually
-via the portal's "Clear All" button (which archives to `outbox_history.json` first).
-
-**Required outbox content for completed goals:**
-- What was done (1-2 sentences)
-- Where to find outputs (file paths, portal tab, or URL)
-- Next steps the user should take (if any)
-
-## 6. Create memory backup (automated — cycle_close.py does this for you)
-
-**As of cycle 167, `cycle_close.py` runs a memory backup automatically** when the last
-backup is >1h old. cycle_start.py shows ⚠ STALE when the last backup is older than 1 hour —
-this step keeps that warning quiet and protects against data loss.
-
-**No manual action needed** — the backup status is reported in cycle_close.py output.
-
-If you need to run manually (e.g., cycle_close.py is unavailable):
-```bash
-uv run python scripts/memory_backup.py
-```
-
-Auto-prunes at 20 snapshots, so storage is not a concern.
-
-## 7. Check for stale counts (automated — cycle_close.py does this for you)
-
-**As of cycle 114, `cycle_close.py` runs this check automatically every cycle.**
-It compares actual tab count (TAB_REGISTRY), test count (self_test.py), and script count
-against AGENTS.md and prompts — printing `[STALE COUNTS DETECTED]` warnings only when drift
-is found. Silent when everything matches.
-
-**No manual action needed** unless cycle_close.py reports a mismatch.
-
-If you need to check manually (e.g., cycle_close.py is unavailable):
-```bash
-# Tab count
-python3 -c "src=open('/agent/server.py').read(); idx=src.find('TAB_REGISTRY = ['); body=src[idx:]; n=body[:body.find(']')].count('('); print(f'{n} tabs')"
-# Script count
-ls /agent/scripts/*.py /agent/scripts/*.sh 2>/dev/null | wc -l
-# Test count
-uv run python scripts/self_test.py --quiet 2>&1 | tail -1
-```
-
-## 8. Update AGENTS.md and auto memory (if you added new skills/tools)
-
-If you added scripts, portal modules, or commands/skills this cycle:
-
-1. Add the new script/module to the **Utility Scripts** section in `AGENTS.md`
+1. Add the new script/module/service to `AGENTS.md`
    so future cycles can discover it via the briefing.
-2. Update `capabilities.md` in auto memory if needed (auto memory is synced
-   automatically by `cycle_close.py` for state, cycles, journal, and goals).
+2. Update `/agent/memory/capabilities.json` if needed.
 
-## 9. Clear resolved tab errors (optional)
+## 5. Clear resolved tab errors (optional)
 
 If you fixed tab errors this cycle, clear them before the next briefing:
 
@@ -169,11 +113,25 @@ If you fixed tab errors this cycle, clear them before the next briefing:
 # Reliable direct clear (always works):
 python3 -c "import json; open('/agent/memory/server_errors.json','w').write('[]')"
 
-# Auto-clear via cycle-start (may fail silently if Streamlit re-writes the file):
-uv run python scripts/cycle_start.py --clear-all-errors
-
-# Clear only errors >1h old (if you're unsure whether they're fixed):
-uv run python scripts/cycle_start.py --clear-old-errors
+# Or via cycle-start flags (next heartbeat):
+uv run python scripts/cycle_start.py --clear-all-errors    # all errors
+uv run python scripts/cycle_start.py --clear-old-errors    # only >1h old
 ```
 
 Only run if you actually fixed the root cause — don't clear errors that may still recur.
+
+## Schema reference (for emergencies only)
+
+`cycle_close.py` does all of the file writes below automatically. The schemas are
+documented here only so you can reconstruct an entry by hand if `cycle_close.py` is
+unavailable (broken script, missing dependency, etc.). **Do not run these snippets in a
+normal close — they will conflict with `cycle_close.py`.**
+
+- **`/agent/memory/cycles.json`** — list of `{cycle_number, start, end, duration_seconds, cycle_type, cycle_status, cycle_goal?}`
+  plus `cycle_category` for evolve/dream cycles. `cycle_goal` is the planned goal recorded by
+  `cycle_start.py`; `summary` lives on `journal.json`, not here.
+- **`/agent/memory/state.json`** — `{cycle_number, agent_status, current_goal, last_cycle_summary, last_heartbeat, last_cycle_run, services}`. `current_goal` is the dynamic in-flight sub-task (cleared at close, repopulated mid-cycle by the agent).
+- **`/agent/memory/journal.json`** — append `{cycle_number, timestamp, cycle_status, cycle_type, cycle_category?, cycle_goal?, actions, summary}`.
+  Use `summary` (not `outcome`) — `cycle_start.py` reads `summary` when rendering the briefing.
+  Omit `cycle_category` for `goal` and `self-heal`. `cycle_goal` is filled from `cycle_goal` on the
+  cycle record (or from explicit `--goal` at close, which overrides). Never duplicate `summary`.

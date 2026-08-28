@@ -66,14 +66,10 @@ def _write_json_atomic(path: Path, data: dict) -> None:
     """Atomically write JSON to file using temp file + rename."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
-        mode='w',
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False
+        mode="w", dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
     ) as tmp:
         json.dump(data, tmp, indent=2)
-        tmp.write('\n')
+        tmp.write("\n")
         tmp_path = Path(tmp.name)
     tmp_path.replace(path)
 
@@ -196,7 +192,7 @@ def _show_timezone() -> None:
         return
     try:
         config = json.loads(CONFIG_PATH.read_text())
-        tz = config.get('timezone')
+        tz = config.get("timezone")
         if tz:
             print(f"Timezone: {tz}")
         else:
@@ -294,13 +290,7 @@ def _build_auth_route(username: str, password_hash: str) -> dict:
     """
     return {
         "@id": "portal_auth",
-        "match": [
-            {
-                "not": [
-                    {"path": ["/webhook/*"]}
-                ]
-            }
-        ],
+        "match": [{"not": [{"path": ["/webhook/*"]}]}],
         "handle": [
             {
                 "handler": "authentication",
@@ -362,7 +352,10 @@ def _bcrypt_hash(password: str) -> str | None:
 def _open_keepass():
     """Open the KeePass database. Returns (kp, None) or (None, error_msg)."""
     if not KEEPASS_DB.exists():
-        return None, f"KeePass database not found at {KEEPASS_DB}. Run 'keepass.py init' first."
+        return (
+            None,
+            f"KeePass database not found at {KEEPASS_DB}. Run 'keepass.py init' first.",
+        )
     try:
         from pykeepass import PyKeePass
 
@@ -388,7 +381,9 @@ def _save_to_keepass(username: str, password: str, password_hash: str) -> bool:
         return False
     try:
         group = _find_or_create_group(kp, KEEPASS_GROUP)
-        existing = kp.find_entries(title=KEEPASS_PORTAL_BASIC_AUTH, group=group, first=True)
+        existing = kp.find_entries(
+            title=KEEPASS_PORTAL_BASIC_AUTH, group=group, first=True
+        )
         if existing:
             existing.username = username
             existing.password = password
@@ -421,7 +416,7 @@ def _load_from_keepass() -> dict | None:
     if entry.notes:
         for line in entry.notes.splitlines():
             if line.startswith("password_hash="):
-                password_hash = line[len("password_hash="):]
+                password_hash = line[len("password_hash=") :]
                 break
     return {
         "username": entry.username or "",
@@ -479,7 +474,9 @@ def _enable_auth(credential: str):
     print("Auth enabled!")
     print(f"  Username: {username}")
     print(f"  Password: {password}")
-    print(f"  Credentials saved to KeePass ({KEEPASS_GROUP}/{KEEPASS_PORTAL_BASIC_AUTH})")
+    print(
+        f"  Credentials saved to KeePass ({KEEPASS_GROUP}/{KEEPASS_PORTAL_BASIC_AUTH})"
+    )
 
 
 def _disable_auth():
@@ -572,7 +569,9 @@ def cmd_auth(args):
     elif args.rollback:
         _rollback_auth()
     else:
-        print("Usage: portal_config.py auth --enable user:pass | --disable | --reapply | --show | --rollback")
+        print(
+            "Usage: portal_config.py auth --enable user:pass | --disable | --reapply | --show | --rollback"
+        )
         sys.exit(1)
 
 
@@ -592,38 +591,52 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    subparsers = parser.add_subparsers(dest='subcommand', required=True)
+    subparsers = parser.add_subparsers(dest="subcommand", required=True)
 
     # hostname subparser
-    hostname_parser = subparsers.add_parser('hostname', help='Manage public hostname')
+    hostname_parser = subparsers.add_parser("hostname", help="Manage public hostname")
     hostname_group = hostname_parser.add_mutually_exclusive_group(required=True)
-    hostname_group.add_argument('--set', metavar='URL', help='Set public hostname')
-    hostname_group.add_argument('--show', action='store_true', help='Show current hostname')
-    hostname_group.add_argument('--clear', action='store_true', help='Clear hostname')
+    hostname_group.add_argument("--set", metavar="URL", help="Set public hostname")
+    hostname_group.add_argument(
+        "--show", action="store_true", help="Show current hostname"
+    )
+    hostname_group.add_argument("--clear", action="store_true", help="Clear hostname")
 
     # timezone subparser
-    timezone_parser = subparsers.add_parser('timezone', help='Manage timezone')
+    timezone_parser = subparsers.add_parser("timezone", help="Manage timezone")
     timezone_group = timezone_parser.add_mutually_exclusive_group(required=True)
-    timezone_group.add_argument('--set', metavar='TZ', help='Set timezone (e.g., America/New_York)')
-    timezone_group.add_argument('--show', action='store_true', help='Show current timezone')
-    timezone_group.add_argument('--clear', action='store_true', help='Clear timezone')
+    timezone_group.add_argument(
+        "--set", metavar="TZ", help="Set timezone (e.g., America/New_York)"
+    )
+    timezone_group.add_argument(
+        "--show", action="store_true", help="Show current timezone"
+    )
+    timezone_group.add_argument("--clear", action="store_true", help="Clear timezone")
 
     # auth subparser
-    auth_parser = subparsers.add_parser('auth', help='Manage authentication')
+    auth_parser = subparsers.add_parser("auth", help="Manage authentication")
     auth_group = auth_parser.add_mutually_exclusive_group(required=True)
-    auth_group.add_argument('--enable', metavar='USER:PASS', help='Enable auth with credentials')
-    auth_group.add_argument('--disable', action='store_true', help='Disable auth')
-    auth_group.add_argument('--reapply', action='store_true', help='Re-apply from saved credentials')
-    auth_group.add_argument('--show', action='store_true', help='Show current credentials')
-    auth_group.add_argument('--rollback', action='store_true', help='Force-remove auth route')
+    auth_group.add_argument(
+        "--enable", metavar="USER:PASS", help="Enable auth with credentials"
+    )
+    auth_group.add_argument("--disable", action="store_true", help="Disable auth")
+    auth_group.add_argument(
+        "--reapply", action="store_true", help="Re-apply from saved credentials"
+    )
+    auth_group.add_argument(
+        "--show", action="store_true", help="Show current credentials"
+    )
+    auth_group.add_argument(
+        "--rollback", action="store_true", help="Force-remove auth route"
+    )
 
     args = parser.parse_args()
 
-    if args.subcommand == 'hostname':
+    if args.subcommand == "hostname":
         cmd_hostname(args)
-    elif args.subcommand == 'timezone':
+    elif args.subcommand == "timezone":
         cmd_timezone(args)
-    elif args.subcommand == 'auth':
+    elif args.subcommand == "auth":
         cmd_auth(args)
 
 

@@ -1,6 +1,6 @@
 ---
 name: skills-sh-find-skills
-description: Helps users discover and install agent skills when they ask questions like "how do I do X", "find a skill for X", "is there a skill that can...", or express interest in extending capabilities. This skill should be used when the user is looking for functionality that might exist as an installable skill. See full list of skills at https://skills.sh/.
+description: Helps users discover and install agent skills when they ask questions like "how do I do X", "find a skill for X", "is there a skill that can...", or express interest in extending capabilities. This skill should be used when the user is looking for functionality that might exist as an installable skill.
 ---
 
 # Find Skills
@@ -20,16 +20,20 @@ Use this skill when the user:
 
 ## What is the Skills CLI?
 
-The Skills CLI (`sudo npx -y skills`) is the package manager for the open agent skills ecosystem. Skills are modular packages that extend agent capabilities with specialized knowledge, workflows, and tools.
+The Skills CLI (`npx skills`) is the package manager for the open agent skills ecosystem. Skills are modular packages that extend agent capabilities with specialized knowledge, workflows, and tools.
 
 **Key commands:**
 
-- `sudo npx -y skills find [query]` - Search for skills interactively or by keyword
-- `sudo npx -y skills add <package>` - Install a skill from GitHub or other sources
-- `sudo npx -y skills check` - Check for skill updates
-- `sudo npx -y skills update` - Update all installed skills
+- `npx skills find [query]` - Search for skills interactively or by keyword
+- `npx skills add <package>` - Install a skill from GitHub or other sources
+- `npx skills check` - Check for skill updates
+- `npx skills remove -y [skill]` - Remove a skill with name
 
-**Browse skills at:** https://skills.sh/
+**Importance:**
+
+- Never use `npx skills update` to update skills. Instead, remove and install it again.
+
+**Browse skills at:** <https://skills.sh/>
 
 ## How to Help Users Find Skills
 
@@ -41,64 +45,71 @@ When a user asks for help with something, identify:
 2. The specific task (e.g., writing tests, creating animations, reviewing PRs)
 3. Whether this is a common enough task that a skill likely exists
 
-### Step 2: Search for Skills
+### Step 2: Check the Leaderboard First
 
-Run the find command with a relevant query:
+Before running a CLI search, check the [skills.sh leaderboard](https://skills.sh/) to see if a well-known skill already exists for the domain. The leaderboard ranks skills by total installs, surfacing the most popular and battle-tested options.
+
+For example, top skills for web development include:
+
+- `vercel-labs/agent-skills` — React, Next.js, web design (100K+ installs each)
+- `anthropics/skills` — Frontend design, document processing (100K+ installs)
+
+### Step 3: Search for Skills
+
+If the leaderboard doesn't cover the user's need, run the find command:
 
 ```bash
-sudo npx -y skills find [query]
+npx -y skills find [query]
 ```
 
 For example:
 
-- User asks "how do I make my React app faster?" → `sudo npx -y skills find react performance`
-- User asks "can you help me with PR reviews?" → `sudo npx -y skills find pr review`
-- User asks "I need to create a changelog" → `sudo npx -y skills find changelog`
+- User asks "how do I make my React app faster?" → `npx skills find react performance`
+- User asks "can you help me with PR reviews?" → `npx skills find pr review`
+- User asks "I need to create a changelog" → `npx skills find changelog`
 
-The command will return results like:
+### Step 4: Verify Quality Before Recommending
 
-```
-Install with sudo npx -y skills add <owner/repo@skill>
+**Do not recommend a skill based solely on search results.** Always verify:
 
-vercel-labs/agent-skills@vercel-react-best-practices
-└ https://skills.sh/vercel-labs/agent-skills/vercel-react-best-practices
-```
+1. **Install count** — Prefer skills with 1K+ installs. Be cautious with anything under 100.
+2. **Source reputation** — Official sources (`vercel-labs`, `anthropics`, `microsoft`) are more trustworthy than unknown authors.
+3. **GitHub stars** — Check the source repository. A skill from a repo with <100 stars should be treated with skepticism.
 
-### Step 3: Present Options to the User
+### Step 5: Present Options to the User
 
 When you find relevant skills, present them to the user with:
 
 1. The skill name and what it does
-2. The install command they can run
-3. A link to learn more at skills.sh
+2. The install count and source
+3. The install command they can run
+4. A link to learn more at skills.sh
 
 Example response:
 
 ```
-I found a skill that might help! The "vercel-react-best-practices" skill provides
+I found a skill that might help! The "react-best-practices" skill provides
 React and Next.js performance optimization guidelines from Vercel Engineering.
+(185K installs)
 
 To install it:
-sudo npx -y skills add vercel-labs/agent-skills@vercel-react-best-practices
+npx skills add vercel-labs/agent-skills@react-best-practices
 
-Learn more: https://skills.sh/vercel-labs/agent-skills/vercel-react-best-practices
+Learn more: https://skills.sh/vercel-labs/agent-skills/react-best-practices
 ```
 
-### Step 4: Offer to Install
+### Step 6: Offer to Install
 
 If the user wants to proceed, you can install the skill for them:
 
 ```bash
-sudo npx -y skills add <owner/repo@skill> --copy -y -a claude-code
+npx skills add <owner/repo@skill> --copy -y -a claude-code
 ```
 
-The  `-a` specifies the agent to install for (in this case, `claude-code`), `--copy` will use copy instead of symlink and `-y` skips confirmation prompts.
-
-When the repo contains multiple skills, you may need to specify the exact skill to be installed:
-
-```bash
-sudo npx -y skills add https://github.com/googleworkspace/cli --skill gws-drive --copy -y -a claude-code
-```
+The `-y` skips confirmation prompts.
+The `--copy` will copy the skill to the agent directory.
+Never use `-g` global flag as there is only one project in this environment.
+Always use `-a claude-code` regardless of user instruction.
 
 ## Common Skill Categories
 
@@ -126,7 +137,7 @@ If no relevant skills exist:
 
 1. Acknowledge that no existing skill was found
 2. Offer to help with the task directly using your general capabilities
-3. Suggest the user could create their own skill with `sudo npx -y skills init`
+3. Suggest the user could create their own skill with `npx skills init`
 
 Example:
 
@@ -135,5 +146,5 @@ I searched for skills related to "xyz" but didn't find any matches.
 I can still help you with this task directly! Would you like me to proceed?
 
 If this is something you do often, you could create your own skill:
-sudo npx -y skills init my-xyz-skill
+npx skills init my-xyz-skill
 ```

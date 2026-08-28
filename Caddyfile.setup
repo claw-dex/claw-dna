@@ -8,12 +8,15 @@
     handle / {
         root * /agent
         rewrite * /setup.html
+        header Cache-Control "no-store, no-cache, must-revalidate, max-age=0"
+        header Pragma "no-cache"
+        header Expires "0"
         file_server
     }
 
     # File browser still accessible during setup (useful for debugging)
     handle /_/* {
-        @blocked_credentials path /home/agent/.config/gws /home/agent/.config/gws/* /home/agent/.keepass /home/agent/.keepass/* /home/agent/.ssh /home/agent/.ssh/*
+        @blocked_credentials path /home/agent/.keepass /home/agent/.keepass/* /home/agent/.ssh /home/agent/.ssh/*
         respond @blocked_credentials 403
 
         root * /

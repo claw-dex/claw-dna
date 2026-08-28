@@ -7,7 +7,6 @@ from app.data._cache import _register_cache
 from app.data._helpers import _IMAGE_EXTENSIONS, _read_text_safe
 from app.shared import AGENT_DIR
 
-
 _WORKSPACE_FILES_CACHE = _register_cache()
 _WORKSPACE_FILE_CACHE = _register_cache()
 
@@ -32,16 +31,18 @@ def load_workspace_files():
     files = []
     try:
         for root, dirs, filenames in os.walk(workspace):
-            dirs[:] = [d for d in dirs if not d.startswith('.')]
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
             for fname in filenames:
-                if fname.startswith('.'):
+                if fname.startswith("."):
                     continue
                 fpath = os.path.join(root, fname)
                 rel = os.path.relpath(fpath, workspace)
                 try:
                     st_info = os.stat(fpath)
                     size = st_info.st_size
-                    mtime = datetime.fromtimestamp(st_info.st_mtime, tz=timezone.utc).isoformat()
+                    mtime = datetime.fromtimestamp(
+                        st_info.st_mtime, tz=timezone.utc
+                    ).isoformat()
                 except OSError:
                     size = 0
                     mtime = None
@@ -66,8 +67,8 @@ def read_workspace_file(path):
     even when the file hadn't changed — wasteful for static workspace assets
     that are written once per cycle (~5 min apart).
     """
-    rel_path = path.lstrip('/')
-    if '..' in rel_path or rel_path.startswith('.'):
+    rel_path = path.lstrip("/")
+    if ".." in rel_path or rel_path.startswith("."):
         return None
     filepath = os.path.normpath(os.path.join(f"{AGENT_DIR}/workspace", rel_path))
     workspace_abs = os.path.abspath(f"{AGENT_DIR}/workspace")

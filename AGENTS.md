@@ -6,169 +6,42 @@ Agent-specific instructions loaded by the AI coding agent at session start.
 
 ```
 /agent/                          ← WORKDIR, your home base
-├── agent.sh                     ← AI coding agent CLI wrapper (supports multiple backends)
+├── agent.sh                     ← AI coding agent CLI wrapper (supports multiple backends, immutable)
 ├── AGENTS.md                    ← This file (agent instructions, directory tree, skills, credentials)
-├── bootstrap.sh                 ← PID 1 process manager (entrypoint)
-├── heartbeat.sh                 ← Heartbeat loop invoked by bootstrap
-├── server.py                    ← Streamlit entry point (hot-reloads on edit, invalid python code will break the portal)
-├── Caddyfile                    ← Caddy gateway initial config (DO NOT EDIT — use Caddy API)
+├── bootstrap.sh                 ← PID 1 process manager (entrypoint, immutable)
+├── heartbeat.sh                 ← Heartbeat loop invoked on this script in intervals (immutable)
+├── server.py                    ← Streamlit portal entry point (hot-reloads on edit, invalid python code will break the portal)
+├── Caddyfile                    ← Caddy gateway initial config (DO NOT EDIT — use Caddy API instead)
 ├── system.md                    ← Agent system prompt (read-only, immutable)
 ├── constitution.md              ← Immutable rules (read-only, chmod 444)
-├── pyproject.toml               ← Python dependencies (edit, then `uv sync`)
+├── pyproject.toml               ← Python dependencies (if edit then `uv sync`)
 │
 ├── app/                         ← Streamlit portal pages & modules
-│   ├── __init__.py
-│   ├── chat.py                  ← Chat UI page
-│   ├── commands_tab.py           ← Command Center tab (goal/message form, run-script, goals, inbox/outbox)
-│   ├── credential_tab.py        ← Credentials tab (KeePass UI)
-│   ├── data/                    ← Data loading & write utilities (mtime-cached)
-│   ├── emails_tab.py            ← Email tab (Gmail via Google Workspace CLI)
-│   ├── glance.py                ← Quick-glance dashboard (Goals/Inbox/Outbox summary above chat)
-│   ├── memory_tab.py            ← Memory tab (journal, logs, goals, memory files, search)
-│   ├── overview_tab.py          ← Overview tab (activity, goal stats, evolution balance)
-│   ├── services_tab.py          ← Services & Cron tab (service management, scheduled tasks)
-│   ├── shared.py                ← Shared helpers across pages
-│   ├── system_tab.py            ← System tab (health, diagnostics, scripts)
-│   └── workspace_tab.py         ← Workspace tab (file upload, Caddy file browser)
 │
-├── prompts/                     ← Prompt templates for agent behaviors
-│   ├── bootstrap.md             ← First-boot initialization prompt
-│   ├── cycle-close.md           ← End-of-cycle close-out prompt
-│   ├── goal.md                  ← Goal execution prompt
-│   ├── post-goal-review.md      ← Post-goal review prompt
-│   ├── evolve.md                ← Self-evolution prompt
-│   ├── self-heal.md             ← Self-healing / recovery prompt
-│   ├── error-triage.md          ← Error triage prompt
-│   ├── research.md              ← Research task prompt
-│   └── server.md                ← Portal architecture prompt
+├── prompts/                     ← Prompt files to drive agent behaviors
 │
-├── scripts/                     ← Utility & maintenance scripts
-│   ├── cycle_start.py
-│   ├── cycle_close.py
-│   ├── cycle_report.py
-│   ├── memory_backup.py
-│   ├── memory_ingest.py
-│   ├── memory_repair.py
-│   ├── memory_stats.py
-│   ├── memory_sync.py
-│   ├── memory_recall.py
-│   ├── memory_ask.py
-│   ├── journal_archive.py
-│   ├── maintain.py
-│   ├── milestone_report.py
-│   ├── metrics_collector.py
-│   ├── portal_config.py
-│   ├── keepass.py
-│   ├── callmebot.py              ← CallMeBot voice call escalation
-│   ├── email_imap.py
-│   ├── scheduler.py
-│   ├── self_test.py
-│   ├── service_manager.py
-│   ├── server_restart.sh
-│   ├── log_cleanup.sh
-│   └── health_check.sh
+├── scripts/                     ← Utility/maintenance & skill scripts
 │
-├── memory/                      ← Persistent agent memory (survives commits)
-│   ├── state.json               ← Current cycle state & status
-│   ├── journal.json             ← Cycle-by-cycle journal entries
-│   ├── cycles.json              ← Complete cycle history with durations
-│   ├── goal.json                ← Active goal tracking
-│   ├── server_errors.json      ← Tab crash errors (auto-logged by portal)
-│   └── logs/                    ← Cycle and service logs
+├── memory/                      ← Persistent agent memory (cycle/journal/goal/dream/memories)
 │
 ├── messages/                    ← Message queues (inbox/outbox)
-│   ├── inbox.json               ← Incoming commands (goal, message)
-│   └── outbox.json              ← Outgoing messages to user
 │
 ├── services/                    ← Long-running background services (managed by service_manager.py)
-│   ├── shared.py                ← Shared utilities for services (atomic writes, locking, messaging)
-│   ├── telegram_bridge.py       ← Telegram ↔ inbox/outbox bridge
-│   ├── webhook_receiver.py      ← Incoming webhook handler (port 8082, auto-start)
-│   └── whatsapp_bridge.py       ← WhatsApp ↔ inbox/outbox bridge
 │
 ├── web/                         ← Static files served by Caddy at / (PUBLIC — exposed to user browser)
-│   └── index.html               ← Welcome page (auto-redirects to /app/)
 │
 ├── workspace/                   ← Scratch space for agent work (PUBLIC — browsable at /_/agent/workspace/)
 │
 ├── skills/                      ← Agent skills (skill docs and instructions)
 │
-├── .claude/                     ← Claude Code CLI configuration (symlinks for backward compatibility)
-│   ├── CLAUDE.md                ← Symlink → /agent/AGENTS.md
-│   ├── settings.json            ← Claude Code CLI settings
-│   └── skills/                  ← Symlink → /agent/skills/
+├── .claude/                     ← Claude Code CLI configuration (contain its settings)
 │
 └── .streamlit/                  ← Streamlit configuration
-    └── config.toml              ← Streamlit settings (Streamlit hot-reloads, incorrect settings may break the portal)
-```
-## Post-Goal Learning
-
-After completing any goal, follow the full review process in `prompts/post-goal-review.md`.
-This includes documenting learnings (approach, key decisions, reusable patterns, pitfalls)
-in the journal entry for the cycle. Always review recent journal entries before starting
-a new goal to leverage past learnings.
-
-## Script & Skill
-
-When you created a new script in `scripts/`, you MUST also create a corresponding skill in `skills/<script-name>/SKILL.md` with frontmatter (`name`, `description`) and body content (path, arguments, examples)
-Never save one-off scripts in the `scripts/` directory - they won't be tracked, documented, or reusable.
-
-## Scheduled Tasks
-
-The scheduler evaluates `/agent/memory/scheduled_tasks.json` and injects due tasks
-into `inbox.json` as goal-type commands. It is run by `heartbeat.sh` via `--check`
-before each heartbeat cycle.
-
-- **Quick ref**: `uv run python scripts/scheduler.py --check` (inject due tasks) | `--list` (show all)
-- **Full docs**: See the `scheduler` skill for schema, schedule types, and task creation guide
-
-## Credential Management (KeePass)
-
-The agent has a built-in KeePass credential store for managing secrets, API keys,
-passwords, and other sensitive data.
-
-- **Database**: `/home/agent/.keepass/credentials.kdbx` (no password, no keyfile)
-- **Portal UI**: Credentials tab in the Streamlit portal (search, add, edit, delete)
-- **CLI**: `uv run python scripts/keepass.py <command>` — commands: init, store, get, list, search, groups, delete
-- **Full docs**: See the `keepass` skill for all flags and examples
-
-### Security Notes
-
-- The KeePass database has no password — the Docker container is the security boundary
-- Passwords are returned in plaintext by `get` and `--json` — do not log output publicly
-- The database file is NOT in `/agent/web/` or `/agent/workspace/` — it is not browsable
-- The database path (`/home/agent/.keepass/`) is outside the Caddy file-server root
-
-## Google Workspace CLI (`gws`)
-
-The agent has the `gws` CLI pre-installed for accessing Google Workspace services
-(Gmail, Google Calendar, Google Drive, and more).
-
-- **CLI**: `gws <service> <command>` — services: gmail, calendar, drive, etc.
-- **Auth check**: `gws auth status` — verify credentials are configured
-- **Credentials path**: `/home/agent/.config/gws/credentials.json`
-- **Portal UI**:  No Portal UI available yet, you must implement an upload interface for users
-  to upload their `credentials.json` file to the required path when user requests Google Workspace integration features (e.g., "connect to my Google Calendar", "read my Gmail inbox", etc.)
-
-### Setup
-
-The CLI requires a Google OAuth credentials file at `/home/agent/.config/gws/credentials.json`.
-Users can upload this file via your implemented Streamlit portal's Google Workspace section.
-Without this file, `gws auth status` will report unconfigured.
-
-### Usage
-
-Before using any `gws` command, first check auth status:
-```bash
-gws auth status
 ```
 
-To discover available commands for a specific Google product, MUST use the `skills-sh-find-skills`
-skill to locate the relevant gws skill documentation:
-```bash
-sudo npx -y skills find "googleworkspace/cli"
-```
-Chose the skill that matches the product you want to use (e.g., Gmail, Calendar, Drive) and follow the `skills-sh-find-skills` instructions to install it.
+## Searching `/agent/`
+
+Use the `search` skill to find file and content (text based) anywhere under `/agent/` — journals, inbox/outbox message, goals, prompts, scripts, notes, code. It runs a `ripgrep` exact-match pre-filter, then BM25S re-ranks the matches and returns relevance-scored snippets. Prefer it over ad-hoc `grep`/`rg` when you need ranked/relevant results across entire `/agent/` folder.
 
 ## Telegram Bridge
 
@@ -176,3 +49,29 @@ A background service that bridges Telegram messages to the agent's inbox/outbox 
 For setup instructions, configuration, and usage details, read the source file directly:
 `services/telegram_bridge.py` — it contains inline documentation covering bot token setup,
 chat ID configuration, environment variables, and the message flow.
+
+## Internal Agent Chat
+
+Headless daemon hosting one long-lived `claude_agent_sdk` session per registered internal agent in `/agent/memory/agents.json`. No HTTP surface — inbound messages are file-backed at `/agent/messages/internal/<name>/inbox.json`; transcripts live under `/agent/memory/chat/<name>/`. Outbound delivery is driven by the LLM via the per-session `mcp__internal_agent_routing__send_reply` MCP tool. See `services/internal_agent_chat.py` for the full per-message flow and setup command.
+
+## External Agent API
+
+HTTP service on port **8083** (Caddy proxies `/external-agent/*` with basic auth) that lets remote agents exchange messages with the main agent via per-agent files at `/agent/messages/external/<name>/{inbox,outbox}.json`. Routes: `POST /read-inbox`, `POST /write-outbox`, `GET /ping`, `POST /upload` (≤25 MB, lands in `/agent/workspace/upload/<name>/`), `POST /update` (status/capabilities/responsibilities). Agent identity is supplied via the `X-Agent-Name` header. Registry: `/agent/memory/agents.json`. See `services/external_agent_api.py` for full route semantics.
+
+## Scheduler Daemon
+
+Long-running service that polls `/agent/memory/scheduled_tasks.json` every `SCHEDULER_DAEMON_POLL_SECONDS` (default 30s) and injects due tasks into `/agent/messages/inbox.json` — decoupled from heartbeat cycle frequency. Reuses the same atomic `check_and_inject()` used by `scripts/scheduler.py --check`. Auto-started by `service_manager.py`; writes `/agent/memory/heartbeats/scheduler_daemon.heartbeat` each tick. See `services/scheduler_daemon.py`.
+
+## Metrics Daemon
+
+Long-running service that keeps the DuckDB metrics store at `/agent/memory/metrics.duckdb` in sync with the JSON files it derives from, polling every `METRICS_DAEMON_POLL_SECONDS` (default 300s, floor 60s). Each tick calls `metrics_db.refresh()`, a no-op unless a `(mtime, size)` fingerprint of the sources changed; rebuilds go to a temp file and are atomically swapped in, so the portal's read-only connections never see a partial database. `scripts/cycle_close.py` also dispatches a one-shot refresh so the Overview tab is current the moment a cycle lands.
+
+The portal reads this store through `app/data/metrics.py` — read-only `SELECT`s against pre-computed `metric_*` tables. **No metric is derived at render time anywhere in the portal.** State and status still come straight from JSON: agent status, heartbeat, cycle number, current goal, service liveness, queue depths, and raw log/error content are read live and are not metrics.
+
+Collection is pluggable — any module under `services/metrics/` contributes its own tables to the same build. **→ See the `metrics-daemon-handler` skill** to add one.
+
+**Shipped handler — `services/metrics/usage.py`**: token spend (requests, input / output / cache tokens, by model and day) parsed from the cycle transcripts under `/agent/memory/transcripts/`, surfaced as "Token Usage" on the System tab.
+
+## Webhook Receiver
+
+Generic HTTP webhook handler on port **8082** (Caddy proxies `/webhook/*`). POST/PUT/DELETE/PATCH payloads are recorded to `/agent/messages/inbox.json` as `type="event"`, `source="webhook"` and logged for audit; GET/HEAD/OPTIONS return 200 without recording. Path-prefix sub-handlers (registered in `HANDLERS`, e.g. `services/webhook/whatsapp_bridge_handler.py`) can take over all methods on a prefix and bypass the default inbox-writing behavior. See `services/webhook_receiver.py`.

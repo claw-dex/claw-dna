@@ -41,7 +41,11 @@ def render():
 
     def _resolve_group(grp_sel, new_grp_name):
         """Resolve a group selection to a pykeepass group, creating if needed."""
-        grp_path = new_grp_name if grp_sel == "+ New group" else (grp_sel if grp_sel != "(none)" else "")
+        grp_path = (
+            new_grp_name
+            if grp_sel == "+ New group"
+            else (grp_sel if grp_sel != "(none)" else "")
+        )
         if not grp_path:
             return kp.root_group
         parts = [p.strip() for p in grp_path.split("/") if p.strip()]
@@ -60,7 +64,9 @@ def render():
     c2.metric("Groups", len(groups))
 
     # ── Search / filter ───────────────────────────────────────────
-    search = st.text_input("Search credentials", placeholder="Filter by title or username...")
+    search = st.text_input(
+        "Search credentials", placeholder="Filter by title or username..."
+    )
 
     # ── Credential list ───────────────────────────────────────────
     filtered = entries
@@ -75,11 +81,17 @@ def render():
         ]
 
     if not filtered:
-        st.caption("No credentials found." if search else "No credentials stored yet. Add one below.")
+        st.caption(
+            "No credentials found."
+            if search
+            else "No credentials stored yet. Add one below."
+        )
     else:
         for entry in filtered:
             uid = str(entry.uuid)
-            group_path = "/".join(entry.group.path) if entry.group and entry.group.path else ""
+            group_path = (
+                "/".join(entry.group.path) if entry.group and entry.group.path else ""
+            )
             label = entry.title or "(untitled)"
             if group_path:
                 label += f"  [{group_path}]"
@@ -102,33 +114,74 @@ def render():
                     else:
                         st.text("••••••••••••")
                 with col_btn:
-                    btn_label = "Hide" if st.session_state.get(pw_key, False) else "Show"
+                    btn_label = (
+                        "Hide" if st.session_state.get(pw_key, False) else "Show"
+                    )
                     if st.button(btn_label, key=f"cred_toggle_{uid}"):
-                        st.session_state[pw_key] = not st.session_state.get(pw_key, False)
+                        st.session_state[pw_key] = not st.session_state.get(
+                            pw_key, False
+                        )
                         st.rerun()
 
                 # Edit / Delete — mutually exclusive states
                 edit_key = f"cred_edit_{uid}"
                 del_key = f"cred_confirm_del_{uid}"
                 edit_widget_keys = [
-                    edit_key, f"cred_etitle_{uid}", f"cred_euser_{uid}", f"cred_epass_{uid}",
-                    f"cred_eurl_{uid}", f"cred_enotes_{uid}", f"cred_egrp_{uid}", f"cred_enewgrp_{uid}",
+                    edit_key,
+                    f"cred_etitle_{uid}",
+                    f"cred_euser_{uid}",
+                    f"cred_epass_{uid}",
+                    f"cred_eurl_{uid}",
+                    f"cred_enotes_{uid}",
+                    f"cred_egrp_{uid}",
+                    f"cred_enewgrp_{uid}",
                 ]
 
                 if st.session_state.get(edit_key, False):
                     # ── Edit form
                     st.markdown("---")
-                    new_title = st.text_input("Title", value=entry.title or "", key=f"cred_etitle_{uid}")
-                    new_username = st.text_input("Username", value=entry.username or "", key=f"cred_euser_{uid}")
-                    new_password = st.text_input("Password", value=entry.password or "", type="password", key=f"cred_epass_{uid}")
-                    new_url = st.text_input("URL", value=entry.url or "", key=f"cred_eurl_{uid}")
-                    new_notes = st.text_area("Notes", value=entry.notes or "", height=68, key=f"cred_enotes_{uid}")
-                    cur_group = "/".join(entry.group.path) if entry.group and entry.group.path else "(none)"
-                    default_idx = group_options.index(cur_group) if cur_group in group_options else 0
-                    edit_grp_sel = st.selectbox("Group", group_options, index=default_idx, key=f"cred_egrp_{uid}")
+                    new_title = st.text_input(
+                        "Title", value=entry.title or "", key=f"cred_etitle_{uid}"
+                    )
+                    new_username = st.text_input(
+                        "Username", value=entry.username or "", key=f"cred_euser_{uid}"
+                    )
+                    new_password = st.text_input(
+                        "Password",
+                        value=entry.password or "",
+                        type="password",
+                        key=f"cred_epass_{uid}",
+                    )
+                    new_url = st.text_input(
+                        "URL", value=entry.url or "", key=f"cred_eurl_{uid}"
+                    )
+                    new_notes = st.text_area(
+                        "Notes",
+                        value=entry.notes or "",
+                        height=68,
+                        key=f"cred_enotes_{uid}",
+                    )
+                    cur_group = (
+                        "/".join(entry.group.path)
+                        if entry.group and entry.group.path
+                        else "(none)"
+                    )
+                    default_idx = (
+                        group_options.index(cur_group)
+                        if cur_group in group_options
+                        else 0
+                    )
+                    edit_grp_sel = st.selectbox(
+                        "Group",
+                        group_options,
+                        index=default_idx,
+                        key=f"cred_egrp_{uid}",
+                    )
                     edit_new_grp = ""
                     if edit_grp_sel == "+ New group":
-                        edit_new_grp = st.text_input("New group name", key=f"cred_enewgrp_{uid}")
+                        edit_new_grp = st.text_input(
+                            "New group name", key=f"cred_enewgrp_{uid}"
+                        )
                     ec1, ec2 = st.columns(2)
                     if ec1.button("Save", key=f"cred_esave_{uid}"):
                         if not new_title:
@@ -137,9 +190,16 @@ def render():
                             try:
                                 dest = _resolve_group(edit_grp_sel, edit_new_grp)
                                 # Check duplicate title in target group (skip self)
-                                dup = kp.find_entries(title=new_title, group=dest, recursive=False, first=True)
+                                dup = kp.find_entries(
+                                    title=new_title,
+                                    group=dest,
+                                    recursive=False,
+                                    first=True,
+                                )
                                 if dup and dup.uuid != entry.uuid:
-                                    st.error(f"An entry titled '{new_title}' already exists in this group.")
+                                    st.error(
+                                        f"An entry titled '{new_title}' already exists in this group."
+                                    )
                                 else:
                                     entry.title = new_title
                                     entry.username = new_username
@@ -244,9 +304,13 @@ def render():
     # ── Replace Database ───────────────────────────────────────────
     st.divider()
     st.subheader("Replace Database")
-    st.caption("Upload a `.kdbx` file to replace the current credential database. The file must be openable without a password or keyfile.")
+    st.caption(
+        "Upload a `.kdbx` file to replace the current credential database. The file must be openable without a password or keyfile."
+    )
 
-    uploaded = st.file_uploader("Upload .kdbx file", type=["kdbx"], key="cred_upload_kdbx")
+    uploaded = st.file_uploader(
+        "Upload .kdbx file", type=["kdbx"], key="cred_upload_kdbx"
+    )
     if uploaded is not None:
         import tempfile
 
@@ -260,7 +324,9 @@ def render():
             PyKeePass(tmp_path, password="")
             valid = True
         except Exception:
-            st.error("Invalid `.kdbx` file. The file is either corrupted or requires a password/keyfile to open.")
+            st.error(
+                "Invalid `.kdbx` file. The file is either corrupted or requires a password/keyfile to open."
+            )
         finally:
             if tmp_path:
                 Path(tmp_path).unlink(missing_ok=True)
@@ -300,7 +366,9 @@ def render():
         group_sel = st.selectbox("Group", group_options)
         new_group = ""
         if group_sel == "+ New group":
-            new_group = st.text_input("New group name (use / for nesting, e.g. Services/AWS)")
+            new_group = st.text_input(
+                "New group name (use / for nesting, e.g. Services/AWS)"
+            )
         submitted = st.form_submit_button("Save")
 
     if submitted:
@@ -311,12 +379,23 @@ def render():
                 dest = _resolve_group(group_sel, new_group)
 
                 # Check for duplicate title in target group
-                existing = kp.find_entries(title=title, group=dest, recursive=False, first=True)
+                existing = kp.find_entries(
+                    title=title, group=dest, recursive=False, first=True
+                )
                 if existing:
-                    st.error(f"An entry titled '{title}' already exists in this group. Use a different title.")
+                    st.error(
+                        f"An entry titled '{title}' already exists in this group. Use a different title."
+                    )
                     return
 
-                kp.add_entry(dest, title=title, username=username, password=password, url=url or "", notes=notes or "")
+                kp.add_entry(
+                    dest,
+                    title=title,
+                    username=username,
+                    password=password,
+                    url=url or "",
+                    notes=notes or "",
+                )
                 kp.save()
                 st.success(f"Saved '{title}'")
                 st.rerun()

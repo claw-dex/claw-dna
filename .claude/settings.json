@@ -2,11 +2,12 @@
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "includeCoAuthoredBy": false,
   "enableAllProjectMcpServers": true,
-  "autoDreamEnabled": true,
+  "awaySummaryEnabled": false,
   "autoUpdatesChannel": "latest",
   "autoMemoryDirectory": "/agent/memory",
   "env": {
-    "ENABLE_CLAUDEAI_MCP_SERVERS": "false"
+    "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
+    "FORCE_PROMPT_CACHING_5M": "1"
   },
   "enabledPlugins": {
     "agent-browser@agent-browser": true,

@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from app.data._cache import _register_cache
 from app.shared import SCRIPTS_DIR
 
-
 # Mtime-based description cache: path -> (mtime, description_str)
 # Avoids re-reading script files when content hasn't changed.
 # Not auto-registered — mtime-based per-file cache doesn't need global invalidation.
@@ -16,13 +15,12 @@ _SCRIPT_CATEGORIES = {
     "cycle_start.py": "Cycle Management",
     "cycle_close.py": "Cycle Management",
     "cycle_report.py": "Cycle Management",
-    "memory_stats.py": "Memory",
-    "memory_repair.py": "Memory",
-    "memory_backup.py": "Memory",
+    "repair_memory_files.py": "Memory",
     "memory_ask.py": "Memory",
     "memory_recall.py": "Memory",
     "memory_ingest.py": "Memory",
-    "memory_sync.py": "Memory",
+    "memory_inspect.py": "Memory",
+    "sync_memory_files.py": "Memory",
     "journal_archive.py": "Memory",
     "health_check.sh": "Diagnostics",
     "self_test.py": "Diagnostics",
@@ -84,7 +82,11 @@ def _script_description(path: str) -> str:
                     in_docstring = True
                     continue
                 if in_docstring:
-                    if stripped and not stripped.startswith('"""') and not stripped.startswith("'''"):
+                    if (
+                        stripped
+                        and not stripped.startswith('"""')
+                        and not stripped.startswith("'''")
+                    ):
                         raw = stripped
                     break
     except OSError:
@@ -94,7 +96,7 @@ def _script_description(path: str) -> str:
     for sep in (" — ", " - "):
         prefix = fname + sep
         if raw.startswith(prefix):
-            raw = raw[len(prefix):]
+            raw = raw[len(prefix) :]
             break
 
     _SCRIPT_DESC_CACHE[path] = (mtime, raw)
@@ -123,15 +125,19 @@ def load_scripts():
     try:
         for f in sorted(os.listdir(SCRIPTS_DIR)):
             fpath = os.path.join(SCRIPTS_DIR, f)
-            if os.path.isfile(fpath) and (f.endswith('.py') or f.endswith('.sh')):
+            if os.path.isfile(fpath) and (f.endswith(".py") or f.endswith(".sh")):
                 st_info = os.stat(fpath)
-                scripts.append({
-                    "name": f,
-                    "size": st_info.st_size,
-                    "modified": datetime.fromtimestamp(st_info.st_mtime, tz=timezone.utc).isoformat(),
-                    "description": _script_description(fpath),
-                    "category": _SCRIPT_CATEGORIES.get(f, "Other"),
-                })
+                scripts.append(
+                    {
+                        "name": f,
+                        "size": st_info.st_size,
+                        "modified": datetime.fromtimestamp(
+                            st_info.st_mtime, tz=timezone.utc
+                        ).isoformat(),
+                        "description": _script_description(fpath),
+                        "category": _SCRIPT_CATEGORIES.get(f, "Other"),
+                    }
+                )
     except OSError:
         pass
     _SCRIPTS_CACHE["data"] = (scripts, dir_mtime)

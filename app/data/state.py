@@ -9,13 +9,35 @@ import time
 
 from app.data._cache import _mfile_cache, _register_cache
 from app.data._helpers import _read_json_safe, _pid_alive
-from app.shared import MEMORY_DIR
+from app.shared import MEMORY_DIR, PORTAL_CONFIG_PATH
+
+# services/shared.py is the single definition of the SDK model/effort
+# vocabulary, shared with the internal-agent daemon and its register CLI.
+# app/chat.py already bootstraps sys.path to services/; do the same here so we
+# get the same module instance rather than a second copy.
+import sys as _sys
+from pathlib import Path as _Path
+
+_services_dir = str(_Path(__file__).resolve().parent.parent.parent / "services")
+if _services_dir not in _sys.path:
+    _sys.path.insert(0, _services_dir)
+from shared import (  # noqa: E402
+    PORTAL_MODEL_CHOICES,
+    normalize_effort,
+    normalize_model,
+)
 
 
-@_mfile_cache(lambda: f"{MEMORY_DIR}/state.json",
-              lambda: {"status": "awaiting_first_heartbeat", "cycle_number": 0})
+@_mfile_cache(
+    lambda: f"{MEMORY_DIR}/state.json",
+    lambda: {"agent_status": "awaiting_first_heartbeat", "cycle_number": 0},
+)
 def load_state(data):
     """Load state.json — mtime-cached, invalidates on every heartbeat write."""
+    from scripts.repair_memory_files import migrate_state_dict
+
+    if isinstance(data, dict):
+        migrate_state_dict(data)
     return data
 
 
@@ -88,14 +110,29 @@ def load_services_full():
 
 
 def _read_log_capped(path, cap=20000):
-    """Read a log file up to cap characters, with a truncation marker if larger."""
+    """Read the tail of a log file (last `cap` bytes), with a truncation marker if larger.
+
+    Reads from the end so the caller (which typically tails the last N lines)
+    sees the most recent output instead of the head of the file.
+    """
     if not path:
         return ""
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read(cap)
-        if len(content) >= cap:
-            content += f"\n\n... (truncated — output capped at {cap:,} characters)"
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            if size > cap:
+                f.seek(size - cap)
+            raw = f.read()
+        content = raw.decode("utf-8", errors="replace")
+        if size > cap:
+            # Drop the partial first line so we start on a clean line boundary.
+            nl = content.find("\n")
+            if nl != -1:
+                content = content[nl + 1 :]
+            content = (
+                f"... (truncated — showing last {cap:,} characters of "
+                f"{size:,}-byte log)\n" + content
+            )
         return content
     except (FileNotFoundError, OSError):
         return ""
@@ -140,3 +177,19 @@ def load_service_logs(name):
     }
     _SERVICE_LOG_CACHE[name] = (result, cache_key)
     return result
+
+
+@_mfile_cache(lambda: PORTAL_CONFIG_PATH, dict)
+def load_chat_sdk_settings(data):
+    """Portal-chat SDK overrides from portal_config.json — mtime-cached.
+
+    Returns ``{"model": str|None, "effort": str|None}``. Both are normalized,
+    so a hand-edited or stale value that is no longer valid degrades to
+    ``None`` (= use the SDK default) instead of reaching the `claude` CLI.
+    """
+    if not isinstance(data, dict):
+        data = {}
+    return {
+        "model": normalize_model(data.get("chat_model"), allowed=PORTAL_MODEL_CHOICES),
+        "effort": normalize_effort(data.get("chat_effort")),
+    }

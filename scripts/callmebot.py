@@ -29,10 +29,6 @@ import sys
 import tempfile
 import urllib.parse
 
-# Ensure /agent is on sys.path so 'from scripts.keepass import ...' works
-# regardless of the working directory when invoked
-if "/agent" not in sys.path:
-    sys.path.insert(0, "/agent")
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,7 +39,9 @@ BASE = Path("/agent")
 STATE_FILE = BASE / "memory" / "callmebot_state.json"
 SCRIPTS_DIR = BASE / "scripts"
 
-KEEPASS_TELEGRAM_OWNER_USERNAME = "TELEGRAM_OWNER_USERNAME"  # shared with telegram_bridge
+KEEPASS_TELEGRAM_OWNER_USERNAME = (
+    "TELEGRAM_OWNER_USERNAME"  # shared with telegram_bridge
+)
 KEEPASS_CALLMEBOT_LANG = "CALLMEBOT_LANG"
 
 # CallMeBot only provides an HTTP endpoint (no HTTPS available).
@@ -54,10 +52,14 @@ COOLDOWN_SECONDS = 1800  # 30 minutes cooldown between calls to avoid spamming t
 HTTP_TIMEOUT = 10  # seconds
 
 # API response patterns indicating the user hasn't authorized CallMeBot
-UNAUTHORIZED_REGEX = re.compile(r"Authorization for user @\w+ is not received\.", re.IGNORECASE)
+UNAUTHORIZED_REGEX = re.compile(
+    r"Authorization for user @\w+ is not received\.", re.IGNORECASE
+)
 UNAUTHORIZED_EXACT = "Warning! User not authorized."
 # API response pattern for wrong username format (missing @ prefix)
-FORMAT_ERROR_REGEX = re.compile(r"ERROR:\s*User\s+\S+\s+has wrong format", re.IGNORECASE)
+FORMAT_ERROR_REGEX = re.compile(
+    r"ERROR:\s*User\s+\S+\s+has wrong format", re.IGNORECASE
+)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -150,6 +152,7 @@ def keepass_get(title: str) -> str | None:
     """Retrieve a credential from KeePass by title (direct import)."""
     try:
         from scripts.keepass import get_credential
+
         return get_credential(title)
     except Exception as e:
         print(f"KeePass get({title!r}) failed: {e}", file=sys.stderr)
@@ -160,7 +163,10 @@ def keepass_store(title: str, value: str, group: str = "System") -> bool:
     """Store a credential in KeePass (direct import, no subprocess)."""
     try:
         from scripts.keepass import store_credential
-        return store_credential(title, username="callmebot", password=value, group=group)
+
+        return store_credential(
+            title, username="callmebot", password=value, group=group
+        )
     except Exception as e:
         print(f"KeePass store({title!r}) failed: {e}", file=sys.stderr)
     return False
@@ -190,12 +196,14 @@ def cmd_setup(args):
         return 1
 
     # Verify authorization by making a test call to the API
-    params = urllib.parse.urlencode({
-        "user": user,
-        "text": "CallMeBot setup test",
-        "lang": lang,
-        "rpt": "1",
-    })
+    params = urllib.parse.urlencode(
+        {
+            "user": user,
+            "text": "CallMeBot setup test",
+            "lang": lang,
+            "rpt": "1",
+        }
+    )
     try:
         req = urllib.request.Request(f"{API_URL}?{params}")
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
@@ -213,7 +221,9 @@ def cmd_setup(args):
             _print_result(result, args.json, unauth_msg)
             return 1
         # Non-auth HTTP error — warn but don't block setup
-        print(f"Warning: could not verify authorization (HTTP {e.code})", file=sys.stderr)
+        print(
+            f"Warning: could not verify authorization (HTTP {e.code})", file=sys.stderr
+        )
     except Exception as e:
         print(f"Warning: could not verify authorization ({e})", file=sys.stderr)
 
@@ -228,7 +238,10 @@ def cmd_call(args):
     # Get user from shared TELEGRAM_OWNER_USERNAME credential
     user = keepass_get(KEEPASS_TELEGRAM_OWNER_USERNAME)
     if not user:
-        print("TELEGRAM_OWNER_USERNAME not found in KeePass. Run: callmebot.py setup", file=sys.stderr)
+        print(
+            "TELEGRAM_OWNER_USERNAME not found in KeePass. Run: callmebot.py setup",
+            file=sys.stderr,
+        )
         return 1
     user = _normalize_username(user)
 
@@ -253,12 +266,14 @@ def cmd_call(args):
         print(f"Warning: text truncated to {MAX_TEXT_LENGTH} chars.", file=sys.stderr)
 
     # Build API URL
-    params = urllib.parse.urlencode({
-        "user": user,
-        "text": text,
-        "lang": lang,
-        "rpt": "2",
-    })
+    params = urllib.parse.urlencode(
+        {
+            "user": user,
+            "text": text,
+            "lang": lang,
+            "rpt": "2",
+        }
+    )
     url = f"{API_URL}?{params}"
 
     # Make the call (urlopen raises HTTPError on non-2xx, so success = 2xx)
@@ -285,7 +300,7 @@ def cmd_call(args):
             "text": text,
             "total_calls": state["total_calls"],
         }
-        _print_result(result, args.json, f"Voice call sent to {user}: \"{text}\"")
+        _print_result(result, args.json, f'Voice call sent to {user}: "{text}"')
         return 0
 
     except urllib.error.HTTPError as e:
@@ -327,7 +342,9 @@ def cmd_status(args):
         _print_result(result, True)
     else:
         if not configured:
-            print("CallMeBot: not configured (TELEGRAM_OWNER_USERNAME not found in KeePass).")
+            print(
+                "CallMeBot: not configured (TELEGRAM_OWNER_USERNAME not found in KeePass)."
+            )
             print("  Run: callmebot.py setup")
         else:
             print(f"CallMeBot: configured for {user} (voice: {lang})")
@@ -356,7 +373,9 @@ def main():
 
     # call
     p_call = sub.add_parser("call", help="Make a voice call (rate-limited)")
-    p_call.add_argument("--text", required=True, help="Message to speak (max 256 chars)")
+    p_call.add_argument(
+        "--text", required=True, help="Message to speak (max 256 chars)"
+    )
 
     # status
     sub.add_parser("status", help="Check configuration and rate limit status")
