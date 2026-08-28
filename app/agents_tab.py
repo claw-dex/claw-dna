@@ -584,12 +584,14 @@ def _render_config(agent: dict) -> None:
     atype = agent.get("type") or "?"
     status = agent.get("status") or "?"
     model = agent.get("model")
+    effort = agent.get("effort")
     st.markdown(
         " · ".join(
             [
                 f"**Type:** `{atype}`",
                 f"**Status:** `{status}`",
                 f"**Model:** `{model}`" if model else "**Model:** _(default)_",
+                f"**Effort:** `{effort}`" if effort else "**Effort:** _(default)_",
             ]
         )
     )

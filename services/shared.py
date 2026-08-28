@@ -497,6 +497,88 @@ def sdk_buffer_size_kwargs(options_cls) -> dict:
     return {}
 
 
+# ── SDK session tuning: model + effort ────────────────────────────
+# `effort` guides how much thinking the model does per turn. These are the
+# levels the pinned claude-agent-sdk (0.1.76, see uv.lock) declares on
+# `ClaudeAgentOptions.effort`, and the SDK maps them 1:1 onto the
+# `claude --effort <level>` CLI flag — the same knob
+# `.claude/settings.json`'s `effortLevel` sets for the interactive CLI.
+# "xhigh" is Opus only (it falls back to "high" on other models) and was
+# added in SDK 0.1.76 — `sdk_effort_kwargs` probes whether the *field* exists,
+# not whether a build accepts a given level, so an SDK older than the lockfile
+# would reject `--effort xhigh` at connect time. The container installs from
+# uv.lock, so 0.1.76 is the floor.
+# Defined once here and consumed by the internal-agent daemon, its register
+# CLI, and the portal chat tab.
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+# Model aliases the portal chat offers. The daemon accepts any non-empty
+# string (full model ids included), so it passes `allowed=None`.
+# "inherit" is deliberately absent: it is an AgentDefinition alias and is not
+# valid for top-level ClaudeAgentOptions.model.
+PORTAL_MODEL_CHOICES = ("opus", "sonnet", "haiku")
+
+
+def normalize_model(value, allowed=None) -> str | None:
+    """Coerce a config-supplied model to a usable value, or ``None``.
+
+    Never raises: `agents.json` and `portal_config.json` are hand-editable, so
+    a wrong type or an unknown alias must degrade to "use the SDK default"
+    rather than break session startup.
+    """
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    if allowed is not None and value not in allowed:
+        return None
+    return value
+
+
+def normalize_effort(value) -> str | None:
+    """Coerce a config-supplied effort level to one of `EFFORT_LEVELS`.
+
+    Same contract as `normalize_model`: never raises, unknown/blank/wrong-type
+    input becomes ``None`` so the SDK default applies. Callers that want to
+    surface a rejected value should compare against their raw input.
+    """
+    return normalize_model(value, allowed=EFFORT_LEVELS)
+
+
+# Mirrors `_warned_no_buffer_option`: static per process, but the helper runs
+# on every reconnect, so latch the warning.
+_warned_no_effort_option = False
+
+
+def sdk_effort_kwargs(options_cls, effort) -> dict:
+    """Return ``{"effort": ...}`` if *effort* is set and *options_cls* takes it.
+
+    `effort` is a newer `ClaudeAgentOptions` field than `model`, and
+    pyproject.toml pins `claude-agent-sdk` with no version specifier, so probe
+    the dataclass fields rather than assuming it exists. Returns ``{}`` for a
+    `None` effort, for an SDK build without the option, and for non-dataclass
+    stand-ins (e.g. test doubles).
+    """
+    global _warned_no_effort_option
+    if effort is None:
+        return {}
+    try:
+        names = {f.name for f in dataclasses.fields(options_cls)}
+    except Exception:
+        return {}
+    if "effort" in names:
+        return {"effort": effort}
+    if not _warned_no_effort_option:
+        _warned_no_effort_option = True
+        log.warning(
+            "claude-agent-sdk build has no effort option; "
+            "the configured effort level %r is ignored",
+            effort,
+        )
+    return {}
+
+
 # Substrings the SDK surfaces when its `claude` subprocess has died (SIGKILL /
 # OOM / closed pipe). The negative `exit code: -` prefix matches SIGKILL (-9),
 # SIGTERM (-15), SIGABRT (-6), etc. without enumerating each signal. Brittle

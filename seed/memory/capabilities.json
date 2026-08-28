@@ -191,7 +191,7 @@
   {
     "id": "register_internal_agent",
     "name": "Register Internal Agent",
-    "description": "CLI to add/update/remove internal-agent entries in agents.json and seed per-agent inbox/outbox/chat files; supports OPTIONAL per-agent system_prompt appended to the shared base prompt and outbox_routing_rules to constrain LLM-chosen recipients",
+    "description": "CLI to add/update/remove internal-agent entries in agents.json and seed per-agent inbox/outbox/chat files; supports OPTIONAL per-agent system_prompt appended to the shared base prompt, model and effort (low/medium/high/xhigh/max) overrides for the agent's SDK session, and outbox_routing_rules to constrain LLM-chosen recipients",
     "category": "communication",
     "enabled": true
   },

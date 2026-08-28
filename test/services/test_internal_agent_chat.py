@@ -1234,16 +1234,54 @@ def test_model_round_trip_register_to_build_options(patch_iac_paths, monkeypatch
         outbox_routing_rules_file=None,
         outbox_routing_rules_inline=None,
         model="  haiku  ",  # whitespace must survive normalization on both sides
+        effort="  low  ",
     )
     assert ria.cmd_register(args) == 0
 
     agents = json.loads(iac.AGENTS_FILE.read_text())
     cfg = next(a for a in agents if a.get("name") == "planner")
     assert cfg["model"] == "haiku"  # script stripped + persisted
+    assert cfg["effort"] == "low"
 
     sess = _make_options_session(iac, cfg=cfg, name="planner")
     options = sess._build_options()
     assert options.model == "haiku"  # daemon read it back verbatim
+    assert options.effort == "low"
+
+
+# ---------------------------------------------------------------------------
+# _build_options — per-agent `effort` override flows through to the SDK.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("level", ["low", "medium", "high", "xhigh", "max"])
+def test_build_options_passes_effort_through(patch_iac_paths, level):
+    iac = patch_iac_paths
+    sess = _make_options_session(iac, cfg={"effort": level})
+    options = sess._build_options()
+    assert options.effort == level
+
+
+def test_build_options_strips_whitespace_around_effort(patch_iac_paths):
+    iac = patch_iac_paths
+    sess = _make_options_session(iac, cfg={"effort": "  high  "})
+    options = sess._build_options()
+    assert options.effort == "high"
+
+
+@pytest.mark.parametrize(
+    "bad", [None, "", "   ", "ultra", "extreme", "HIGH", 42, ["high"], {"x": 1}]
+)
+def test_build_options_omits_effort_when_absent_or_invalid(patch_iac_paths, bad):
+    """agents.json is hand-editable and hot-reloaded every sweep, so a bad
+    effort must degrade to the SDK default rather than reach the CLI (an
+    invalid `--effort` would fail the connect, retried every 10s).
+    """
+    iac = patch_iac_paths
+    cfg: dict = {} if bad is None else {"effort": bad}
+    sess = _make_options_session(iac, cfg=cfg)
+    options = sess._build_options()
+    assert options.effort is None
 
 
 # ---------------------------------------------------------------------------

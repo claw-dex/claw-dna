@@ -15,6 +15,10 @@ from pathlib import Path
 import streamlit as st
 
 from app.shared import _write_json_atomic
+from app.data import (
+    load_chat_sdk_settings as _load_chat_sdk_settings,
+    save_portal_config as _save_portal_config,
+)
 
 # Pull the chat-path helpers + migrator from services/shared.py. We use
 # the same sys.path bootstrap pattern as scripts/register_internal_agent.py
@@ -28,12 +32,15 @@ _services_dir = str(_Path(__file__).resolve().parent.parent / "services")
 if _services_dir not in _sys.path:
     _sys.path.insert(0, _services_dir)
 from shared import (  # noqa: E402
+    EFFORT_LEVELS,
+    PORTAL_MODEL_CHOICES,
     chat_history_path as _chat_history_path,
     ensure_chat_dir as _ensure_chat_dir,
     load_session_id as _shared_load_session_id,
     migrate_chat_layout as _migrate_chat_layout,
     save_session_id as _shared_save_session_id,
     sdk_buffer_size_kwargs as _sdk_buffer_size_kwargs,
+    sdk_effort_kwargs as _sdk_effort_kwargs,
     FATAL_SDK_ERROR_HINTS as _FATAL_SDK_ERROR_HINTS,
 )
 
@@ -301,6 +308,8 @@ class ClaudeChat:
         self,
         resume_session_id: str | None = None,
         chat_history: list[dict] | None = None,
+        model: str | None = None,
+        effort: str | None = None,
     ) -> None:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._sdk: ClaudeSDKClient | None = None
@@ -314,6 +323,12 @@ class ClaudeChat:
         self._broken = False
         self._resume_session_id = resume_session_id
         self._chat_history = chat_history or []
+        # Connect-time SDK overrides: the SDK maps them onto `claude --model`
+        # / `--effort` when it spawns the subprocess, so changing them on a
+        # live client does nothing — the portal tears the singleton down and
+        # rebuilds it instead (see `_teardown_chat_singleton`).
+        self._model = model
+        self._effort = effort
         self._session_id: str | None = None
 
         # Streaming state (for submit/poll pattern)
@@ -379,10 +394,23 @@ class ClaudeChat:
                 pass
             self._loop.close()
 
-    async def _connect(self) -> None:
-        """Create and connect the SDK client."""
-        options = ClaudeAgentOptions(
+    def _build_options(self) -> ClaudeAgentOptions:
+        """Build the SDK options for this session.
+
+        Kept in lock-step with `services/internal_agent_chat.py::_build_options`
+        — the two call sites are intentionally identical apart from the
+        internal agents' `send_reply` MCP tool and appended system prompt.
+
+        Split out of `_connect` so the options can be asserted in tests
+        without spawning a `claude` subprocess.
+        """
+        return ClaudeAgentOptions(
             **_sdk_buffer_size_kwargs(ClaudeAgentOptions),
+            # Both `model` and `effort` are consumed when the SDK spawns the
+            # `claude` subprocess. `effort` is a newer option than `model`, so
+            # it is passed through a field probe rather than unconditionally.
+            **_sdk_effort_kwargs(ClaudeAgentOptions, self._effort),
+            model=self._model,
             system_prompt=_build_system_prompt(self._chat_history),
             permission_mode="bypassPermissions",
             include_partial_messages=True,
@@ -416,7 +444,10 @@ class ClaudeChat:
             disallowed_tools=["AskUserQuestion"],
             resume=self._resume_session_id,
         )
-        self._sdk = ClaudeSDKClient(options)
+
+    async def _connect(self) -> None:
+        """Create and connect the SDK client."""
+        self._sdk = ClaudeSDKClient(self._build_options())
         await self._sdk.connect()
         self._ready.set()
 
@@ -851,7 +882,45 @@ def _get_chat_singleton() -> "ClaudeChat":
     """
     history = _load_chat_history()
     resume_id = _load_chat_meta().get("session_id")
-    return ClaudeChat(resume_session_id=resume_id, chat_history=history)
+    sdk_settings = _load_chat_sdk_settings()
+    return ClaudeChat(
+        resume_session_id=resume_id,
+        chat_history=history,
+        model=sdk_settings.get("model"),
+        effort=sdk_settings.get("effort"),
+    )
+
+
+def _teardown_chat_singleton(session: "ClaudeChat | None") -> None:
+    """Drop the cached singleton and stop its SDK subprocess.
+
+    Best-effort at every step: the caller's goal is always "the next rerun
+    builds a fresh ClaudeChat", and a failure to close the old one must not
+    prevent that. Used by both the Clear-chat button (which additionally wipes
+    the persisted session id and history) and the session-settings handler
+    (which keeps them, so the new client resumes the same conversation with
+    the new connect-time options).
+    """
+    if session is not None and st.session_state.get("chat_streaming"):
+        try:
+            session.interrupt()
+        except Exception:
+            pass
+    try:
+        _get_chat_singleton.clear()
+    except Exception:
+        pass
+    if session is None:
+        return
+    try:
+        session.close()
+    except Exception:
+        pass
+    if session._thread is not None and session._thread.is_alive():
+        try:
+            _shutdown_chat_resources(session._loop, session._sdk, session._thread)
+        except Exception:
+            pass
 
 
 def _get_or_recreate_chat() -> "ClaudeChat | None":
@@ -1140,12 +1209,102 @@ def _chat_stream_fragment():
                 st.caption("Streaming...")
 
 
+_SDK_DEFAULT_LABEL = "SDK default"
+
+
+def _label_index(labels: list[str], value: str | None) -> int:
+    """Index of *value* in *labels*, falling back to the 'SDK default' entry."""
+    try:
+        return labels.index(value) if value else 0
+    except ValueError:
+        return 0
+
+
+def _render_session_settings() -> None:
+    """Model / effort selectors for the portal chat session.
+
+    Both are *connect-time* SDK options (the SDK turns them into
+    `claude --model` / `--effort` when it spawns the subprocess), so a change
+    has to rebuild the client — we persist the choice, tear the singleton
+    down, and rerun. The persisted resume id is deliberately left alone, so
+    the rebuilt session picks the conversation back up.
+
+    Change detection compares against a `st.session_state` sentinel holding
+    the last applied pair rather than re-reading portal_config.json: the
+    sentinel is updated before the rerun, so a stale mtime-cached read can
+    never drive a rerun loop.
+    """
+    model_labels = [_SDK_DEFAULT_LABEL, *PORTAL_MODEL_CHOICES]
+    effort_labels = [_SDK_DEFAULT_LABEL, *EFFORT_LEVELS]
+
+    if "chat_sdk_applied" not in st.session_state:
+        saved = _load_chat_sdk_settings()
+        st.session_state.chat_sdk_applied = (saved.get("model"), saved.get("effort"))
+    applied_model, applied_effort = st.session_state.chat_sdk_applied
+
+    streaming = bool(st.session_state.get("chat_streaming"))
+    with st.expander("⚙️ Session settings", expanded=False):
+        col_model, col_effort = st.columns(2)
+        with col_model:
+            model_choice = st.selectbox(
+                "Model",
+                model_labels,
+                index=_label_index(model_labels, applied_model),
+                key="chat_model_select",
+                disabled=streaming,
+                help="Leave on 'SDK default' to let the SDK pick the model.",
+            )
+        with col_effort:
+            effort_choice = st.selectbox(
+                "Effort",
+                effort_labels,
+                index=_label_index(effort_labels, applied_effort),
+                key="chat_effort_select",
+                disabled=streaming,
+                help="How much the model thinks per turn (claude --effort).",
+            )
+        st.caption(
+            "Changing either setting reconnects the chat session — the "
+            "conversation is preserved. With effort 'low' the model thinks "
+            "minimally, so the 'Thinking…' section may be short or empty."
+        )
+
+    if streaming:
+        return
+
+    chosen = (
+        None if model_choice == _SDK_DEFAULT_LABEL else model_choice,
+        None if effort_choice == _SDK_DEFAULT_LABEL else effort_choice,
+    )
+    if chosen == (applied_model, applied_effort):
+        return
+
+    # Write only the key that actually changed. portal_config.json is shared
+    # by every browser tab while `chat_sdk_applied` is per-session, so writing
+    # both keys unconditionally would let a tab that only touched Effort
+    # clobber another tab's Model back to the SDK default.
+    if chosen[0] != applied_model:
+        _save_portal_config("chat_model", chosen[0])
+    if chosen[1] != applied_effort:
+        _save_portal_config("chat_effort", chosen[1])
+    # Update the sentinel BEFORE the rerun so this branch cannot re-fire.
+    st.session_state.chat_sdk_applied = chosen
+    _teardown_chat_singleton(st.session_state.get("chat_session"))
+    st.session_state.chat_session = None
+    st.session_state.chat_connect_failed = False
+    st.rerun()
+
+
 def render():
     """Render the Claude Code Chat UI component (always visible at top of page)."""
     st.subheader("Claude Code Chat")
     st.caption(
         "Interactive chat with Claude Code (native, powered by Claude Agent SDK)."
     )
+
+    # Rendered before the singleton is resolved so a just-changed setting
+    # tears the old client down instead of connecting with the stale one.
+    _render_session_settings()
 
     # Initialize chat history (load from disk on first session)
     if "chat_messages" not in st.session_state:
@@ -1238,28 +1397,8 @@ def render():
                 ),
             )
     if clear_clicked:
-        if st.session_state.chat_streaming and session is not None:
-            try:
-                session.interrupt()
-            except Exception:
-                pass
         # Tear down the cached singleton so a fresh ClaudeChat is built.
-        try:
-            _get_chat_singleton.clear()
-        except Exception:
-            pass
-        if session is not None:
-            try:
-                session.close()
-            except Exception:
-                pass
-            if session._thread is not None and session._thread.is_alive():
-                try:
-                    _shutdown_chat_resources(
-                        session._loop, session._sdk, session._thread
-                    )
-                except Exception:
-                    pass
+        _teardown_chat_singleton(session)
         # Wipe persisted resume id so the new singleton starts fresh.
         try:
             from shared import session_path as _session_path

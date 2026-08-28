@@ -234,3 +234,55 @@ def test_read_log_capped_handles_non_utf8_bytes(tmp_path):
     result = state._read_log_capped(str(log))
     assert "hello" in result
     assert "world" in result
+
+
+# ---------- load_chat_sdk_settings ----------
+
+
+@pytest.fixture
+def portal_config(tmp_path, monkeypatch):
+    """Point state.PORTAL_CONFIG_PATH at a writable tmp file.
+
+    `PORTAL_CONFIG_PATH` is imported by value into app.data.state, so patching
+    `app.shared` after import would have no effect — patch the state module's
+    own binding (same approach as test_write.py).
+    """
+    cfg = tmp_path / "portal_config.json"
+    monkeypatch.setattr("app.data.state.PORTAL_CONFIG_PATH", str(cfg))
+    from app.data import _cache as cache_mod
+
+    cache_mod._cache_clear_all()
+    yield cfg
+    cache_mod._cache_clear_all()
+
+
+def test_load_chat_sdk_settings_defaults_when_missing(portal_config):
+    assert state.load_chat_sdk_settings() == {"model": None, "effort": None}
+
+
+def test_load_chat_sdk_settings_round_trips_valid_values(portal_config):
+    _write_json(portal_config, {"chat_model": "haiku", "chat_effort": "low"})
+    assert state.load_chat_sdk_settings() == {"model": "haiku", "effort": "low"}
+
+
+def test_load_chat_sdk_settings_ignores_unrelated_keys(portal_config):
+    _write_json(portal_config, {"timezone": "UTC", "chat_effort": "max"})
+    assert state.load_chat_sdk_settings() == {"model": None, "effort": "max"}
+
+
+def test_load_chat_sdk_settings_rejects_model_outside_portal_choices(portal_config):
+    # A full model id is valid for the daemon but not offered by the portal —
+    # it must degrade to the SDK default rather than reach the `claude` CLI.
+    _write_json(portal_config, {"chat_model": "claude-opus-4-5"})
+    assert state.load_chat_sdk_settings()["model"] is None
+
+
+@pytest.mark.parametrize("bad", ["ultra", "", "   ", 42, ["high"], {"x": 1}, None])
+def test_load_chat_sdk_settings_rejects_invalid_effort(portal_config, bad):
+    _write_json(portal_config, {"chat_effort": bad})
+    assert state.load_chat_sdk_settings()["effort"] is None
+
+
+def test_load_chat_sdk_settings_survives_non_dict_json(portal_config):
+    _write_json(portal_config, ["not", "a", "dict"])
+    assert state.load_chat_sdk_settings() == {"model": None, "effort": None}

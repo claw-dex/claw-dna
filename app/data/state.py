@@ -9,7 +9,23 @@ import time
 
 from app.data._cache import _mfile_cache, _register_cache
 from app.data._helpers import _read_json_safe, _pid_alive
-from app.shared import MEMORY_DIR
+from app.shared import MEMORY_DIR, PORTAL_CONFIG_PATH
+
+# services/shared.py is the single definition of the SDK model/effort
+# vocabulary, shared with the internal-agent daemon and its register CLI.
+# app/chat.py already bootstraps sys.path to services/; do the same here so we
+# get the same module instance rather than a second copy.
+import sys as _sys
+from pathlib import Path as _Path
+
+_services_dir = str(_Path(__file__).resolve().parent.parent.parent / "services")
+if _services_dir not in _sys.path:
+    _sys.path.insert(0, _services_dir)
+from shared import (  # noqa: E402
+    PORTAL_MODEL_CHOICES,
+    normalize_effort,
+    normalize_model,
+)
 
 
 @_mfile_cache(
@@ -161,3 +177,19 @@ def load_service_logs(name):
     }
     _SERVICE_LOG_CACHE[name] = (result, cache_key)
     return result
+
+
+@_mfile_cache(lambda: PORTAL_CONFIG_PATH, dict)
+def load_chat_sdk_settings(data):
+    """Portal-chat SDK overrides from portal_config.json — mtime-cached.
+
+    Returns ``{"model": str|None, "effort": str|None}``. Both are normalized,
+    so a hand-edited or stale value that is no longer valid degrades to
+    ``None`` (= use the SDK default) instead of reaching the `claude` CLI.
+    """
+    if not isinstance(data, dict):
+        data = {}
+    return {
+        "model": normalize_model(data.get("chat_model"), allowed=PORTAL_MODEL_CHOICES),
+        "effort": normalize_effort(data.get("chat_effort")),
+    }

@@ -62,6 +62,7 @@ import json
 from envelope import make_from
 from shared import (
     DEAD_SUBPROCESS_HINTS,
+    EFFORT_LEVELS,
     INBOX_FILE,
     MESSAGES_DIR,
     append_to_history,
@@ -71,9 +72,12 @@ from shared import (
     load_session_id,
     locked_json_rw,
     migrate_chat_layout,
+    normalize_effort,
+    normalize_model,
     read_json_file,
     save_session_id,
     sdk_buffer_size_kwargs,
+    sdk_effort_kwargs,
     session_path,
     surface_error,
     write_to_inbox,
@@ -1091,19 +1095,37 @@ class InternalAgentSession:
         #   3. an optional `model` override (haiku/sonnet/opus, or a full
         #      model id) — passed through to the SDK, which handles alias
         #      → id resolution. Absent or blank → SDK default.
+        #   4. an optional `effort` level (see shared.EFFORT_LEVELS) guiding
+        #      how much the model thinks per turn. Absent → SDK default.
+        #
+        # Both overrides are read from agents.json, which is hand-editable and
+        # hot-reloaded on every sweep, so a bad value must degrade to the SDK
+        # default rather than reach the CLI — an invalid `--effort` would fail
+        # the connect and be retried every 10s.
         _, ClaudeAgentOptions, ClaudeSDKClient, _, _, _, _, _, _ = _import_claude_sdk()
         custom = self.cfg.get("system_prompt") or ""
         if not isinstance(custom, str):
             custom = ""
-        raw_model = self.cfg.get("model")
-        model = (
-            raw_model.strip()
-            if isinstance(raw_model, str) and raw_model.strip()
-            else None
-        )
+        model = normalize_model(self.cfg.get("model"))
+        raw_effort = self.cfg.get("effort")
+        effort = normalize_effort(raw_effort)
+        if effort is None and raw_effort not in (None, ""):
+            # Latched per rejected value: `_build_options` runs on every
+            # connect and the daemon reconnects on its 10s sweep, so an
+            # unlatched warning would flood the log for a thrashing agent.
+            # Keyed by the value so a *different* typo is still reported.
+            if getattr(self, "_warned_effort", None) != raw_effort:
+                self._warned_effort = raw_effort
+                log.warning(
+                    "agent %s: ignoring invalid effort %r (expected one of %s)",
+                    self.name,
+                    raw_effort,
+                    ", ".join(EFFORT_LEVELS),
+                )
         routing_server = _build_send_reply_server(self.name, self.cfg)
         return ClaudeAgentOptions(
             **sdk_buffer_size_kwargs(ClaudeAgentOptions),
+            **sdk_effort_kwargs(ClaudeAgentOptions, effort),
             system_prompt=_build_system_prompt(self._chat_history, custom),
             model=model,
             permission_mode="bypassPermissions",

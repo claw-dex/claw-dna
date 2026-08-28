@@ -9,10 +9,11 @@ The matching daemon `services/internal_agent_chat.py` hot-reloads
 agents.json on its sweep tick (10s), so a new internal agent is picked
 up without a restart.
 
-All SDK options (allowed_tools, permission_mode, cwd, add_dirs, ...)
-are fixed and identical to `app/chat.py`. The only per-agent
-customization is an OPTIONAL `system_prompt` text that gets APPENDED
-to the shared pre-built system prompt.
+Most SDK options (allowed_tools, permission_mode, cwd, add_dirs, ...)
+are fixed and identical to `app/chat.py`. The per-agent customizations
+are an OPTIONAL `system_prompt` text that gets APPENDED to the shared
+pre-built system prompt, plus optional `model` and `effort` overrides
+for the agent's SDK session.
 
 Outbound delivery uses the per-session `send_reply` MCP tool — the LLM
 chooses where to deliver. The agents.json `outbox_routing_rules` list
@@ -25,7 +26,8 @@ Usage:
       --name planner \\
       --responsibilities "Plan multi-step tasks for the main agent" \\
       [--system-prompt-file /path/to/prompt.md] \\
-      [--outbox-routing-rules-file /path/to/rules.json]
+      [--outbox-routing-rules-file /path/to/rules.json] \\
+      [--model sonnet] [--effort high]
 
   uv run python scripts/register_internal_agent.py --list
   uv run python scripts/register_internal_agent.py --deactivate planner
@@ -44,10 +46,13 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 _SERVICES_DIR = _SCRIPT_DIR.parent / "services"
 sys.path.insert(0, str(_SERVICES_DIR))
 from shared import (  # noqa: E402
+    EFFORT_LEVELS,
     chat_archive_path,
     chat_history_path,
     ensure_chat_dir,
     locked_json_rw,
+    normalize_effort,
+    normalize_model,
     read_json_file,
     session_path,
 )
@@ -119,7 +124,18 @@ def cmd_register(args) -> int:
 
     system_prompt = _load_text_arg(args.system_prompt_file, args.system_prompt_inline)
 
-    model = (args.model or "").strip() or None
+    model = normalize_model(args.model)
+
+    # The daemon coerces a bad effort quietly (agents.json is hand-editable);
+    # the CLI rejects it loudly so a typo is caught at registration time.
+    effort = normalize_effort(args.effort)
+    if effort is None and (args.effort or "").strip():
+        raise SystemExit(
+            "invalid --effort "
+            + repr(args.effort)
+            + ": must be one of "
+            + ", ".join(EFFORT_LEVELS)
+        )
 
     entry = {
         "type": "internal",
@@ -134,6 +150,11 @@ def cmd_register(args) -> int:
         entry["outbox_routing_rules"] = outbox_routing_rules
     if model is not None:
         entry["model"] = model
+    # Note: like `model`, omitting the flag leaves any previously stored value
+    # in place (the merge below is `{**existing, **entry}`), so re-registering
+    # cannot clear a prior selection.
+    if effort is not None:
+        entry["effort"] = effort
 
     def _rw(items):
         if not isinstance(items, list):
@@ -244,6 +265,17 @@ def main() -> int:
             "Re-registering with a different value replaces the prior "
             "selection; takes effect on the next session connect "
             "(restart the daemon or trigger clear_session)."
+        ),
+    )
+    p.add_argument(
+        "--effort",
+        help=(
+            "Optional effort level for this agent's SDK session: "
+            + ", ".join(EFFORT_LEVELS)
+            + ". Guides how much the model thinks per turn (same knob as the "
+            "`claude --effort` CLI flag). Omit to use the SDK default. "
+            "Takes effect on the next session connect (restart the daemon or "
+            "trigger clear_session)."
         ),
     )
     p.add_argument("--list", action="store_true", help="List internal agents")

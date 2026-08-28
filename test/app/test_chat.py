@@ -194,3 +194,41 @@ def test_buffer_overflow_description_explains_the_cause():
 
 def test_non_fatal_description_is_passed_through_verbatim():
     assert ClaudeChat._describe_stream_error(Exception("boom")) == "boom"
+
+
+# ---------------------------------------------------------------------------
+# _build_options — connect-time SDK overrides (model / effort)
+#
+# `model` and `effort` are turned into `claude --model` / `--effort` when the
+# SDK spawns its subprocess, so they only take effect on a fresh connect. These
+# assert the options object itself; the reconnect-on-change behaviour lives in
+# `render()` and is covered by app_check smoke testing.
+# ---------------------------------------------------------------------------
+
+
+def _options_only_chat(model=None, effort=None):
+    """A ClaudeChat with just enough state for `_build_options` — no connect."""
+    chat = ClaudeChat.__new__(ClaudeChat)
+    chat._chat_history = []
+    chat._resume_session_id = None
+    chat._model = model
+    chat._effort = effort
+    return chat
+
+
+def test_build_options_defaults_to_sdk_defaults():
+    options = _options_only_chat()._build_options()
+    assert options.model is None
+    assert getattr(options, "effort", None) is None
+
+
+def test_build_options_forwards_model_and_effort():
+    options = _options_only_chat(model="haiku", effort="low")._build_options()
+    assert options.model == "haiku"
+    assert options.effort == "low"
+
+
+def test_build_options_effort_independent_of_model():
+    options = _options_only_chat(effort="max")._build_options()
+    assert options.model is None
+    assert options.effort == "max"

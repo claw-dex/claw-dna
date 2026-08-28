@@ -42,6 +42,7 @@ def _args(**overrides):
         outbox_routing_rules_file=None,
         outbox_routing_rules_inline=None,
         model=None,
+        effort=None,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -214,6 +215,47 @@ def test_cmd_register_merge_replaces_model(redirect_paths):
     agents = json.loads(redirect_paths["agents"].read_text())
     assert len(agents) == 1
     assert agents[0]["model"] == "opus"
+
+
+def test_cmd_register_writes_effort_when_provided(redirect_paths):
+    rc = ria.cmd_register(_args(effort="low"))
+    assert rc == 0
+    agents = json.loads(redirect_paths["agents"].read_text())
+    assert agents[0]["effort"] == "low"
+
+
+def test_cmd_register_omits_effort_when_absent(redirect_paths):
+    ria.cmd_register(_args())  # effort defaults to None
+    agents = json.loads(redirect_paths["agents"].read_text())
+    assert "effort" not in agents[0]
+
+
+def test_cmd_register_blank_effort_treated_as_absent(redirect_paths):
+    ria.cmd_register(_args(effort="   "))
+    agents = json.loads(redirect_paths["agents"].read_text())
+    assert "effort" not in agents[0]
+
+
+def test_cmd_register_strips_whitespace_around_effort(redirect_paths):
+    ria.cmd_register(_args(effort="  max  "))
+    agents = json.loads(redirect_paths["agents"].read_text())
+    assert agents[0]["effort"] == "max"
+
+
+@pytest.mark.parametrize("bad", ["ultra", "extreme", "HIGH", "1"])
+def test_cmd_register_rejects_invalid_effort(redirect_paths, bad):
+    # The CLI validates loudly — the daemon is the one that coerces quietly.
+    with pytest.raises(SystemExit):
+        ria.cmd_register(_args(effort=bad))
+    assert not redirect_paths["agents"].exists()
+
+
+def test_cmd_register_merge_replaces_effort(redirect_paths):
+    ria.cmd_register(_args(effort="low"))
+    ria.cmd_register(_args(effort="high"))
+    agents = json.loads(redirect_paths["agents"].read_text())
+    assert len(agents) == 1
+    assert agents[0]["effort"] == "high"
 
 
 def test_cmd_register_revives_deactivated(redirect_paths):

@@ -622,3 +622,79 @@ def test_set_agent_control_flag_unknown_name_returns_no_match(
     # Real agent untouched.
     agents = json.loads(agents_file.read_text())
     assert sh.AGENT_CONTROL_FIELD not in agents[0]
+
+
+# ---------------------------------------------------------------------------
+# normalize_model / normalize_effort / sdk_effort_kwargs
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("haiku", "haiku"),
+        ("  sonnet  ", "sonnet"),
+        ("claude-opus-4-7", "claude-opus-4-7"),  # full ids allowed when unrestricted
+        (None, None),
+        ("", None),
+        ("   ", None),
+        (42, None),
+        (["sonnet"], None),
+        ({"x": 1}, None),
+    ],
+)
+def test_normalize_model_unrestricted(patch_shared_paths, raw, expected):
+    assert patch_shared_paths.normalize_model(raw) == expected
+
+
+def test_normalize_model_rejects_values_outside_allowed(patch_shared_paths):
+    sh = patch_shared_paths
+    assert sh.normalize_model("opus", allowed=sh.PORTAL_MODEL_CHOICES) == "opus"
+    # A full model id is fine unrestricted but not among the portal's aliases.
+    assert (
+        sh.normalize_model("claude-opus-4-7", allowed=sh.PORTAL_MODEL_CHOICES) is None
+    )
+    assert sh.normalize_model("inherit", allowed=sh.PORTAL_MODEL_CHOICES) is None
+
+
+@pytest.mark.parametrize("level", ["low", "medium", "high", "xhigh", "max"])
+def test_normalize_effort_accepts_every_level(patch_shared_paths, level):
+    assert patch_shared_paths.normalize_effort(level) == level
+    assert patch_shared_paths.normalize_effort(f"  {level}  ") == level
+
+
+@pytest.mark.parametrize(
+    "bad", [None, "", "   ", "ultra", "extreme", "HIGH", 42, ["high"], {"x": 1}]
+)
+def test_normalize_effort_rejects_anything_else(patch_shared_paths, bad):
+    assert patch_shared_paths.normalize_effort(bad) is None
+
+
+def test_sdk_effort_kwargs_returns_empty_for_none_effort(patch_shared_paths):
+    import dataclasses
+
+    @dataclasses.dataclass
+    class _Opts:
+        effort: str | None = None
+
+    assert patch_shared_paths.sdk_effort_kwargs(_Opts, None) == {}
+    assert patch_shared_paths.sdk_effort_kwargs(_Opts, "low") == {"effort": "low"}
+
+
+def test_sdk_effort_kwargs_drops_effort_on_older_sdk(patch_shared_paths):
+    import dataclasses
+
+    @dataclasses.dataclass
+    class _OldOpts:
+        model: str | None = None
+
+    # No `effort` field → the option must be dropped, not passed (a TypeError
+    # here would break every SDK call site).
+    assert patch_shared_paths.sdk_effort_kwargs(_OldOpts, "low") == {}
+
+
+def test_sdk_effort_kwargs_tolerates_non_dataclass(patch_shared_paths):
+    class _Stub:
+        pass
+
+    assert patch_shared_paths.sdk_effort_kwargs(_Stub, "low") == {}

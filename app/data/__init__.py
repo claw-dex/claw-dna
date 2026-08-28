@@ -12,6 +12,7 @@ from app.data.state import (
     load_services,
     load_services_full,
     load_service_logs,
+    load_chat_sdk_settings,
 )  # noqa: F401
 
 # Goals

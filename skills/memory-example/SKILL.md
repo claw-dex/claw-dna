@@ -332,6 +332,8 @@ Entry:
   "inbox": "/agent/messages/internal/planner/inbox.json",
   "responsibilities": "Decompose multi-step requests into ordered subtasks",
   "system_prompt": "You are the planner. Output a numbered plan.",
+  "model": "sonnet",
+  "effort": "high",
   "outbox_routing_rules": [
     {"description": "Send the final numbered plan back to the main agent.", "agent": "main"},
     {"description": "Hand off web research subtasks.", "agent": "research-bot"}
@@ -346,7 +348,10 @@ Entry:
 - `inbox`: absolute path to the per-agent inbox file. Senders drop an envelope into this file (see *internal-agent inbox.json* below) and the daemon picks it up within ~10 s.
 - `responsibilities`: free-text duties — written from the perspective of "what kind of task should the main agent delegate to this agent?".
 - `status`: `online` | `offline` | `deactivated`. Setting `deactivated` causes the daemon to tear down the session at the next sweep tick; the inbox/history files on disk are preserved.
-- `system_prompt` (optional): per-agent text **appended** to the shared system prompt (`system.md` + `constitution.md` + `public_url` + prior chat history + `claude-system-prompt.md`). It does **not** replace the shared prompt. Everything else about the SDK options is fixed and identical to `app/chat.py`.
+- `system_prompt` (optional): per-agent text **appended** to the shared system prompt (`system.md` + `constitution.md` + `public_url` + prior chat history + `claude-system-prompt.md`). It does **not** replace the shared prompt.
+- `model` (optional): model override for this agent's SDK session — a short alias (`haiku` | `sonnet` | `opus`) or a full model id. Absent, blank, or the wrong type → the SDK default.
+- `effort` (optional): how much the model thinks per turn — `low` | `medium` | `high` | `xhigh` | `max` (the same knob as `claude --effort`; `xhigh` is Opus only and falls back to `high` elsewhere). Absent or invalid → the SDK default; the daemon logs a warning and falls back rather than failing the connect. Every other SDK option is fixed and identical to `app/chat.py`.
+- Both `model` and `effort` are read when the session connects, so a change takes effect on the next daemon restart or `clear_session`. Set them with `scripts/register_internal_agent.py --model ... --effort ...`.
 - `outbox_routing_rules` (optional): list of `{"description": "...", "agent": "<name>"}` entries. Each rule contributes one bullet to the description of the agent's per-session `send_reply` MCP tool, telling the LLM when to use that named recipient. The reserved name `main` is always available even with no rules; any other `agent` value must be present in this list **and** registered in `agents.json` with an `inbox` field.
 - `control` (optional, transient): operator-set one-shot flags consumed by the daemon at the next sweep. Supported keys: `clear_chat` (archive `memory/chat/<name>/chat_history.json` into `chat_history_archive.json` then truncate, and sync the in-memory tail), `clear_session` (wipe `memory/chat/<name>/<name>.session` and reconnect the SDK). Each flag is stripped after it is applied, and the empty `control` dict is removed too. Set via `scripts/interact_with_agent.py clear-chat|clear_session --name <agent>`. See `prompts/enum.md` → "Agent Control Flag" for full semantics.
 
