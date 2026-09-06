@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -313,6 +315,97 @@ def test_send_reply_blocks_agent_not_in_rules(patch_iac_paths):
 
 
 # ---------------------------------------------------------------------------
+# send_reply tool — input schema (regression for the schema/handler
+# contradiction documented in memory/dream/learnings/
+# internal-agent-chat-send-reply-schema-contradiction.md: the old
+# {"name": type} shorthand marked every key "required", forcing callers to
+# pass message_id="" as a workaround even when addressing by `agent`).
+# ---------------------------------------------------------------------------
+
+
+def test_send_reply_schema_only_requires_type_and_content(patch_iac_paths):
+    schema = patch_iac_paths.SEND_REPLY_INPUT_SCHEMA
+    assert schema["required"] == ["type", "content"]
+    assert set(schema["properties"]) == {
+        "agent",
+        "message_id",
+        "type",
+        "content",
+        "priority",
+    }
+
+
+def _wire_schemas(server) -> dict:
+    """Map tool name -> the inputSchema an MCP server advertises over the wire.
+
+    Drives the SDK's real schema-building path via the `tools/list` handler
+    instead of calling its private schema helper directly — that helper has
+    already been renamed once (it used to be
+    `claude_agent_sdk._build_input_schema`, it is now a closure inside
+    `create_sdk_mcp_server`), so importing it makes the test break for the
+    wrong reason on an SDK upgrade. `request_handlers` is itself an mcp
+    internal, hence the explicit assert below rather than a bare KeyError.
+    """
+    from mcp.types import ListToolsRequest
+
+    assert (
+        ListToolsRequest in server.request_handlers
+    ), "the SDK/mcp changed how list_tools is registered — update this probe"
+    result = _run(
+        server.request_handlers[ListToolsRequest](ListToolsRequest(method="tools/list"))
+    )
+    return {t.name: t.inputSchema for t in result.root.tools}
+
+
+def test_send_reply_schema_passthrough_matches_real_sdk_wire_schema(patch_iac_paths):
+    # claude_agent_sdk passes a dict straight through unmodified whenever it
+    # already has top-level "type"/"properties" keys (rather than re-deriving
+    # "required" from every dict key, as it does for the {"name": type}
+    # shorthand). Build the *production* server so this also fails if
+    # _build_send_reply_server stops handing the SDK the full-JSON-Schema
+    # form — a likelier regression than an SDK upgrade.
+    iac = patch_iac_paths
+    iac._ensure_agent_files("planner")
+    server = iac._build_send_reply_server("planner", {})["instance"]
+    wire_schema = _wire_schemas(server)[iac.SEND_REPLY_TOOL]
+    # `==`, not `is`: the SDK returns the same dict object, but
+    # Tool.model_validate re-validates it, so identity no longer holds.
+    assert wire_schema == iac.SEND_REPLY_INPUT_SCHEMA
+    assert wire_schema["required"] == ["type", "content"]
+    assert "agent" not in wire_schema["required"]
+    assert "message_id" not in wire_schema["required"]
+    assert "priority" not in wire_schema["required"]
+
+
+def test_sdk_shorthand_schema_still_marks_every_key_required():
+    # Control for the test above: the {"name": type} shorthand is the form
+    # that caused the original bug (every key forced into "required"). If the
+    # SDK ever stops doing this, the passthrough test above is guarding a
+    # contract that no longer means anything and should be revisited.
+    from claude_agent_sdk import SdkMcpTool, create_sdk_mcp_server
+
+    tool_def = SdkMcpTool(
+        name="shorthand",
+        description="d",
+        input_schema={"agent": str, "message_id": str},
+        handler=lambda args: None,
+    )
+    server = create_sdk_mcp_server(name="probe", tools=[tool_def])["instance"]
+    assert _wire_schemas(server)["shorthand"]["required"] == [
+        "agent",
+        "message_id",
+    ]
+
+
+def test_send_reply_agent_only_no_message_id_needed(patch_iac_paths):
+    # With the fixed schema, omitting message_id entirely (not even passing
+    # "") when addressing by agent must still succeed at the handler level.
+    h = _make_handler(patch_iac_paths)
+    out = _run(h({"agent": "main", "type": "agent_response", "content": "hi"}))
+    assert out.get("is_error") is not True
+
+
+# ---------------------------------------------------------------------------
 # send_reply tool — successful delivery paths
 # ---------------------------------------------------------------------------
 
@@ -436,7 +529,7 @@ def test_send_reply_agent_response_mirrors_to_main_outbox(patch_iac_paths, agent
             {
                 "agent": "main",
                 "type": "agent_response",
-                "content": "Task completed successfully",
+                "content": "Review complete: APPROVE",
             }
         )
     )
@@ -445,7 +538,7 @@ def test_send_reply_agent_response_mirrors_to_main_outbox(patch_iac_paths, agent
     inbox_items = json.loads(iac.INBOX_FILE.read_text())
     assert len(inbox_items) == 1
     assert inbox_items[0]["type"] == "agent_response"
-    assert inbox_items[0]["content"] == "Task completed successfully"
+    assert inbox_items[0]["content"] == "Review complete: APPROVE"
     # Mirror — main outbox got a `response` envelope with the prefix
     outbox_path = agent_root / "messages" / "outbox.json"
     assert outbox_path.exists()
@@ -454,7 +547,7 @@ def test_send_reply_agent_response_mirrors_to_main_outbox(patch_iac_paths, agent
     mirror = outbox_items[0]
     assert mirror["type"] == "response"  # agent_ prefix stripped, type kept
     assert mirror["content"] == (
-        "[from internal agent planner] Task completed successfully"
+        "[from internal agent planner] Review complete: APPROVE"
     )
     assert mirror["subject"] == "[from internal agent planner]"
     assert mirror["timestamp"]
@@ -463,10 +556,7 @@ def test_send_reply_agent_response_mirrors_to_main_outbox(patch_iac_paths, agent
 
 
 def test_send_reply_non_mirrored_types_do_not_mirror(patch_iac_paths, agent_root):
-    """Only agent_needs_human and agent_response trigger the outbox mirror.
-
-    agent_error and agent_info must NOT write to the outbox.
-    """
+    """agent_error and agent_info must not trigger the outbox mirror."""
     iac = patch_iac_paths
     outbox_path = agent_root / "messages" / "outbox.json"
     h = _make_handler(iac)
@@ -476,9 +566,7 @@ def test_send_reply_non_mirrored_types_do_not_mirror(patch_iac_paths, agent_root
     # Outbox file must not exist or be empty
     if outbox_path.exists():
         assert json.loads(outbox_path.read_text()) == []
-    # And no mirror notice in the success message. Assert the exact phrase
-    # rather than the bare word "mirrored" — the pytest tmp path can contain
-    # "mirrored" (from this test's name) and trip a substring check.
+    # And no mirror notification in the success messages
     out = _run(h({"agent": "main", "type": "agent_info", "content": "z"}))
     assert "mirrored to main outbox" not in out["content"][0]["text"]
 
@@ -923,32 +1011,64 @@ def _make_session_skeleton(iac, name: str = "x"):
 def test_append_user_and_assistant_records_never_truncate_disk_or_memory(
     patch_iac_paths,
 ):
+    """Prove that _append_*_record never truncates records beyond the old 1000-record cap.
+
+    Pre-populate approach (per AGENTS.md test-quality rules): seed the chat history
+    file directly with N_TURNS-1 turns (2998 records) without calling the append
+    methods in a loop (which would be O(n²) disk I/O — 73 seconds in the original).
+    Then call each append method exactly once and assert the total reaches 3000.
+    """
     iac = patch_iac_paths
-    sess = _make_session_skeleton(iac, "x")
-    # Write far more than the old 1000-record cap to prove no truncation.
+    # Use a cap above the old 1000-record limit to prove no truncation.
     n_turns = 1500
-    for i in range(n_turns):
-        sess._append_user_record(
-            ids=[f"id-{i}"],
-            merged_reply_to=None,
-            user_text=f"u{i}",
+    pre_turns = n_turns - 1  # 1499 turns = 2998 records already on disk
+
+    # Build pre-populated records: u0/a0 … u1497/a1498
+    pre_records = []
+    for i in range(pre_turns):
+        pre_records.append(
+            {"role": "user", "content": f"u{i}", "ts": "2000-01-01T00:00:00+00:00"}
         )
-        sess._append_assistant_record(
-            ids=[f"id-{i}"],
-            merged_reply_to=None,
-            assistant_text=f"a{i}",
-            session_id=None,
-            cost_usd=None,
-            duration_ms=None,
-            is_error=False,
+        pre_records.append(
+            {
+                "role": "assistant",
+                "content": f"a{i}",
+                "ts": "2000-01-01T00:00:00+00:00",
+            }
         )
-    # Each turn appends one user + one assistant record.
-    on_disk = json.loads(iac._chat_history_path("x").read_text())
+
+    # Seed the JSON file and in-memory list directly — no locked_json_rw loop.
+    chat_path = iac._chat_history_path("x")
+    chat_path.parent.mkdir(parents=True, exist_ok=True)
+    chat_path.write_text(json.dumps(pre_records))
+
+    sess = _make_session_skeleton(iac, "x")
+    sess._chat_history = list(pre_records)  # mirror in-memory
+
+    # One final turn appended via the real methods (exercises the code path once).
+    final_i = pre_turns
+    sess._append_user_record(
+        ids=[f"id-{final_i}"],
+        merged_reply_to=None,
+        user_text=f"u{final_i}",
+    )
+    sess._append_assistant_record(
+        ids=[f"id-{final_i}"],
+        merged_reply_to=None,
+        assistant_text=f"a{final_i}",
+        session_id=None,
+        cost_usd=None,
+        duration_ms=None,
+        is_error=False,
+    )
+
+    # Each turn contributes one user + one assistant record.
+    on_disk = json.loads(chat_path.read_text())
     assert len(on_disk) == n_turns * 2
     assert len(sess._chat_history) == n_turns * 2
     # First record must still be the very first turn (no head trimming).
     assert on_disk[0]["content"] == "u0"
-    assert on_disk[-1]["content"] == f"a{n_turns - 1}"
+    assert on_disk[-1]["content"] == f"a{final_i}"
 
 
 def test_user_record_visible_before_assistant_record(patch_iac_paths):
@@ -1147,6 +1267,84 @@ def test_select_history_naive_ts_treated_as_utc(patch_iac_paths):
 
 
 # ---------------------------------------------------------------------------
+# _cap_history_chars — hard character budget so the inlined history block
+# can never blow past the kernel's per-argument exec() limit (cycle 8686:
+# myspec-reviewer failed to reconnect with "Argument list too long" after a
+# chatty 24h window produced an oversized --system-prompt argument).
+# ---------------------------------------------------------------------------
+
+
+def test_cap_history_chars_drops_oldest_when_over_budget(patch_iac_paths):
+    iac = patch_iac_paths
+    selected = [
+        {"role": "user", "content": "a" * 100, "source_ids": ["1"]},
+        {"role": "assistant", "content": "b" * 100, "source_ids": ["1"]},
+        {"role": "user", "content": "c" * 100, "source_ids": ["2"]},
+        {"role": "assistant", "content": "d" * 100, "source_ids": ["2"]},
+    ]
+    capped = iac._cap_history_chars(selected, max_chars=250)
+    # Oldest records dropped first; total content stays under budget.
+    assert capped == selected[-2:]
+
+
+def test_cap_history_chars_truncates_single_oversized_record(patch_iac_paths):
+    iac = patch_iac_paths
+    original = {"role": "user", "content": "x" * 1000, "source_ids": ["1"]}
+    capped = iac._cap_history_chars([dict(original)], max_chars=200)
+    # Never drop the very last record — but do not pass it through whole
+    # either: one oversized record is what blew the exec() arg limit.
+    assert len(capped) == 1
+    assert capped[0]["content"].endswith(iac._HISTORY_TRUNCATION_MARKER)
+    assert iac._history_record_chars(capped[0]) <= 200
+    # The caller's record is not mutated in place.
+    assert original["content"] == "x" * 1000
+
+
+def test_cap_history_chars_counts_role_prefix_in_budget(patch_iac_paths):
+    """The rendered form is `**<role>**: <content>`, so the prefix counts."""
+    iac = patch_iac_paths
+    m = {"role": "assistant", "content": "abc"}
+    # len("assistant") + len("abc") + prefix/newline overhead
+    assert iac._history_record_chars(m) == 9 + 3 + iac._HISTORY_RECORD_OVERHEAD
+
+
+def test_cap_history_chars_budget_is_utf8_bytes(patch_iac_paths):
+    """MAX_ARG_STRLEN is a byte limit — counting characters would let
+    multi-byte content through at up to 4x the real size."""
+    iac = patch_iac_paths
+    # 300 chars, 900 bytes.
+    selected = [{"role": "user", "content": "☃" * 300}]
+    capped = iac._cap_history_chars(selected, max_chars=400)
+    assert len(capped[0]["content"].encode("utf-8")) <= 400
+    assert capped[0]["content"].endswith(iac._HISTORY_TRUNCATION_MARKER)
+    # A multi-byte character is never cut in half.
+    assert "�" not in capped[0]["content"]
+
+
+def test_cap_history_chars_noop_when_under_budget(patch_iac_paths):
+    iac = patch_iac_paths
+    selected = [{"role": "user", "content": "short", "source_ids": ["1"]}]
+    assert iac._cap_history_chars(selected, max_chars=40_000) == selected
+
+
+def test_select_history_for_prompt_caps_oversized_recent_window(patch_iac_paths):
+    iac = patch_iac_paths
+    history: list[dict] = []
+    # 10 turns (20 records) within 24h, each message far larger than the
+    # per-message average CHAT_HISTORY_MAX_CHARS budget allows in total.
+    for i in range(10):
+        pair = _pair(i, offset_minutes=-(60 + i))
+        for m in pair:
+            m["content"] = m["content"] * 2000  # ~4-6KB per record
+        history.extend(pair)
+    selected = iac._select_history_for_prompt(history)
+    total_chars = sum(len(str(m["content"])) for m in selected)
+    assert total_chars <= iac.CHAT_HISTORY_MAX_CHARS
+    # Most recent turn must survive the trim.
+    assert selected[-1]["content"] == history[-1]["content"]
+
+
+# ---------------------------------------------------------------------------
 # _build_system_prompt — only the chat-history block changed.
 # ---------------------------------------------------------------------------
 
@@ -1174,6 +1372,49 @@ def test_build_system_prompt_includes_selected_records(patch_iac_paths):
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def mock_sdk(patch_iac_paths, monkeypatch):
+    """Pre-populate _SDK_IMPORT_CACHE with lightweight fakes.
+
+    Avoids the ~450ms real claude_agent_sdk import that _build_options() /
+    _build_send_reply_server() trigger on the first call to _import_claude_sdk().
+    Tests that call _build_options() use this fixture so they don't pay the
+    one-time SDK cold-import cost (~450 ms per test run saved).
+
+    _FakeOptions stores ClaudeAgentOptions kwargs as attributes so assertions
+    like `options.model == "haiku"` work without the real SDK classes.
+    """
+    iac = patch_iac_paths
+
+    class _FakeOptions:
+        """Lightweight stand-in for ClaudeAgentOptions; stores kwargs as attrs."""
+
+        def __init__(self, **kwargs):
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+    _tool_mock = MagicMock(side_effect=lambda *args, **kw: MagicMock())
+    _server_mock = MagicMock(return_value=MagicMock())
+
+    monkeypatch.setattr(
+        iac,
+        "_SDK_IMPORT_CACHE",
+        (
+            MagicMock(),  # AssistantMessage
+            _FakeOptions,  # ClaudeAgentOptions — accepts **kwargs, stores as attrs
+            MagicMock(),  # ClaudeSDKClient
+            MagicMock(),  # ResultMessage
+            MagicMock(),  # TextBlock
+            MagicMock(),  # ThinkingBlock
+            MagicMock(),  # ToolUseBlock
+            _server_mock,  # create_sdk_mcp_server
+            _tool_mock,  # tool — called as tool(name, desc, schema, handler)
+            MagicMock(),  # SystemMessage
+        ),
+    )
+    return iac
+
+
 def _make_options_session(iac, cfg: dict, name: str = "x"):
     sess = iac.InternalAgentSession.__new__(iac.InternalAgentSession)
     sess.name = name
@@ -1184,30 +1425,30 @@ def _make_options_session(iac, cfg: dict, name: str = "x"):
     return sess
 
 
-def test_build_options_passes_model_alias_through(patch_iac_paths):
-    iac = patch_iac_paths
+def test_build_options_passes_model_alias_through(mock_sdk):
+    iac = mock_sdk
     sess = _make_options_session(iac, cfg={"model": "haiku"})
     options = sess._build_options()
     assert options.model == "haiku"
 
 
-def test_build_options_strips_whitespace_around_model(patch_iac_paths):
-    iac = patch_iac_paths
+def test_build_options_strips_whitespace_around_model(mock_sdk):
+    iac = mock_sdk
     sess = _make_options_session(iac, cfg={"model": "  sonnet  "})
     options = sess._build_options()
     assert options.model == "sonnet"
 
 
-def test_build_options_passes_full_model_id_through(patch_iac_paths):
-    iac = patch_iac_paths
+def test_build_options_passes_full_model_id_through(mock_sdk):
+    iac = mock_sdk
     sess = _make_options_session(iac, cfg={"model": "claude-opus-4-7"})
     options = sess._build_options()
     assert options.model == "claude-opus-4-7"
 
 
 @pytest.mark.parametrize("bad", [None, "", "   ", 42, ["sonnet"], {"x": 1}])
-def test_build_options_omits_model_when_absent_or_invalid(patch_iac_paths, bad):
-    iac = patch_iac_paths
+def test_build_options_omits_model_when_absent_or_invalid(mock_sdk, bad):
+    iac = mock_sdk
     cfg: dict = {} if bad is None else {"model": bad}
     sess = _make_options_session(iac, cfg=cfg)
     options = sess._build_options()
@@ -1882,6 +2123,7 @@ def _install_fake_claude_sdk(monkeypatch):
         "ToolUseBlock",
         "create_sdk_mcp_server",
         "tool",
+        "SystemMessage",
     ):
         # Use distinct sentinel objects so positional-order tests can
         # assert identity rather than just non-None.
@@ -1891,7 +2133,7 @@ def _install_fake_claude_sdk(monkeypatch):
     return fake
 
 
-def test_import_claude_sdk_returns_nine_tuple_in_fixed_order(monkeypatch):
+def test_import_claude_sdk_returns_symbols_in_fixed_order(monkeypatch):
     """The lazy cache must yield exactly these symbols in this order;
     every call site in internal_agent_chat.py depends on it.
     """
@@ -1900,7 +2142,7 @@ def test_import_claude_sdk_returns_nine_tuple_in_fixed_order(monkeypatch):
 
     result = iac._import_claude_sdk()
     assert isinstance(result, tuple)
-    assert len(result) == 9
+    assert len(result) == 10
     assert result == (
         fake.AssistantMessage,
         fake.ClaudeAgentOptions,
@@ -1911,6 +2153,7 @@ def test_import_claude_sdk_returns_nine_tuple_in_fixed_order(monkeypatch):
         fake.ToolUseBlock,
         fake.create_sdk_mcp_server,
         fake.tool,
+        fake.SystemMessage,
     )
 
 
@@ -1945,10 +2188,13 @@ def test_invoke_sdk_once_unpack_matches_import_order(monkeypatch):
         _,
         _,
         _,
+        system_msg,
     ) = iac._import_claude_sdk()
     assert assistant_msg is fake.AssistantMessage
     assert result_msg is fake.ResultMessage
     assert text_block is fake.TextBlock
+    # Position 9 (last) — read by the run-boundary loop for task frames.
+    assert system_msg is fake.SystemMessage
 
 
 # ---------------------------------------------------------------------------
@@ -2142,3 +2388,913 @@ def test_reconcile_clears_backoff_on_successful_start(patch_iac_paths, monkeypat
 
     assert "a" in fleet._sessions
     assert "a" not in fleet._start_failures
+
+
+# ---------------------------------------------------------------------------
+# _notify_main_inbox_on_timeout
+# ---------------------------------------------------------------------------
+
+
+class TestNotifyMainInboxOnTimeout:
+    """Tests for the turn-timeout inbox notification helper."""
+
+    def _inbox(self, iac) -> Path:
+        p = iac.INBOX_FILE
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if not p.exists():
+            p.write_text("[]")
+        return p
+
+    def _read_inbox(self, iac) -> list:
+        return json.loads(self._inbox(iac).read_text())
+
+    def test_writes_message_to_main_inbox(self, patch_iac_paths):
+        iac = patch_iac_paths
+        self._inbox(iac)
+        iac._notify_main_inbox_on_timeout(
+            agent_name="doordot-reviewer",
+            ids=["abc-123"],
+            prompt_snippet="Please review PR https://github.com/doordot/doordot-monorepo/pull/204",
+            timeout_seconds=900,
+        )
+        items = self._read_inbox(iac)
+        assert len(items) == 1
+        msg = items[0]
+        assert msg["type"] == "message"
+        assert msg["source"] == "internal_agent_chat"
+        assert "doordot-reviewer" in msg["subject"]
+        assert "900" in msg["subject"]
+
+    def test_envelope_contains_agent_name(self, patch_iac_paths):
+        iac = patch_iac_paths
+        self._inbox(iac)
+        iac._notify_main_inbox_on_timeout(
+            agent_name="myspec-reviewer",
+            ids=["id-1"],
+            prompt_snippet="some task",
+            timeout_seconds=600,
+        )
+        msg = self._read_inbox(iac)[0]
+        assert msg["agent"] == "myspec-reviewer"
+
+    def test_envelope_contains_timed_out_ids(self, patch_iac_paths):
+        iac = patch_iac_paths
+        self._inbox(iac)
+        iac._notify_main_inbox_on_timeout(
+            agent_name="doordot-reviewer",
+            ids=["id-a", "id-b"],
+            prompt_snippet="",
+            timeout_seconds=900,
+        )
+        msg = self._read_inbox(iac)[0]
+        assert msg["timed_out_ids"] == ["id-a", "id-b"]
+        assert "id-a" in msg["content"]
+        assert "id-b" in msg["content"]
+
+    def test_snippet_truncated_to_limit(self, patch_iac_paths):
+        iac = patch_iac_paths
+        self._inbox(iac)
+        long_prompt = "X" * 500
+        iac._notify_main_inbox_on_timeout(
+            agent_name="agent",
+            ids=["id-1"],
+            prompt_snippet=long_prompt,
+            timeout_seconds=900,
+        )
+        msg = self._read_inbox(iac)[0]
+        # Content should contain truncated snippet — not the full 500 chars
+        assert "X" * 500 not in msg["content"]
+        # Truncation marker is present
+        assert "…" in msg["content"]
+
+    def test_snippet_not_truncated_when_short(self, patch_iac_paths):
+        iac = patch_iac_paths
+        self._inbox(iac)
+        short_prompt = "short task"
+        iac._notify_main_inbox_on_timeout(
+            agent_name="agent",
+            ids=["id-1"],
+            prompt_snippet=short_prompt,
+            timeout_seconds=900,
+        )
+        msg = self._read_inbox(iac)[0]
+        assert "short task" in msg["content"]
+        assert "…" not in msg["content"]
+
+    def test_empty_prompt_does_not_crash(self, patch_iac_paths):
+        iac = patch_iac_paths
+        self._inbox(iac)
+        iac._notify_main_inbox_on_timeout(
+            agent_name="agent",
+            ids=["id-1"],
+            prompt_snippet="",
+            timeout_seconds=900,
+        )
+        items = self._read_inbox(iac)
+        assert len(items) == 1  # envelope still written
+
+    def test_timeout_seconds_in_subject_and_content(self, patch_iac_paths):
+        iac = patch_iac_paths
+        self._inbox(iac)
+        iac._notify_main_inbox_on_timeout(
+            agent_name="agent",
+            ids=["x"],
+            prompt_snippet="task",
+            timeout_seconds=900,
+        )
+        msg = self._read_inbox(iac)[0]
+        assert "900" in msg["subject"]
+        assert "900" in msg["content"]
+
+    def test_envelope_has_timestamp(self, patch_iac_paths):
+        iac = patch_iac_paths
+        self._inbox(iac)
+        iac._notify_main_inbox_on_timeout(
+            agent_name="agent",
+            ids=["x"],
+            prompt_snippet="task",
+            timeout_seconds=900,
+        )
+        msg = self._read_inbox(iac)[0]
+        assert "timestamp" in msg
+        # ISO 8601 basic check
+        assert "T" in msg["timestamp"]
+
+    def test_snippet_constant_matches_truncation_boundary(self, patch_iac_paths):
+        """_TIMEOUT_SNIPPET_LEN must equal the actual truncation boundary."""
+        iac = patch_iac_paths
+        self._inbox(iac)
+        limit = iac._TIMEOUT_SNIPPET_LEN
+        exact_prompt = "A" * limit
+        over_prompt = "A" * (limit + 1)
+
+        # Exactly at boundary — no truncation
+        self._inbox(iac).write_text("[]")
+        iac._notify_main_inbox_on_timeout("a", ["x"], exact_prompt, 900)
+        msg = self._read_inbox(iac)[0]
+        assert "…" not in msg["content"]
+
+        # One over — truncation triggered
+        self._inbox(iac).write_text("[]")
+        iac._notify_main_inbox_on_timeout("a", ["x"], over_prompt, 900)
+        msg = self._read_inbox(iac)[0]
+        assert "…" in msg["content"]
+
+
+def _make_bare_session(iac):
+    """Build an InternalAgentSession without running __init__ (which spins
+    up a real thread + SDK connect). Only the attributes is_alive() reads
+    are set."""
+    sess = iac.InternalAgentSession.__new__(iac.InternalAgentSession)
+    sess.name = "bare"
+    sess._stop_event = threading.Event()
+    return sess
+
+
+class TestIsAliveThreadCheck:
+    """Regression coverage for the reliability bug (evolve cycle 5949):
+    is_alive() previously only checked `_sdk is not None and not
+    _stop_event.is_set()`, so a worker thread that crashed with an
+    exception escaping `_worker()` was reported alive forever — `_run_loop`'s
+    `finally` block never cleared `_sdk` or set `_stop_event` on that path.
+    """
+
+    def test_alive_when_sdk_set_and_thread_running_and_not_stopped(
+        self, patch_iac_paths
+    ):
+        iac = patch_iac_paths
+        sess = _make_bare_session(iac)
+        sess._sdk = object()
+        started = threading.Event()
+        release = threading.Event()
+
+        def _spin():
+            started.set()
+            release.wait(timeout=5)
+
+        sess._thread = threading.Thread(target=_spin, daemon=True)
+        sess._thread.start()
+        started.wait(timeout=5)
+        try:
+            assert sess.is_alive() is True
+        finally:
+            release.set()
+            sess._thread.join(timeout=5)
+
+    def test_not_alive_when_thread_has_exited_even_if_sdk_still_set(
+        self, patch_iac_paths
+    ):
+        """This is the exact crash scenario: `_sdk` was never nulled out
+        because the worker's exception escaped past the finally block's
+        normal exit paths, but the thread itself is dead."""
+        iac = patch_iac_paths
+        sess = _make_bare_session(iac)
+        sess._sdk = object()  # stale, non-None — the bug's trigger condition
+        sess._thread = threading.Thread(target=lambda: None, daemon=True)
+        sess._thread.start()
+        sess._thread.join(timeout=5)
+        assert sess._thread.is_alive() is False
+        assert sess.is_alive() is False
+
+    def test_not_alive_when_sdk_is_none(self, patch_iac_paths):
+        iac = patch_iac_paths
+        sess = _make_bare_session(iac)
+        sess._sdk = None
+        sess._thread = threading.Thread(target=lambda: None, daemon=True)
+        sess._thread.start()
+        sess._thread.join(timeout=5)
+        assert sess.is_alive() is False
+
+    def test_not_alive_when_stop_event_set(self, patch_iac_paths):
+        iac = patch_iac_paths
+        sess = _make_bare_session(iac)
+        sess._sdk = object()
+        sess._stop_event.set()
+        started = threading.Event()
+        release = threading.Event()
+
+        def _spin():
+            started.set()
+            release.wait(timeout=5)
+
+        sess._thread = threading.Thread(target=_spin, daemon=True)
+        sess._thread.start()
+        started.wait(timeout=5)
+        try:
+            assert sess.is_alive() is False
+        finally:
+            release.set()
+            sess._thread.join(timeout=5)
+
+
+# ---------------------------------------------------------------------------
+# Run-boundary detection — a run that spawns background subagents emits one
+# `result` frame per turn, and `_invoke_sdk_once` must consume ALL of them.
+#
+# Regression for the "internal agent pauses forever waiting for subagents"
+# bug: breaking at the first ResultMessage stranded the continuation frames
+# in the SDK's bounded (max_buffer_size=100) receive channel, which wedged
+# the SDK reader task — the same task that services SDK-MCP control
+# requests — so the agent's own `send_reply` call hung until the next inbox
+# message happened to resume reading, and that message then received the
+# PREVIOUS run's text (a ~10ms "turn").
+# ---------------------------------------------------------------------------
+
+
+class _FakeTextBlock:
+    def __init__(self, text):
+        self.text = text
+
+
+class _FakeThinkingBlock:
+    def __init__(self, thinking):
+        self.thinking = thinking
+
+
+class _FakeAssistantMessage:
+    def __init__(self, *blocks, parent_tool_use_id=None):
+        self.content = list(blocks)
+        self.parent_tool_use_id = parent_tool_use_id
+
+
+class _FakeResultMessage:
+    def __init__(
+        self, session_id="sess-1", total_cost_usd=1.5, duration_ms=42, is_error=False
+    ):
+        self.session_id = session_id
+        self.total_cost_usd = total_cost_usd
+        self.duration_ms = duration_ms
+        self.is_error = is_error
+
+
+class _FakeSystemMessage:
+    def __init__(self, subtype, data=None, **attrs):
+        self.subtype = subtype
+        self.data = data or {}
+        for k, v in attrs.items():
+            setattr(self, k, v)
+
+
+class _FakeStreamSDK:
+    """Fake ClaudeSDKClient with the real channel semantics that matter.
+
+    `receive_messages()` is a fresh async generator each call but drains a
+    SHARED queue, so frames a previous turn did not consume are still there
+    for the next one — exactly the leftover behaviour of the SDK's anyio
+    memory stream, and the thing the desync bug depended on.
+    """
+
+    def __init__(self, *batches):
+        import asyncio as _asyncio
+
+        self._q = _asyncio.Queue()
+        self._batches = [list(b) for b in batches]
+        self.prompts = []
+
+    def preload(self, *msgs):
+        for m in msgs:
+            self._q.put_nowait(m)
+
+    async def query(self, prompt):
+        self.prompts.append(prompt)
+        batch = self._batches.pop(0) if self._batches else []
+        for m in batch:
+            self._q.put_nowait(m)
+
+    async def receive_messages(self):
+        while True:
+            yield await self._q.get()
+
+    def pending(self):
+        return self._q.qsize()
+
+
+def _install_stream_sdk(monkeypatch):
+    """Install a claude_agent_sdk stub whose message classes are real,
+    instantiable types so `_invoke_sdk_once`'s isinstance dispatch works.
+    """
+    import sys
+    import types
+
+    import internal_agent_chat as iac
+
+    fake = types.ModuleType("claude_agent_sdk")
+    fake.AssistantMessage = _FakeAssistantMessage
+    fake.ResultMessage = _FakeResultMessage
+    fake.SystemMessage = _FakeSystemMessage
+    fake.TextBlock = _FakeTextBlock
+    fake.ThinkingBlock = _FakeThinkingBlock
+    for sym in (
+        "ClaudeAgentOptions",
+        "ClaudeSDKClient",
+        "ToolUseBlock",
+        "create_sdk_mcp_server",
+        "tool",
+    ):
+        setattr(fake, sym, type(sym, (), {"_stub_name": sym}))
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake)
+    monkeypatch.setattr(iac, "_SDK_IMPORT_CACHE", None)
+    return fake
+
+
+def _stream_session(iac, sdk, *, turn_timeout=10):
+    sess = iac.InternalAgentSession.__new__(iac.InternalAgentSession)
+    sess.name = "runboundary"
+    sess._sdk = sdk
+    sess._turn_timeout = turn_timeout
+    sess._session_id = None
+    sess._save_session_id = lambda sid: None
+    return sess
+
+
+def _fast_windows(monkeypatch, iac):
+    """Shrink the grace windows so tests finish in milliseconds."""
+    monkeypatch.setattr(iac, "POST_RESULT_DRAIN_S", 0.05)
+    monkeypatch.setattr(iac, "POST_TASK_DRAIN_S", 0.05)
+    monkeypatch.setattr(iac, "INFLIGHT_IDLE_TIMEOUT_S", 0.20)
+    monkeypatch.setattr(iac, "surface_error", lambda *a, **k: None)
+
+
+# ── _apply_task_lifecycle ──────────────────────────────────────
+
+
+def test_task_lifecycle_tracks_agent_start_and_notification(patch_iac_paths):
+    iac = patch_iac_paths
+    inflight = set()
+    started = _FakeSystemMessage("task_started", task_id="t1", task_type="local_agent")
+    assert iac._apply_task_lifecycle(started, inflight) is True
+    assert inflight == {"t1"}
+    done = _FakeSystemMessage("task_notification", task_id="t1", status="completed")
+    assert iac._apply_task_lifecycle(done, inflight) is False
+    assert inflight == set()
+
+
+def test_task_lifecycle_ignores_background_shells(patch_iac_paths):
+    """`local_bash` tasks may never reach a terminal status — tracking one
+    would hold every turn open until the idle timeout.
+    """
+    iac = patch_iac_paths
+    inflight = set()
+    shell = _FakeSystemMessage("task_started", task_id="b1", task_type="local_bash")
+    assert iac._apply_task_lifecycle(shell, inflight) is False
+    assert inflight == set()
+
+
+def test_task_lifecycle_clears_on_terminal_task_updated(patch_iac_paths):
+    """A terminal state can arrive ONLY as `task_updated` (no notification)."""
+    iac = patch_iac_paths
+    inflight = {"t1"}
+    iac._apply_task_lifecycle(
+        _FakeSystemMessage(
+            "task_updated", data={"task_id": "t1", "patch": {"status": "completed"}}
+        ),
+        inflight,
+    )
+    assert inflight == set()
+
+
+def test_task_lifecycle_keeps_task_on_nonterminal_update(patch_iac_paths):
+    iac = patch_iac_paths
+    inflight = {"t1"}
+    iac._apply_task_lifecycle(
+        _FakeSystemMessage(
+            "task_updated", data={"task_id": "t1", "patch": {"status": "running"}}
+        ),
+        inflight,
+    )
+    assert inflight == {"t1"}
+
+
+def test_task_lifecycle_reads_task_id_from_raw_data(patch_iac_paths):
+    """Base `SystemMessage` carries only the raw payload, not attributes."""
+    iac = patch_iac_paths
+    inflight = set()
+    assert (
+        iac._apply_task_lifecycle(
+            _FakeSystemMessage(
+                "task_started", data={"task_id": "t9", "task_type": "local_workflow"}
+            ),
+            inflight,
+        )
+        is True
+    )
+    assert inflight == {"t9"}
+
+
+def test_task_lifecycle_keeps_task_on_nonterminal_notification(patch_iac_paths):
+    """A notification that is explicitly non-terminal must not clear the task.
+
+    Defensive: SDK 0.1.76 types `TaskNotificationStatus` as
+    ``completed|failed|stopped``, so no real notification frame currently
+    carries a non-terminal status — in-progress updates arrive as
+    `task_progress`. This pins the behavior in case that changes.
+    """
+    iac = patch_iac_paths
+    inflight = {"t1"}
+    iac._apply_task_lifecycle(
+        _FakeSystemMessage("task_notification", task_id="t1", status="running"),
+        inflight,
+    )
+    assert inflight == {"t1"}
+
+
+def test_task_lifecycle_clears_on_notification_without_status(patch_iac_paths):
+    """A missing status is treated as terminal — refusing to discard would
+    pin the task and hold the turn open until INFLIGHT_IDLE_TIMEOUT_S."""
+    iac = patch_iac_paths
+    inflight = {"t1"}
+    iac._apply_task_lifecycle(
+        _FakeSystemMessage("task_notification", task_id="t1"), inflight
+    )
+    assert inflight == set()
+
+
+def test_task_lifecycle_reads_patch_from_typed_attribute(patch_iac_paths):
+    """`TaskUpdatedMessage` exposes `patch` as an attribute, not only in `data`."""
+    iac = patch_iac_paths
+    inflight = {"t1"}
+    iac._apply_task_lifecycle(
+        _FakeSystemMessage("task_updated", task_id="t1", patch={"status": "completed"}),
+        inflight,
+    )
+    assert inflight == set()
+
+
+# ── _drain_windows ─────────────────────────────────────────────
+
+
+def test_drain_windows_clamped_to_short_turn_timeout(patch_iac_paths):
+    """A per-agent `timeout_seconds` shorter than the constants must win —
+    otherwise the outer turn timeout fires first and discards the text.
+
+    A window sized at exactly the turn budget is no better than an
+    unclamped one: it starts after the outer `wait_for` has already been
+    running, so it can never elapse first. Assert real headroom.
+    """
+    iac = patch_iac_paths
+    sess = iac.InternalAgentSession.__new__(iac.InternalAgentSession)
+    sess._turn_timeout = 10
+    post_result, post_task, inflight_idle = sess._drain_windows()
+    for window in (post_result, post_task, inflight_idle):
+        assert window < sess._turn_timeout
+
+
+def test_drain_windows_scale_post_task_with_long_timeout(patch_iac_paths):
+    """A long-running agent gets a proportionally longer post-task window so
+    a slow continuation turn is not cut off at a flat 30s."""
+    iac = patch_iac_paths
+    sess = iac.InternalAgentSession.__new__(iac.InternalAgentSession)
+    sess._turn_timeout = 1800
+    _, post_task, inflight_idle = sess._drain_windows()
+    assert post_task > iac.POST_TASK_DRAIN_S
+    assert post_task <= iac.INFLIGHT_IDLE_TIMEOUT_S
+    assert inflight_idle == iac.INFLIGHT_IDLE_TIMEOUT_S
+
+
+# ── _invoke_sdk_once: the run boundary ─────────────────────────
+
+
+def test_invoke_sdk_once_reads_past_result_frame_while_task_in_flight(
+    patch_iac_paths, monkeypatch
+):
+    """THE regression: a result frame with a subagent still in flight is a
+    TURN boundary, not the end of the run. The loop must keep reading, pick
+    up the continuation turn's text, and leave nothing buffered.
+    """
+    iac = patch_iac_paths
+    _install_stream_sdk(monkeypatch)
+    _fast_windows(monkeypatch, iac)
+
+    sdk = _FakeStreamSDK(
+        [
+            _FakeAssistantMessage(_FakeTextBlock("Launching a subagent.")),
+            _FakeSystemMessage("task_started", task_id="t1", task_type="local_agent"),
+            # Turn 1 ends here — the OLD code stopped reading at this frame.
+            _FakeResultMessage(total_cost_usd=1.0, is_error=False),
+            # ... subagent finishes and the CLI wakes the parent ...
+            _FakeSystemMessage("task_notification", task_id="t1", status="completed"),
+            _FakeAssistantMessage(_FakeTextBlock("Subagent done; final answer.")),
+            _FakeResultMessage(total_cost_usd=2.5, is_error=False),
+        ]
+    )
+    sess = _stream_session(iac, sdk)
+
+    (
+        runner_error,
+        text_parts,
+        cost,
+        duration_ms,
+        sdk_is_error,
+        timed_out,
+        thinking_parts,
+    ) = asyncio.run(sess._invoke_sdk_once("review this PR", ["id-1"]))
+
+    assert runner_error is None
+    assert timed_out is False
+    # The continuation turn is a separate paragraph, not a continuation of
+    # turn 1's last sentence. (This assertion used to compensate for the
+    # missing break with a leading space on the second fragment.)
+    assert "".join(text_parts) == (
+        "Launching a subagent.\n\nSubagent done; final answer."
+    )
+    # Last frame wins for cost; duration is measured to the last result frame.
+    assert cost == 2.5
+    assert duration_ms is not None
+    assert sdk_is_error is False
+    assert thinking_parts == []
+    # Nothing stranded => nothing to leak into the next turn.
+    assert sdk.pending() == 0
+
+
+def test_invoke_sdk_once_stops_at_result_when_no_tasks_in_flight(
+    patch_iac_paths, monkeypatch
+):
+    """The common no-subagent case must still finish at its single result
+    frame after only the short grace window.
+    """
+    iac = patch_iac_paths
+    _install_stream_sdk(monkeypatch)
+    _fast_windows(monkeypatch, iac)
+
+    sdk = _FakeStreamSDK(
+        [
+            _FakeAssistantMessage(
+                _FakeThinkingBlock("pondering"), _FakeTextBlock("done")
+            ),
+            _FakeResultMessage(total_cost_usd=0.25),
+        ]
+    )
+    sess = _stream_session(iac, sdk)
+    _, text_parts, cost, _, is_err, timed_out, thinking = asyncio.run(
+        sess._invoke_sdk_once("hi", ["id-1"])
+    )
+    assert "".join(text_parts) == "done"
+    assert thinking == ["pondering"]
+    assert cost == 0.25
+    assert (is_err, timed_out) == (False, False)
+
+
+def test_invoke_sdk_once_excludes_subagent_sidechain_text(patch_iac_paths, monkeypatch):
+    """A frame with `parent_tool_use_id` set is a subagent's own transcript.
+    Splicing it into the reply is what made recorded responses read as
+    mid-sentence fragments of internal work.
+    """
+    iac = patch_iac_paths
+    _install_stream_sdk(monkeypatch)
+    _fast_windows(monkeypatch, iac)
+
+    sdk = _FakeStreamSDK(
+        [
+            _FakeAssistantMessage(_FakeTextBlock("Top-level reply.")),
+            _FakeAssistantMessage(
+                _FakeTextBlock("SUBAGENT INTERNAL MONOLOGUE"),
+                parent_tool_use_id="toolu_abc",
+            ),
+            _FakeResultMessage(),
+        ]
+    )
+    sess = _stream_session(iac, sdk)
+    _, text_parts, *_ = asyncio.run(sess._invoke_sdk_once("go", ["id-1"]))
+    joined = "".join(text_parts)
+    assert joined == "Top-level reply."
+    assert "SUBAGENT" not in joined
+
+
+def test_invoke_sdk_once_finalizes_when_task_never_reports_terminal(
+    patch_iac_paths, monkeypatch
+):
+    """A dropped task notification must degrade to "finalize with the text
+    we have", not to a full turn timeout that discards it.
+    """
+    iac = patch_iac_paths
+    _install_stream_sdk(monkeypatch)
+    _fast_windows(monkeypatch, iac)
+
+    sdk = _FakeStreamSDK(
+        [
+            _FakeAssistantMessage(_FakeTextBlock("partial work")),
+            _FakeSystemMessage("task_started", task_id="lost", task_type="local_agent"),
+            _FakeResultMessage(),
+            # no task_notification / task_updated ever arrives
+        ]
+    )
+    sess = _stream_session(iac, sdk, turn_timeout=10)
+    runner_error, text_parts, _, _, _, timed_out, _ = asyncio.run(
+        sess._invoke_sdk_once("go", ["id-1"])
+    )
+    assert timed_out is False  # did NOT burn the whole turn timeout
+    assert runner_error is None
+    assert "".join(text_parts) == "partial work"
+
+
+def test_invoke_sdk_once_sticky_is_error_across_continuation_turns(
+    patch_iac_paths, monkeypatch
+):
+    """A failed intermediate turn must not be masked by a clean continuation."""
+    iac = patch_iac_paths
+    _install_stream_sdk(monkeypatch)
+    _fast_windows(monkeypatch, iac)
+
+    sdk = _FakeStreamSDK(
+        [
+            _FakeSystemMessage("task_started", task_id="t1", task_type="local_agent"),
+            _FakeResultMessage(is_error=True),
+            _FakeSystemMessage("task_notification", task_id="t1", status="completed"),
+            _FakeAssistantMessage(_FakeTextBlock("recovered")),
+            _FakeResultMessage(is_error=False),
+        ]
+    )
+    sess = _stream_session(iac, sdk)
+    (
+        runner_error,
+        text_parts,
+        _cost,
+        _duration_ms,
+        sdk_is_error,
+        timed_out,
+        _thinking,
+    ) = asyncio.run(sess._invoke_sdk_once("go", ["id-1"]))
+
+    assert runner_error is None
+    assert timed_out is False
+    assert "".join(text_parts) == "recovered"
+    assert sdk_is_error is True  # sticky across the clean final frame
+
+
+def test_invoke_sdk_once_flushes_stale_frames_from_a_previous_turn(
+    patch_iac_paths, monkeypatch
+):
+    """Leftovers from a cancelled/timed-out turn must be discarded, not
+    handed to the next prompt as if they answered it.
+    """
+    iac = patch_iac_paths
+    _install_stream_sdk(monkeypatch)
+    _fast_windows(monkeypatch, iac)
+
+    sdk = _FakeStreamSDK(
+        [
+            _FakeAssistantMessage(_FakeTextBlock("answer to the NEW prompt")),
+            _FakeResultMessage(total_cost_usd=9.0),
+        ]
+    )
+    # Simulate a previous turn's abandoned frames sitting in the channel.
+    sdk.preload(
+        _FakeAssistantMessage(_FakeTextBlock("STALE text from the OLD run")),
+        _FakeResultMessage(total_cost_usd=1.0),
+    )
+    sess = _stream_session(iac, sdk)
+    _, text_parts, cost, *_ = asyncio.run(sess._invoke_sdk_once("new", ["id-2"]))
+    joined = "".join(text_parts)
+    assert joined == "answer to the NEW prompt"
+    assert "STALE" not in joined
+    assert cost == 9.0
+
+
+def test_flush_stale_stream_returns_zero_without_sdk(patch_iac_paths, monkeypatch):
+    iac = patch_iac_paths
+    _install_stream_sdk(monkeypatch)
+    sess = _stream_session(iac, None)
+    assert asyncio.run(sess._flush_stale_stream()) == 0
+
+
+class _FlushRaisingSDK(_FakeStreamSDK):
+    """Raises once on the first `receive_messages()`, then behaves normally.
+
+    Models a dead reader task surfacing while the between-turn flush is
+    draining leftovers.
+    """
+
+    def __init__(self, *batches, error="Failed to decode JSON"):
+        super().__init__(*batches)
+        self._error = error
+        self.raised = False
+
+    async def receive_messages(self):
+        if not self.raised:
+            self.raised = True
+            raise Exception(self._error)
+        async for m in super().receive_messages():
+            yield m
+
+
+def test_flush_stale_stream_reraises_fatal_error(patch_iac_paths, monkeypatch):
+    """Swallowing a dead reader here left the caller to `query()` a dead
+    client, which hung until the turn timeout instead of reconnecting."""
+    iac = patch_iac_paths
+    _install_stream_sdk(monkeypatch)
+    sess = _stream_session(iac, _FlushRaisingSDK())
+    with pytest.raises(Exception, match="Failed to decode JSON"):
+        asyncio.run(sess._flush_stale_stream())
+
+
+def test_flush_stale_stream_swallows_non_fatal_error(patch_iac_paths, monkeypatch):
+    iac = patch_iac_paths
+    _install_stream_sdk(monkeypatch)
+    sess = _stream_session(iac, _FlushRaisingSDK(error="transient blip"))
+    assert asyncio.run(sess._flush_stale_stream()) == 0
+
+
+def test_invoke_sdk_once_reconnects_after_fatal_flush(patch_iac_paths, monkeypatch):
+    iac = patch_iac_paths
+    _install_stream_sdk(monkeypatch)
+    _fast_windows(monkeypatch, iac)
+
+    healthy = _FakeStreamSDK(
+        [_FakeAssistantMessage(_FakeTextBlock("ok")), _FakeResultMessage()]
+    )
+    sess = _stream_session(iac, _FlushRaisingSDK())
+    reasons: list = []
+
+    async def _reconnect(reason):
+        reasons.append(reason)
+        sess._sdk = healthy
+        return True
+
+    sess._reconnect_after_error = _reconnect
+
+    runner_error, text_parts, *_ = asyncio.run(sess._invoke_sdk_once("go", ["id-1"]))
+
+    assert len(reasons) == 1  # exactly one reconnect for this turn
+    assert "Failed to decode JSON" in reasons[0]
+    assert runner_error is None
+    assert "".join(text_parts) == "ok"
+    # Flagged so _run_turn_for_group's trailing reconnect is suppressed.
+    assert sess._reconnected_this_turn is True
+
+
+def test_invoke_sdk_once_error_tuple_when_reconnect_leaves_no_client(
+    patch_iac_paths, monkeypatch
+):
+    """The hand-written early-return tuple must match the 7 positions
+    `_run_turn_for_group` unpacks, and must not look retryable."""
+    iac = patch_iac_paths
+    _install_stream_sdk(monkeypatch)
+    _fast_windows(monkeypatch, iac)
+
+    sess = _stream_session(iac, _FlushRaisingSDK())
+
+    async def _reconnect(reason):
+        sess._sdk = None
+        return False
+
+    sess._reconnect_after_error = _reconnect
+
+    result = asyncio.run(sess._invoke_sdk_once("go", ["id-1"]))
+    assert len(result) == 7
+    runner_error, text_parts, cost, duration_ms, sdk_is_error, timed_out, thinking = (
+        result
+    )
+    assert runner_error is not None
+    assert sdk_is_error is True
+    assert timed_out is False
+    assert (text_parts, cost, duration_ms, thinking) == ([], None, None, [])
+    # Must NOT match the retry signature — replaying the prompt here would
+    # risk duplicate side effects.
+    assert iac._is_dead_subprocess_error(runner_error) is False
+
+
+def test_invoke_sdk_once_separator_survives_thinking_only_turn(
+    patch_iac_paths, monkeypatch
+):
+    """A continuation turn that emits only thinking must leave the pending
+    paragraph break armed for the next turn that actually emits text."""
+    iac = patch_iac_paths
+    _install_stream_sdk(monkeypatch)
+    _fast_windows(monkeypatch, iac)
+
+    sdk = _FakeStreamSDK(
+        [
+            _FakeAssistantMessage(_FakeTextBlock("first")),
+            _FakeSystemMessage("task_started", task_id="t1", task_type="local_agent"),
+            _FakeResultMessage(),
+            _FakeAssistantMessage(_FakeThinkingBlock("pondering")),
+            _FakeResultMessage(),
+            _FakeSystemMessage("task_notification", task_id="t1", status="completed"),
+            _FakeAssistantMessage(_FakeTextBlock("second")),
+            _FakeResultMessage(),
+        ]
+    )
+    sess = _stream_session(iac, sdk)
+
+    _, text_parts, _cost, _dur, _err, _to, thinking_parts = asyncio.run(
+        sess._invoke_sdk_once("go", ["id-1"])
+    )
+
+    joined = "".join(text_parts)
+    assert joined == "first\n\nsecond"  # exactly one break, none stray
+    assert not joined.startswith("\n") and not joined.endswith("\n")
+    assert thinking_parts == ["pondering"]
+
+
+def test_invoke_sdk_once_saves_session_id_once_per_run(patch_iac_paths, monkeypatch):
+    """A multi-turn run emits one result frame per turn; re-saving the same
+    id on each of them rewrites the session file for no reason.
+    """
+    iac = patch_iac_paths
+    _install_stream_sdk(monkeypatch)
+    _fast_windows(monkeypatch, iac)
+
+    sdk = _FakeStreamSDK(
+        [
+            _FakeAssistantMessage(_FakeTextBlock("one")),
+            _FakeSystemMessage("task_started", task_id="t1", task_type="local_agent"),
+            _FakeResultMessage(total_cost_usd=1.0, session_id="sid-1"),
+            _FakeSystemMessage("task_notification", task_id="t1", status="completed"),
+            _FakeAssistantMessage(_FakeTextBlock("two")),
+            _FakeResultMessage(total_cost_usd=2.0, session_id="sid-1"),
+        ]
+    )
+    sess = _stream_session(iac, sdk)
+    saved: list = []
+    sess._save_session_id = saved.append
+
+    asyncio.run(sess._invoke_sdk_once("go", ["id-1"]))
+
+    assert saved == ["sid-1"]
+    assert sess._session_id == "sid-1"
+
+
+def test_run_turn_timeout_keeps_partial_text(patch_iac_paths, monkeypatch):
+    """A turn timeout now bounds a whole multi-turn RUN, so discarding
+    `text_parts` would throw away every completed turn's output. Keep it
+    under an explicit marker instead.
+    """
+    iac = patch_iac_paths
+    monkeypatch.setattr(iac, "surface_error", lambda *a, **k: None)
+    monkeypatch.setattr(iac, "_notify_main_inbox_on_timeout", lambda **k: None)
+
+    sess = iac.InternalAgentSession.__new__(iac.InternalAgentSession)
+    sess.name = "planner"
+    sess._turn_timeout = 30
+    sess._session_id = "sid-1"
+    recorded: dict = {}
+
+    async def _fake_invoke(prompt, ids):
+        # (runner_error, text_parts, cost, duration_ms, is_error, timed_out, thinking)
+        return (
+            None,
+            ["Turn one done.", "\n\n", "Turn two half-"],
+            None,
+            None,
+            False,
+            True,
+            [],
+        )
+
+    async def _fake_reconnect(reason):
+        return True
+
+    sess._invoke_sdk_once = _fake_invoke
+    sess._reconnect_after_error = _fake_reconnect
+    sess._build_user_prompt = lambda msgs: "prompt"
+    sess._readable_user_record = lambda msgs: "user text"
+    sess._append_user_record = lambda **kw: None
+    sess._append_assistant_record = lambda **kw: recorded.update(kw)
+
+    asyncio.run(sess._run_turn_for_group("__none__", [{"id": "id-1"}]))
+
+    text = recorded["assistant_text"]
+    assert text.startswith("Turn one done.\n\nTurn two half-")
+    assert "timed out after 30s" in text
+    assert "(partial output above)" in text
+    assert recorded["is_error"] is True

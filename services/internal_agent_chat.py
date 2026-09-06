@@ -63,6 +63,7 @@ from envelope import make_from
 from shared import (
     DEAD_SUBPROCESS_HINTS,
     EFFORT_LEVELS,
+    FATAL_SDK_ERROR_HINTS,
     INBOX_FILE,
     MESSAGES_DIR,
     append_to_history,
@@ -124,7 +125,12 @@ def _import_claude_sdk():
         create_sdk_mcp_server,
         tool,
     )
+    from claude_agent_sdk import SystemMessage
 
+    # NOTE: append-only. Every unpack site spells out all positions, so a
+    # new symbol goes on the END and each caller gains one more `_`.
+    # `SystemMessage` is needed by `_invoke_sdk_once` to read the CLI's
+    # task-lifecycle frames (see the run-boundary section below).
     _SDK_IMPORT_CACHE = (
         AssistantMessage,
         ClaudeAgentOptions,
@@ -135,6 +141,7 @@ def _import_claude_sdk():
         ToolUseBlock,
         create_sdk_mcp_server,
         tool,
+        SystemMessage,
     )
     return _SDK_IMPORT_CACHE
 
@@ -209,12 +216,184 @@ def _is_dead_subprocess_error(msg: str) -> bool:
     return any(h in msg for h in _DEAD_SUBPROCESS_HINTS)
 
 
+def _is_fatal_sdk_error(msg: str) -> bool:
+    """True if *msg* means this SDK client can no longer serve turns.
+
+    Superset of `_is_dead_subprocess_error`: also covers the client-side
+    reader deaths that need a reconnect but must NOT be retried.
+    """
+    if not msg:
+        return False
+    return any(h in msg for h in FATAL_SDK_ERROR_HINTS)
+
+
+# ---------------------------------------------------------------------------
+# Run-boundary detection for background subagent tasks
+# ---------------------------------------------------------------------------
+# The CLI emits one `result` frame per *turn*, but a run in which the agent
+# spawns background subagents (the Task/Agent tool) spans SEVERAL turns:
+# each task completion wakes the parent for a continuation turn, and every
+# one of those ends in its own `result` frame. So "first result frame" does
+# NOT mean "the agent is done".
+#
+# This service used to `break` on the first ResultMessage. Reproduced on
+# 2026-09-04 against claude-agent-sdk 0.2.143, that has three compounding
+# consequences:
+#
+#   1. The assistant record captures only the pre-subagent prologue
+#      ("Now launching the remaining 2 verification agents…"), so the agent
+#      looks like it stopped mid-task.
+#   2. The unread continuation frames pile up in the SDK's receive channel —
+#      an anyio memory stream with `max_buffer_size=100`. It pins at 100
+#      within ~10s, and `Query._read_messages` then blocks on
+#      `_message_send.send()`. That is the SAME task that services
+#      `control_request` frames, i.e. every SDK-MCP tool call. The CLI's
+#      `send_reply` call is starved and hangs (observed tool-result
+#      latencies of 3216s and 13580s) until something resumes reading.
+#   3. When the next inbox message finally arrives, `receive_response()`
+#      hands the buffered frames of the OLD run to the NEW prompt — a ~10ms
+#      "turn" whose text answers the previous request. The transcript then
+#      stays permanently off by one.
+#
+# Operator-visible symptom: "the agent pauses forever waiting for subagents
+# and needs a nudge to continue". The nudge is simply whatever resumes
+# reading the stream.
+#
+# Fix: read until the RUN ends, not until the first TURN ends — keep our own
+# in-flight-task ledger and only finalize on a result frame with nothing in
+# flight. See claude-agent-sdk issue #1088, which fixed the stdin side of
+# this same turn/run split. NOTE: the SDK helper this was modelled on
+# (`Query._track_task_lifecycle`) is gone as of the pinned 0.1.76 — the
+# ledger below is ours to maintain, so re-derive it from the task frames
+# themselves rather than looking for an SDK counterpart.
+#
+# Only delegated agent work is tracked, matching the SDK: a background
+# *shell* (`Bash(run_in_background=True)`, `tail -f`) is reported through the
+# same frames but may never reach a terminal status, so tracking one would
+# hold the turn open indefinitely.
+DEFERRING_TASK_TYPES = frozenset({"local_agent", "local_workflow"})
+TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "stopped", "killed"})
+# Statuses that mean "still working". Used as an allowlist on
+# `task_notification`, which is terminal by definition in the SDK
+# (`TaskNotificationStatus = completed|failed|stopped`; in-progress updates
+# arrive as `task_progress`). Matching non-terminal names rather than
+# terminal ones keeps a status this file has never heard of — a future
+# "cancelled"/"aborted" — from pinning the task in `inflight` and stalling
+# the turn for the whole idle window.
+NON_TERMINAL_TASK_STATUSES = frozenset({"running", "pending", "queued", "in_progress"})
+
+# Grace window after a result frame that arrives with no tasks in flight in
+# a run that never spawned a subagent. The SDK can still push trailing
+# frames 100-1500ms after the result — app/chat.py hit the same thing and
+# uses 1.5s.
+POST_RESULT_DRAIN_S = 2.0
+# Longer window for the same situation in a run that DID spawn subagents.
+# The SDK's ledger has a documented hole: a task that settles *before* the
+# turn's result frame leaves the set empty at that frame even though a
+# continuation turn is still coming. Wait long enough to see it arrive.
+POST_TASK_DRAIN_S = 30.0
+# Floor only. `_drain_windows` scales the post-task window with the agent's
+# turn timeout: after subagent work the parent can spend a long time
+# thinking or reading files before its first continuation frame, and a flat
+# 30s of silence cut that continuation off and discarded its answer. A
+# long-running agent (large `timeout_seconds`) gets a proportionally longer
+# window; the cost is only paid at the end of a run that really is over.
+POST_TASK_DRAIN_FRACTION = 0.1
+# Share of the turn budget any single drain window may occupy. See
+# `_drain_windows` — a window sized at the full budget can never elapse
+# before the outer turn timeout fires.
+DRAIN_WINDOW_BUDGET_FRACTION = 0.5
+# Hard stop for "tasks in flight but the stream has gone completely
+# silent". A dropped task notification (seen once CLI-side: a notification
+# enqueued while the parent was mid-turn was REMOVEd instead of delivered)
+# would otherwise hold the turn open until the full turn timeout and then
+# discard all its text. Finalizing with the output collected so far is the
+# better failure mode.
+INFLIGHT_IDLE_TIMEOUT_S = 300.0
+# Cap on frames discarded by `_flush_stale_stream` in one pass, so a
+# pathological backlog cannot spin the drain loop forever.
+STALE_FLUSH_MAX_FRAMES = 1000
+# Per-frame and total windows for `_flush_stale_stream`, matched to its real
+# sibling `app/chat.py::_async_drain` (per-frame `min(0.2, remaining)`,
+# 2.0s total). The original 50ms per-frame window returned before frames
+# arriving 100-1500ms apart had landed, so they stayed in the SDK's anyio
+# channel for the next turn's iterator to pick up — the exact off-by-one
+# this flush exists to prevent. NOT app/chat.py's 1.5s in-turn post-result
+# drain: that is a different job, and paying it on every turn start would
+# add 1.5s of latency to each turn.
+STALE_FLUSH_FRAME_WAIT_S = 0.2
+STALE_FLUSH_TOTAL_S = 2.0
+
+
+def _apply_task_lifecycle(msg, inflight: set) -> bool:
+    """Fold one `system` task-lifecycle frame into *inflight* (mutated).
+
+    ``task_started`` marks a delegated agent task in flight, and either a
+    ``task_notification`` or a ``task_updated`` patch with a terminal status
+    clears it. Terminal completion can arrive as either frame, so both are
+    handled, and `discard` keeps the pair idempotent.
+
+    Modelled on the SDK's own ledger, which no longer exists as a named
+    helper in the pinned 0.1.76 — this reads the frames directly instead.
+
+    Returns True iff this frame started a NEW agent task — the caller reads
+    that as "the run is not over after all".
+    """
+    subtype = getattr(msg, "subtype", None)
+    data = getattr(msg, "data", None)
+    if not isinstance(data, dict):
+        data = {}
+    # The typed subclasses (TaskStartedMessage etc.) expose these as real
+    # attributes; the base SystemMessage only carries the raw `data` payload.
+    task_id = getattr(msg, "task_id", None) or data.get("task_id")
+    if not task_id:
+        return False
+    if subtype == "task_started":
+        task_type = getattr(msg, "task_type", None) or data.get("task_type")
+        if task_type in DEFERRING_TASK_TYPES:
+            inflight.add(task_id)
+            return True
+    elif subtype == "task_notification":
+        status = getattr(msg, "status", None) or data.get("status")
+        # Default is DISCARD — including for a missing or unrecognised
+        # status. Only an explicitly non-terminal status keeps the task
+        # tracked; see NON_TERMINAL_TASK_STATUSES for why it is an
+        # allowlist rather than a TERMINAL_TASK_STATUSES membership test.
+        if status not in NON_TERMINAL_TASK_STATUSES:
+            inflight.discard(task_id)
+    elif subtype == "task_updated":
+        patch = getattr(msg, "patch", None) or data.get("patch")
+        status = patch.get("status") if isinstance(patch, dict) else None
+        if status in TERMINAL_TASK_STATUSES:
+            inflight.discard(task_id)
+    return False
+
+
 # System-prompt history selection: include every chat record from the last
 # CHAT_HISTORY_RECENT_HOURS regardless of count; if none qualify, fall back
 # to the most recent CHAT_HISTORY_SOFT_LIMIT records, extending the window
 # by one entry at either end so a user/assistant pair is never split.
 CHAT_HISTORY_RECENT_HOURS = 24
 CHAT_HISTORY_SOFT_LIMIT = 20
+
+# Hard character budget for the inlined chat-history block. The whole
+# system prompt (this history plus system.md/constitution.md/agent-specific
+# text) is passed to the bundled `claude` CLI as a single `--system-prompt`
+# argument. Linux caps any single exec() argument at MAX_ARG_STRLEN (128KiB)
+# regardless of the combined ARG_MAX — a burst of large messages within the
+# CHAT_HISTORY_RECENT_HOURS window (e.g. a chatty PR review agent) can push
+# a single record set past that limit with no warning, and `claude` then
+# fails to launch at all with "OSError: [Errno 7] Argument list too long"
+# (observed for myspec-reviewer, cycle 8686). Keep well under the limit to
+# leave headroom for the rest of the prompt.
+CHAT_HISTORY_MAX_CHARS = 40_000
+# Per-record rendering overhead the budget must account for on top of the
+# content itself: `"**" + role + "**: "` (6 bytes around the role) plus the
+# newline `_build_system_prompt` joins records with. Counting one newline
+# per record rather than N-1 is deliberately conservative.
+_HISTORY_RECORD_OVERHEAD = 7
+# Appended to the content of a single record that is over budget on its own.
+_HISTORY_TRUNCATION_MARKER = "… [truncated]"
 
 log = logging.getLogger(__name__)
 
@@ -520,7 +699,59 @@ def _select_history_for_prompt(chat_history: list) -> list:
     ):
         end += 1
 
-    return [m for m in chat_history[start : end + 1] if isinstance(m, dict)]
+    selected = [m for m in chat_history[start : end + 1] if isinstance(m, dict)]
+    return _cap_history_chars(selected, CHAT_HISTORY_MAX_CHARS)
+
+
+def _utf8_len(s: str) -> int:
+    """UTF-8 byte length. MAX_ARG_STRLEN is a *byte* limit, so counting
+    characters would under-count non-ASCII content by up to 4x."""
+    return len(s.encode("utf-8"))
+
+
+def _history_record_chars(m: dict) -> int:
+    """Bytes one record contributes, matching how `_build_system_prompt`
+    renders it: ``"**<role>**: <content>"`` plus the joining newline."""
+    role = str(m.get("role", "unknown"))
+    content = str(m.get("content", ""))
+    return _utf8_len(role) + _utf8_len(content) + _HISTORY_RECORD_OVERHEAD
+
+
+def _cap_history_chars(selected: list, max_chars: int) -> list:
+    """Trim history until the rendered block fits `max_chars` UTF-8 bytes.
+
+    Prevents the `<previous_chat_history>` block from growing past the
+    kernel's per-argument exec() limit (see `CHAT_HISTORY_MAX_CHARS`).
+    Drops the oldest records first; if the single most recent record is
+    still over budget on its own, its content is truncated rather than
+    dropped — keeping it whole is what let one chatty reply push
+    `--system-prompt` past MAX_ARG_STRLEN and fail the CLI launch with
+    `OSError: [Errno 7] Argument list too long`.
+    """
+    if not selected:
+        return selected
+    total = sum(_history_record_chars(m) for m in selected)
+    while len(selected) > 1 and total > max_chars:
+        dropped = selected.pop(0)
+        total -= _history_record_chars(dropped)
+    if total > max_chars:
+        # One oversized record left. Copy before editing — `selected` holds
+        # references into the caller's chat_history.
+        last = dict(selected[-1])
+        content = str(last.get("content", ""))
+        overhead = _history_record_chars(last) - _utf8_len(content)
+        keep = max(0, max_chars - overhead - _utf8_len(_HISTORY_TRUNCATION_MARKER))
+        if keep <= 0:
+            # Budget too small to hold even the marker — drop the content
+            # rather than emit a record that is still over budget.
+            last["content"] = ""
+        else:
+            # Slice by BYTES and discard any partial trailing code point,
+            # so a multi-byte character is never cut in half.
+            truncated = content.encode("utf-8")[:keep].decode("utf-8", "ignore")
+            last["content"] = truncated + _HISTORY_TRUNCATION_MARKER
+        selected[-1] = last
+    return selected
 
 
 def _build_system_prompt(
@@ -625,6 +856,33 @@ _ALLOWED_REPLY_TYPES = (
 # Source value the daemon stamps on every outbound reply. Matches the
 # `source` enum from the inbox.json schema.
 _REPLY_SOURCE = "internal_agent"
+
+# Explicit JSON Schema for the send_reply tool's arguments.
+#
+# NOTE: the {"name": type} shorthand form of input_schema (see
+# claude_agent_sdk._build_input_schema) marks EVERY listed key as
+# "required" in the wire JSON Schema, with no way to opt a field out.
+# `agent`/`message_id` are a mutually-exclusive *optional* pair (the
+# handler enforces "exactly one of the two", not "both required") and
+# `priority` is genuinely optional — using the shorthand here previously
+# forced callers to pass `message_id: ""` as a workaround just to satisfy
+# the schema's required-property check, a self-contradictory tool contract
+# (see memory/dream/learnings/
+# internal-agent-chat-send-reply-schema-contradiction.md). This explicit
+# dict is passed straight through by `_build_input_schema` (it already has
+# top-level "type"/"properties" keys), so only the two fields the handler
+# truly always requires (`type`, `content`) are marked required.
+SEND_REPLY_INPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "agent": {"type": "string"},
+        "message_id": {"type": "string"},
+        "type": {"type": "string"},
+        "content": {"type": "string"},
+        "priority": {"type": "integer"},
+    },
+    "required": ["type", "content"],
+}
 
 
 def _routing_rules(cfg: dict) -> list:
@@ -944,20 +1202,10 @@ def _build_send_reply_server(session_name: str, cfg: dict):
     when each is appropriate. The handler closes over `session_name` so
     self-talk and message_id lookups resolve against the right agent.
     """
-    _, _, _, _, _, _, _, create_sdk_mcp_server, tool = _import_claude_sdk()
+    _, _, _, _, _, _, _, create_sdk_mcp_server, tool, _ = _import_claude_sdk()
     description = _build_tool_description(cfg)
     handler = _build_send_reply_handler(session_name, cfg)
-    decorated = tool(
-        SEND_REPLY_TOOL,
-        description,
-        {
-            "agent": str,
-            "message_id": str,
-            "type": str,
-            "content": str,
-            "priority": int,
-        },
-    )(handler)
+    decorated = tool(SEND_REPLY_TOOL, description, SEND_REPLY_INPUT_SCHEMA)(handler)
     return create_sdk_mcp_server(ROUTING_MCP_SERVER, tools=[decorated])
 
 
@@ -995,6 +1243,10 @@ class InternalAgentSession:
         )
         self._ready = threading.Event()
         self._error: Exception | None = None
+        # Set when `_invoke_sdk_once` reconnects on its own during the
+        # stale-frame flush; read by `_run_turn_for_group` so one turn never
+        # spends two entries from the reconnect thrash budget.
+        self._reconnected_this_turn = False
         self._stop_event = threading.Event()
 
         self._lock = threading.Lock()
@@ -1047,10 +1299,26 @@ class InternalAgentSession:
         self._pending_drain.set()
 
     def is_alive(self) -> bool:
-        """True iff this session has a connected SDK and shutdown has not
-        been requested. Public predicate so the fleet (and tests) don't
-        have to reach into ``_sdk`` / ``_stop_event`` directly."""
-        return self._sdk is not None and not self._stop_event.is_set()
+        """True iff this session has a connected SDK, its worker thread is
+        still running, and shutdown has not been requested. Public predicate
+        so the fleet (and tests) don't have to reach into ``_sdk`` /
+        ``_stop_event`` directly.
+
+        Checking ``self._thread.is_alive()`` (in addition to ``_sdk`` and
+        ``_stop_event``) matters because if ``_worker()`` raises an
+        exception that escapes its internal handlers, ``_run_loop``'s
+        ``finally`` block disconnects the SDK and exits the thread but does
+        not clear ``_sdk`` or set ``_stop_event`` on that path. Without the
+        thread check, a crashed worker would be reported alive forever,
+        so the fleet sweep would keep marking it online and delivering to
+        an inbox nothing is left to drain.
+        """
+        return (
+            self._sdk is not None
+            and self._thread is not None
+            and self._thread.is_alive()
+            and not self._stop_event.is_set()
+        )
 
     # ── thread entry ───────────────────────────────────────────
 
@@ -1084,6 +1352,12 @@ class InternalAgentSession:
             except Exception:
                 pass
             self._loop.close()
+            # Null out _sdk on every exit path (matches the reconnect-failure
+            # paths above at lines ~1177/1189/1203) so a worker that exits
+            # here — whether cleanly or via an uncaught exception from
+            # _worker() — is never mistaken for a connected session even if
+            # is_alive()'s thread check were ever bypassed.
+            self._sdk = None
 
     def _build_options(self) -> ClaudeAgentOptions:
         # Internal-agent SDK options are intentionally identical to
@@ -1102,7 +1376,9 @@ class InternalAgentSession:
         # hot-reloaded on every sweep, so a bad value must degrade to the SDK
         # default rather than reach the CLI — an invalid `--effort` would fail
         # the connect and be retried every 10s.
-        _, ClaudeAgentOptions, ClaudeSDKClient, _, _, _, _, _, _ = _import_claude_sdk()
+        _, ClaudeAgentOptions, ClaudeSDKClient, _, _, _, _, _, _, _ = (
+            _import_claude_sdk()
+        )
         custom = self.cfg.get("system_prompt") or ""
         if not isinstance(custom, str):
             custom = ""
@@ -1169,7 +1445,7 @@ class InternalAgentSession:
 
     async def _connect_sdk(self) -> None:
         options = self._build_options()
-        _, _, ClaudeSDKClient, _, _, _, _, _, _ = _import_claude_sdk()
+        _, _, ClaudeSDKClient, _, _, _, _, _, _, _ = _import_claude_sdk()
         self._sdk = ClaudeSDKClient(options)
         await self._sdk.connect()
         log.info("[%s] connected (resume=%s)", self.name, self._session_id or "<new>")
@@ -1461,6 +1737,97 @@ class InternalAgentSession:
 
     # ── one turn ───────────────────────────────────────────────
 
+    async def _flush_stale_stream(self) -> int:
+        """Discard frames a previous turn left in the SDK receive channel.
+
+        Belt-and-braces for the run-boundary loop in `_invoke_sdk_once`: a
+        turn that hits `self._turn_timeout` is cancelled mid-iteration, so
+        its unread frames stay buffered. Dropping them here — instead of
+        letting the next `query()` consume them as if they answered the new
+        prompt — is what stops one bad turn from putting the transcript
+        permanently off by one.
+
+        Safe only between turns; the worker serializes turns, so it is.
+        Returns the number of frames discarded.
+
+        Raises the underlying exception if the stream reports a fatal SDK
+        error (dead subprocess or dead reader task). Swallowing it here left
+        the caller to `query()` a dead client, which then hung until the
+        turn timeout instead of taking the reconnect path.
+        """
+        sdk = self._sdk
+        if sdk is None:
+            return 0
+        dropped = 0
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + STALE_FLUSH_TOTAL_S
+        it = sdk.receive_messages().__aiter__()
+        while dropped < STALE_FLUSH_MAX_FRAMES:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            try:
+                await asyncio.wait_for(
+                    it.__anext__(),
+                    timeout=min(STALE_FLUSH_FRAME_WAIT_S, remaining),
+                )
+            except (asyncio.TimeoutError, StopAsyncIteration):
+                break
+            except Exception as exc:
+                if _is_fatal_sdk_error(str(exc)):
+                    log.error(
+                        "[%s] fatal SDK error during stale-frame flush: %s",
+                        self.name,
+                        exc,
+                    )
+                    raise
+                log.warning("[%s] stale-frame flush aborted: %s", self.name, exc)
+                break
+            dropped += 1
+        if dropped:
+            log.warning(
+                "[%s] discarded %d stale SDK frame(s) left over from an "
+                "earlier turn (a cancelled/timed-out turn is the usual cause)",
+                self.name,
+                dropped,
+            )
+        return dropped
+
+    def _drain_windows(self) -> tuple[float, float, float]:
+        """`(post_result, post_task, inflight_idle)` waits for this agent.
+
+        Every window is capped at a FRACTION of `self._turn_timeout`, not the
+        whole of it. A window equal to the full budget can never elapse: it
+        only starts once frames stop arriving, while the outer
+        `wait_for(done.wait(), timeout=self._turn_timeout)` has been running
+        since t=0 — so the hard timeout always wins and the graceful
+        "finalize with what we have" path never runs. Leaving headroom is
+        what makes that path reachable for an agent whose `timeout_seconds`
+        is smaller than the raw constants.
+
+        The concrete rule this buys, with the default fraction of 0.5: a
+        window elapses before the hard timeout iff it STARTS in the first
+        half of the turn. That is headroom, not a guarantee — a drain that
+        begins late in the budget is still cut off, which is why the timeout
+        path preserves its partial text rather than relying on this.
+
+        The post-task window scales UP with a long turn timeout so a slow
+        continuation turn is not cut off — see POST_TASK_DRAIN_FRACTION. At
+        the 900s default it lands at 90s, well inside the 450s cap; only a
+        short-timeout agent is squeezed against `budget`.
+        """
+        budget = float(self._turn_timeout) * DRAIN_WINDOW_BUDGET_FRACTION
+        post_result = min(POST_RESULT_DRAIN_S, budget)
+        post_task = min(
+            max(
+                POST_TASK_DRAIN_S, float(self._turn_timeout) * POST_TASK_DRAIN_FRACTION
+            ),
+            INFLIGHT_IDLE_TIMEOUT_S,
+            budget,
+        )
+        inflight_idle = min(INFLIGHT_IDLE_TIMEOUT_S, budget)
+        return post_result, post_task, inflight_idle
+
     async def _invoke_sdk_once(
         self, prompt: str, ids: list[str]
     ) -> tuple[str | None, list[str], float | None, int | None, bool, bool, list[str]]:
@@ -1474,45 +1841,199 @@ class InternalAgentSession:
         error, it carries any partial output up to the failure point.
         ``thinking_parts`` collects each non-empty ``ThinkingBlock.thinking``
         seen during the turn, in order, for the caller to merge/persist.
+
+        Reads to the end of the RUN, not just the first turn: a run that
+        spawns background subagents emits one result frame per turn and this
+        loop must consume all of them. See the "Run-boundary detection"
+        section above for why stopping early wedges the whole session.
+        ``duration_ms`` is therefore wall-clock across the whole run rather
+        than any single result frame's own figure — measured to the LAST
+        result frame, so the trailing drain window is not billed as agent
+        latency.
         """
-        AssistantMessage, _, _, ResultMessage, TextBlock, ThinkingBlock, _, _, _ = (
-            _import_claude_sdk()
-        )
+        (
+            AssistantMessage,
+            _,
+            _,
+            ResultMessage,
+            TextBlock,
+            ThinkingBlock,
+            _,
+            _,
+            _,
+            SystemMessage,
+        ) = _import_claude_sdk()
 
         chunk_q: queue.Queue = queue.Queue()
         done = asyncio.Event()
         text_parts: list[str] = []
         thinking_parts: list[str] = []
 
+        # Drop anything a previous turn left behind before adding to it. A
+        # fatal error here means the client is already unusable, so
+        # reconnect before querying rather than hanging on a dead reader
+        # until the turn timeout.
+        try:
+            await self._flush_stale_stream()
+        except Exception as exc:
+            log.warning(
+                "[%s] reconnecting after fatal stale-flush error: %s", self.name, exc
+            )
+            # Flagged so `_run_turn_for_group` does not reconnect a second
+            # time for the same turn — two successful reconnects would burn
+            # two entries from the thrash budget instead of one.
+            self._reconnected_this_turn = True
+            await self._reconnect_after_error(str(exc))
+
         sdk = self._sdk
-        assert sdk is not None
+        if sdk is None:
+            return (
+                "SDK client unavailable after stale-flush reconnect",
+                text_parts,
+                None,
+                None,
+                True,
+                False,
+                thinking_parts,
+            )
+
+        post_result_drain_s, post_task_drain_s, inflight_idle_s = self._drain_windows()
+
+        summary: dict = {"cost": None, "duration_ms": None, "is_error": False}
 
         async def _runner():
+            inflight: set = set()
+            saw_agent_task = False
+            result_seen = False
+            result_frames = 0
+            started = time.monotonic()
+            last_result_at: float | None = None
+            # Set when a continuation turn starts after text was already
+            # collected, so the next text block is separated from the
+            # previous turn's instead of being glued onto it.
+            need_separator = False
             try:
                 await sdk.query(prompt)
-                async for msg in sdk.receive_response():
-                    if isinstance(msg, AssistantMessage):
-                        for block in msg.content:
-                            if isinstance(block, TextBlock) and block.text:
-                                text_parts.append(block.text)
-                            elif isinstance(block, ThinkingBlock) and block.thinking:
-                                thinking_parts.append(block.thinking)
-                    elif isinstance(msg, ResultMessage):
-                        sid = getattr(msg, "session_id", None)
-                        if sid:
-                            self._session_id = sid
-                            self._save_session_id(sid)
-                        chunk_q.put(
-                            {
-                                "cost": msg.total_cost_usd,
-                                "duration_ms": msg.duration_ms,
-                                "is_error": msg.is_error,
-                            }
+                # `receive_messages()` rather than `receive_response()`: the
+                # latter returns at the first ResultMessage, which is only a
+                # turn boundary. Staying on ONE iterator matters — opening a
+                # second one on the SDK's shared receive channel would steal
+                # frames from this loop.
+                it = sdk.receive_messages().__aiter__()
+                while True:
+                    # How long to wait for the next frame:
+                    #   tasks in flight  → a continuation turn is coming, wait
+                    #   result already seen → grace window, then we're done
+                    #   otherwise        → block (outer turn timeout bounds us)
+                    if inflight:
+                        wait_s = inflight_idle_s
+                    elif result_seen:
+                        wait_s = (
+                            post_task_drain_s if saw_agent_task else post_result_drain_s
+                        )
+                    else:
+                        wait_s = None
+                    try:
+                        if wait_s is None:
+                            msg = await it.__anext__()
+                        else:
+                            msg = await asyncio.wait_for(it.__anext__(), timeout=wait_s)
+                    except StopAsyncIteration:
+                        break
+                    except asyncio.TimeoutError:
+                        if not inflight:
+                            break  # grace window elapsed — the run is over
+                        # Tasks in flight but total silence: a task's terminal
+                        # frame never arrived. Finalize with what we have
+                        # rather than burn the whole turn timeout and then
+                        # throw the text away.
+                        log.warning(
+                            "[%s] %d subagent task(s) still in flight but the SDK "
+                            "stream has been silent for %ds — finalizing the turn "
+                            "with the output collected so far",
+                            self.name,
+                            len(inflight),
+                            int(inflight_idle_s),
+                        )
+                        surface_error(
+                            "internal_agent_chat",
+                            "subagent task never reported terminal status; "
+                            "turn finalized early",
+                            context=self.name
+                            + ":inflight="
+                            + ",".join(sorted(inflight)),
                         )
                         break
+
+                    if isinstance(msg, AssistantMessage):
+                        # A sidechain frame (parent_tool_use_id set) is a
+                        # subagent's own transcript, not this agent's reply —
+                        # concatenating it would splice a subagent's internal
+                        # monologue into the recorded response.
+                        if getattr(msg, "parent_tool_use_id", None) is None:
+                            # Top-level assistant activity after a result
+                            # frame means a continuation turn began. Its text
+                            # is a separate paragraph, not a continuation of
+                            # the previous turn's last sentence.
+                            if result_seen and text_parts:
+                                need_separator = True
+                            result_seen = False
+                            for block in msg.content:
+                                if isinstance(block, TextBlock) and block.text:
+                                    if need_separator:
+                                        text_parts.append("\n\n")
+                                        need_separator = False
+                                    text_parts.append(block.text)
+                                elif (
+                                    isinstance(block, ThinkingBlock) and block.thinking
+                                ):
+                                    thinking_parts.append(block.thinking)
+                    elif isinstance(msg, ResultMessage):
+                        result_frames += 1
+                        result_seen = True
+                        last_result_at = time.monotonic()
+                        sid = getattr(msg, "session_id", None)
+                        # Re-saving an unchanged id would rewrite the session
+                        # file once per turn of a multi-turn run.
+                        if sid and sid != self._session_id:
+                            self._session_id = sid
+                            self._save_session_id(sid)
+                        # Last frame wins for cost (the CLI reports it
+                        # cumulatively per session); is_error is sticky so a
+                        # failed intermediate turn is not masked by a clean
+                        # continuation.
+                        summary["cost"] = msg.total_cost_usd
+                        if msg.is_error:
+                            summary["is_error"] = True
+                    elif isinstance(msg, SystemMessage):
+                        if _apply_task_lifecycle(msg, inflight):
+                            saw_agent_task = True
+                            result_seen = False
             except Exception as exc:
                 chunk_q.put({"error": str(exc)})
             finally:
+                # Measure to the LAST result frame, not to "now": the trailing
+                # drain window (up to post_task_drain_s) is bookkeeping, not
+                # time the agent spent working, and billing it here inflated
+                # every duration the portal renders.
+                if result_frames and last_result_at is not None:
+                    summary["duration_ms"] = int((last_result_at - started) * 1000)
+                if result_frames > 1 or saw_agent_task:
+                    duration_txt = (
+                        f"{summary['duration_ms']}ms"
+                        if summary["duration_ms"] is not None
+                        else "an unknown duration (no result frame)"
+                    )
+                    log.info(
+                        "[%s] run spanned %d result frame(s) across %s "
+                        "(subagents=%s, unresolved_tasks=%d)",
+                        self.name,
+                        result_frames,
+                        duration_txt,
+                        saw_agent_task,
+                        len(inflight),
+                    )
+                chunk_q.put(dict(summary))
                 done.set()
 
         task = asyncio.create_task(_runner())
@@ -1585,6 +2106,10 @@ class InternalAgentSession:
         # subprocess-death turn would burn 2 entries from the thrash budget
         # instead of 1.
         reconnected_in_loop = False
+        # `_invoke_sdk_once` can also reconnect on its own (a fatal error
+        # surfacing during the stale-frame flush). It reports that here so
+        # the trailing reconnect below is suppressed the same way.
+        self._reconnected_this_turn = False
         while True:
             attempts += 1
             # NOTE: the second invocation's text_parts/cost/duration_ms/
@@ -1620,6 +2145,12 @@ class InternalAgentSession:
                 reconnected_in_loop = True
             break
 
+        # Fold in a reconnect `_invoke_sdk_once` performed for the stale-frame
+        # flush, so it counts against the thrash budget exactly once.
+        reconnected_in_loop = reconnected_in_loop or getattr(
+            self, "_reconnected_this_turn", False
+        )
+
         if timed_out:
             # Prefer the underlying SDK exception over a generic "timed out"
             # marker — the SDK subprocess may have died which is itself why
@@ -1647,10 +2178,17 @@ class InternalAgentSession:
                     context=self.name + ":ids=" + ",".join(ids),
                 )
                 assistant_text = f"[error] turn timed out after {self._turn_timeout}s"
-            # Any partial `text_parts` is intentionally dropped — without a
-            # streaming buffer there's no way for an operator to distinguish
-            # mid-output truncation from a complete reply, so we surface
-            # the failure cleanly instead of presenting a half-answer.
+            # Keep whatever the run produced before the timeout, below an
+            # explicit marker. A timeout now bounds a whole multi-turn RUN,
+            # so dropping the text discards every completed turn's output,
+            # not a few truncated words. The marker is what the original
+            # "drop it all" rule was really after: an operator must be able
+            # to tell a truncated reply from a complete one.
+            partial_text = "".join(text_parts).strip()
+            if partial_text:
+                assistant_text = (
+                    partial_text + "\n\n" + assistant_text + " (partial output above)"
+                )
             self._append_assistant_record(
                 ids=ids,
                 merged_reply_to=merged_reply_to,
