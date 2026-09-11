@@ -29,7 +29,8 @@ Routes (agent identified via X-Agent-Name header):
                          {unread} (and unread_ids when unread > 0).
                          If the agent is currently "deactivated", returns
                          only a "warning" message telling the external agent
-                         to halt its loop (no last_ping_at update in that case).
+                         to halt its Monitor watch or /loop (no last_ping_at
+                         update in that case).
   POST /upload        -> upload a file artifact to the main agent workspace.
                          Requires X-Agent-Name (like the other routes) plus
                          X-Filename: <basename> (must match
@@ -956,11 +957,11 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/ping" and method == "GET":
             ids = _unread_ids(name)
             if agent.get("status") == "deactivated":
-                # Surface a clear stop-looping signal instead of bouncing
-                # the deactivated agent off a bare 403 (which /ping is
-                # explicitly allowed through to deliver). Include any
-                # pending unread ids so the agent can drain them before
-                # halting its loop.
+                # Surface a clear stop signal instead of bouncing the
+                # deactivated agent off a bare 403 (which /ping is
+                # explicitly allowed through to deliver). /read-inbox and
+                # /write-outbox stay blocked, so unread ids remain queued
+                # until the agent is reactivated.
                 return self._send_json(
                     200,
                     {
@@ -968,9 +969,9 @@ class _Handler(BaseHTTPRequestHandler):
                         "unread_ids": ids,
                         "unread": len(ids),
                         "warning": (
-                            "Deactivated. Before stopping your /loop, you "
-                            "must read all unread messages (POST /read-inbox) "
-                            "and finish pending tasks (POST /write-outbox). "
+                            "Deactivated. Stop your Monitor watch or /loop; "
+                            "unread messages stay queued until you are "
+                            "reactivated. "
                             'May reactivate via POST /update {"status":"online"}.'
                         ),
                     },

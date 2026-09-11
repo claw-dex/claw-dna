@@ -198,7 +198,7 @@
   {
     "id": "register_external_agent",
     "name": "Register External Agent",
-    "description": "CLI to add/update external-agent entries in agents.json and seed empty per-agent inbox/outbox files at /agent/messages/external/<name>/; accepts responsibilities, capabilities (file or inline JSON), and an optional timeout; supports --list, --deactivate, and --setup operational subcommands",
+    "description": "CLI to add/update external-agent entries in agents.json and seed empty per-agent inbox/outbox files at /agent/messages/external/<name>/; accepts responsibilities, capabilities (file or inline JSON), and an optional timeout; supports --list, --deactivate, and --setup operational subcommands (--setup prints a Claude Code Monitor watch prompt by default, or a /loop prompt via --client loop)",
     "category": "communication",
     "enabled": true
   },

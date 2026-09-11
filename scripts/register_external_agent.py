@@ -21,6 +21,14 @@ Usage:
   uv run python scripts/register_external_agent.py --list
   uv run python scripts/register_external_agent.py --deactivate research-bot
   uv run python scripts/register_external_agent.py --setup research-bot
+  uv run python scripts/register_external_agent.py --setup research-bot --client loop
+
+`--setup` prints the connection prompt for the external agent. The default
+`--client monitor` targets Claude Code: the agent starts one persistent
+`Monitor` watch whose shell script polls GET /ping every `--poll-seconds`
+and prints a line only when something changes, so the agent spends no
+tokens while idle. `--client loop` prints the older `/loop` prompt for
+clients without a Monitor tool (e.g. Codex).
 """
 
 from __future__ import annotations
@@ -29,6 +37,7 @@ import argparse
 import json
 import logging
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -45,6 +54,12 @@ AGENTS_FILE = BASE / "memory" / "agents.json"
 EXTERNAL_DIR = BASE / "messages" / "external"
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$")
+
+DEFAULT_TIMEOUT_SECONDS = 1800
+# How often the Monitor watch script polls GET /ping (--client monitor).
+DEFAULT_POLL_SECONDS = 30
+# Consecutive failed polls before the watch script reports PING_FAILED.
+PING_FAIL_THRESHOLD = 3
 
 # Portal config paths — kept in sync with scripts/portal_config.py.
 PORTAL_CONFIG_PATH = BASE / "memory" / "portal_config.json"
@@ -192,10 +207,107 @@ def _load_basic_auth() -> tuple[str | None, str | None]:
         return None, None
 
 
+def _protocol_text(name: str, base_url: str, creds: str) -> str:
+    """How to fetch, work on, and answer inbox items. Shared by both clients."""
+    curl = f"curl -s -u {shlex.quote(creds)} -H 'X-Agent-Name: {name}'"
+    return (
+        f"`{curl} -H 'Content-Type: application/json' "
+        f"-d '{{\"ids\":<unread_ids>}}' {base_url}/read-inbox` to fetch+mark-read, "
+        "do the work, then reply via "
+        f"`{curl} -H 'Content-Type: application/json' "
+        f'-d \'{{"type":"response","subject":"...","content":"..."}}\' '
+        f"{base_url}/write-outbox`. "
+        "Outbox message schema (single object, or non-empty array of such objects): "
+        "`type` (required) is one of "
+        "`response` (normal reply / result for a request from the main agent), "
+        "`needs_human` (you are blocked and need a human to intervene), "
+        "`error` (you hit an unrecoverable failure while performing the task), "
+        "`info` (unsolicited status updates); "
+        "`subject` (required) is a non-empty short string summarising the message; "
+        "`content` (required) is a non-empty string with the full body / details "
+        "(use this for the actual answer, logs, error trace, or question for the human); "
+        "`reply_to_id` (optional) is the id of the inbox message you are answering. "
+        "Body limit is 1 MB; for larger artefacts upload via POST /upload first and reference the path. "
+        "On any 4xx, read the response's `readme` field and self-correct."
+    )
+
+
+def _monitor_command(name: str, base_url: str, creds: str, poll_seconds: int) -> str:
+    """POSIX sh watch script for Claude Code's Monitor tool.
+
+    Polls GET /ping (which also keeps the agent "online") and prints a line
+    only when the unread set changes, the agent is deactivated, or the API
+    keeps failing — so an idle agent gets no notifications and spends no
+    tokens. Uses only curl + sh builtins, so it also runs under zsh.
+    """
+    curl = (
+        f"curl -s -m 20 -w ' %{{http_code}}' -u {shlex.quote(creds)} "
+        f"-H {shlex.quote('X-Agent-Name: ' + name)} {shlex.quote(base_url + '/ping')}"
+    )
+    return "\n".join(
+        [
+            'prev=""; fails=0',
+            "while true; do",
+            f"  r=$({curl}) || r=' 000'",
+            "  code=${r##* }; body=${r% *}",
+            '  if [ "$code" != 200 ]; then',
+            "    fails=$((fails+1))",
+            # Body is left out on purpose: 4xx bodies carry a multi-line
+            # readme and proxy error pages are HTML, and every output line
+            # becomes a separate Monitor notification.
+            f'    [ "$fails" -eq {PING_FAIL_THRESHOLD} ] && printf \'PING_FAILED http=%s\\n\' "$code"',
+            "  else",
+            f'    [ "$fails" -ge {PING_FAIL_THRESHOLD} ] && echo "PING_RECOVERED"',
+            "    fails=0",
+            '    case "$body" in',
+            # printf, not echo: zsh/dash echo expands "\n" escapes in JSON.
+            '      *\'"status": "deactivated"\'*) printf \'%s\\n\' "DEACTIVATED $body"; exit 0;;',
+            '      \'{"unread": 0}\') prev="";;',
+            '      *) [ "$body" != "$prev" ] && printf \'%s\\n\' "INBOX $body"; prev=$body;;',
+            "    esac",
+            "  fi",
+            f"  sleep {poll_seconds}",
+            "done",
+        ]
+    )
+
+
+def _monitor_prompt(name: str, base_url: str, creds: str, poll_seconds: int) -> str:
+    command = _monitor_command(name, base_url, creds, poll_seconds)
+    return (
+        f"You are external agent '{name}'. Run this as a persistent Monitor:\n\n"
+        f"```sh\n{command}\n```\n\n"
+        f"It polls /ping every {poll_seconds}s and prints only on change:\n"
+        "- `INBOX {...}`: for ids you have not fetched yet, run "
+        + _protocol_text(name, base_url, creds)
+        + "\n"
+        "- `DEACTIVATED {...}`: stop; unread items stay queued until you are "
+        "reactivated."
+    )
+
+
+def _loop_prompt(name: str, base_url: str, creds: str) -> str:
+    return (
+        f"/loop 10m You are external agent '{name}'. Each tick, run "
+        f"`curl -s -u {shlex.quote(creds)} -H 'X-Agent-Name: {name}' {base_url}/ping`. "
+        "If it lists `unread_ids`: for ids you have not fetched yet, run "
+        + _protocol_text(name, base_url, creds)
+        + ' If it returns `"status": "deactivated"`: stop the loop; unread items '
+        "stay queued until you are reactivated."
+    )
+
+
 def cmd_setup(args) -> int:
     name = args.setup.strip()
     if not _NAME_RE.match(name):
         print(f"Invalid agent name {name!r}", file=sys.stderr)
+        return 1
+    client = getattr(args, "client", None) or "monitor"
+    poll_seconds = getattr(args, "poll_seconds", None)
+    if poll_seconds is None:
+        poll_seconds = DEFAULT_POLL_SECONDS
+    if client == "monitor" and poll_seconds <= 0:
+        print("--poll-seconds must be > 0", file=sys.stderr)
         return 1
 
     agents = read_json_file(AGENTS_FILE, default=[])
@@ -209,6 +321,15 @@ def cmd_setup(args) -> int:
             file=sys.stderr,
         )
         return 1
+    # The sweeper marks the agent offline once its last ping is older than
+    # timeout_seconds, so the watch must poll more often than that.
+    timeout = int(agent.get("timeout_seconds") or DEFAULT_TIMEOUT_SECONDS)
+    if client == "monitor" and poll_seconds >= timeout:
+        print(
+            f"--poll-seconds must be < the agent's timeout_seconds ({timeout})",
+            file=sys.stderr,
+        )
+        return 1
 
     public_url = _load_public_url()
     base_url = (public_url or "https://<your-host>") + "/external-agent"
@@ -216,31 +337,12 @@ def cmd_setup(args) -> int:
     user, password = _load_basic_auth()
     creds = f"{user}:{password}" if user and password else "<user>:<pass>"
 
-    instruction = (
-        f"You are external agent '{name}'. Each tick: "
-        f"`curl -s -u {creds} -H 'X-Agent-Name: {name}' {base_url}/ping` — "
-        "if unread>0, "
-        f"`curl -s -u {creds} -H 'X-Agent-Name: {name}' -H 'Content-Type: application/json' "
-        f"-d '{{\"ids\":<unread_ids>}}' {base_url}/read-inbox` to fetch+mark-read, "
-        "do the work, then reply via "
-        f"`curl -s -u {creds} -H 'X-Agent-Name: {name}' -H 'Content-Type: application/json' "
-        f'-d \'{{"type":"response","subject":"...","content":"..."}}\' '
-        f"{base_url}/write-outbox`. "
-        "Outbox message schema (single object, or non-empty array of such objects): "
-        "`type` (required) is one of "
-        "`response` (normal reply / result for a request from the main agent), "
-        "`needs_human` (you are blocked and need a human to intervene), "
-        "`error` (you hit an unrecoverable failure while performing the task), "
-        "`info` (unsolicited status updates); "
-        "`subject` (required) is a non-empty short string summarising the message; "
-        "`content` (required) is a non-empty string with the full body / details "
-        "(use this for the actual answer, logs, error trace, or question for the human); "
-        "Body limit is 1 MB; for larger artefacts upload via POST /upload first and reference the path. "
-        "On any 4xx, read the response's `readme` field and self-correct."
-    )
-
-    print("Paste this to your Agent/Claude/Codex:")
-    print(f"```/loop 10m {instruction}```")
+    if client == "loop":
+        print("Paste this to your Codex / other agent (no Monitor tool):")
+        print(f"```{_loop_prompt(name, base_url, creds)}```")
+    else:
+        print("Paste this into your Claude Code session:")
+        print(_monitor_prompt(name, base_url, creds, poll_seconds))
     return 0
 
 
@@ -252,13 +354,26 @@ def main() -> int:
         "--capabilities-file", help="Path to JSON file with capabilities list"
     )
     p.add_argument("--capabilities-inline", help="Inline JSON list of capabilities")
-    p.add_argument("--timeout-seconds", type=int, default=1800)
+    p.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     p.add_argument("--list", action="store_true", help="List registered agents")
     p.add_argument("--deactivate", metavar="NAME", help="Mark an agent as deactivated")
     p.add_argument(
         "--setup",
         metavar="NAME",
         help="Print connection instructions for an already-registered agent",
+    )
+    p.add_argument(
+        "--client",
+        choices=("monitor", "loop"),
+        default="monitor",
+        help="--setup prompt style: 'monitor' (Claude Code Monitor watch, default) "
+        "or 'loop' (/loop prompt for clients without Monitor, e.g. Codex)",
+    )
+    p.add_argument(
+        "--poll-seconds",
+        type=int,
+        default=DEFAULT_POLL_SECONDS,
+        help="How often the Monitor watch polls /ping (--client monitor only)",
     )
     args = p.parse_args()
 
