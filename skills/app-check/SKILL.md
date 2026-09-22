@@ -1,6 +1,6 @@
 ---
 name: app-check
-description: Headless portal render check using Streamlit's AppTest framework. Catches syntax errors, missing imports, and runtime exceptions that the /_stcore/health endpoint misses. Use when the portal behaves unexpectedly after code changes, when you want to verify server.py loads without errors before restarting, or when debugging a blank/broken portal screen.
+description: Use after editing portal/Streamlit code to confirm the app still renders cleanly before restarting or handing back to the user. Triggers when the portal screen is blank, broken, or behaving unexpectedly after a code change, when the user reports "the portal won't load" or "something looks wrong after my edit", when verifying a fix worked end-to-end, or as a pre-restart safety check that catches errors the basic HTTP health probe would miss.
 ---
 
 # app-check

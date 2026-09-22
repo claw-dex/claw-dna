@@ -15,6 +15,7 @@ Usage:
     python3 service_manager.py cleanup                       # Remove dead entries
     python3 service_manager.py auto-start                    # Start all services with auto_start:true that are not running
 """
+
 import fcntl, json, os, signal, subprocess, sys, tempfile, time
 from contextlib import contextmanager
 from pathlib import Path
@@ -27,7 +28,7 @@ HEARTBEAT_DIR = Path("/agent/memory/heartbeats")
 ALLOWED_PORTS = range(8082, 8091)  # 8082-8090
 # How long (seconds) before a service heartbeat is considered stale.
 # Services should write heartbeats at least this often.
-HEARTBEAT_STALE_THRESHOLD = 600  # 10 minutes
+HEARTBEAT_STALE_THRESHOLD = 900  # 15 minutes
 
 
 _LOCK_PATH = str(SERVICES_FILE) + ".lock"
@@ -46,7 +47,9 @@ def _flock(timeout=10):
                     break
                 except BlockingIOError:
                     if time.monotonic() >= deadline:
-                        raise TimeoutError(f"Could not acquire services.json lock within {timeout}s")
+                        raise TimeoutError(
+                            f"Could not acquire services.json lock within {timeout}s"
+                        )
                     time.sleep(0.05)
             yield
         finally:
@@ -132,7 +135,9 @@ def _find_orphan_pids(command, exclude_pids=None):
                 break
     # Last resort: second non-flag token
     if not pattern:
-        pattern = non_flag[1] if len(non_flag) >= 2 else (non_flag[0] if non_flag else None)
+        pattern = (
+            non_flag[1] if len(non_flag) >= 2 else (non_flag[0] if non_flag else None)
+        )
     if not pattern:
         return []
 
@@ -159,6 +164,7 @@ def _find_orphan_pids(command, exclude_pids=None):
 def _port_in_use(port):
     """Check if a port is in use via socket connect (works for any protocol)."""
     import socket
+
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(1)
@@ -249,7 +255,9 @@ def cmd_start(name, port, command, auto_start=False):
     if port is not None:
         port = int(port)
         if port not in ALLOWED_PORTS:
-            print(f"Error: port must be in {ALLOWED_PORTS.start}-{ALLOWED_PORTS.stop - 1}")
+            print(
+                f"Error: port must be in {ALLOWED_PORTS.start}-{ALLOWED_PORTS.stop - 1}"
+            )
             sys.exit(1)
 
     with _flock():
@@ -262,7 +270,10 @@ def cmd_start(name, port, command, auto_start=False):
             sys.exit(1)
 
         # Check for orphan processes matching the command
-        orphans = _find_orphan_pids(command, exclude_pids={existing_pid} if isinstance(existing_pid, int) else None)
+        orphans = _find_orphan_pids(
+            command,
+            exclude_pids={existing_pid} if isinstance(existing_pid, int) else None,
+        )
         if orphans:
             print(f"Error: found existing process(es) matching '{name}':")
             for pid, cmdline in orphans:
@@ -300,8 +311,12 @@ def cmd_start(name, port, command, auto_start=False):
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
         # Preserve extra fields (auto_start, health_url, etc.) from existing entry
         existing = services.get(name, {})
-        extra = {k: v for k, v in existing.items()
-                 if k not in ("pid", "port", "command", "started", "stdout_log", "stderr_log")}
+        extra = {
+            k: v
+            for k, v in existing.items()
+            if k
+            not in ("pid", "port", "command", "started", "stdout_log", "stderr_log")
+        }
         services[name] = {
             **extra,
             "pid": proc.pid,
@@ -402,7 +417,9 @@ def cmd_restart(name):
                 sys.exit(1)
 
         # Check for orphan processes
-        orphans = _find_orphan_pids(command, exclude_pids={pid} if isinstance(pid, int) else None)
+        orphans = _find_orphan_pids(
+            command, exclude_pids={pid} if isinstance(pid, int) else None
+        )
         if orphans:
             print(f"Error: orphan process(es) still running for '{name}':")
             for opid, cmdline in orphans:
@@ -444,8 +461,12 @@ def cmd_restart(name):
 
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
         # Preserve extra fields (auto_start, health_url, etc.) from existing entry
-        extra = {k: v for k, v in info.items()
-                 if k not in ("pid", "port", "command", "started", "stdout_log", "stderr_log")}
+        extra = {
+            k: v
+            for k, v in info.items()
+            if k
+            not in ("pid", "port", "command", "started", "stdout_log", "stderr_log")
+        }
         services[name] = {
             **extra,
             "pid": proc.pid,
@@ -610,8 +631,12 @@ def cmd_auto_start():
         try:
             log_dir = Path("/agent/memory/logs")
             log_dir.mkdir(exist_ok=True)
-            stdout_log = Path(info.get("stdout_log") or log_dir / f"service-{name}.stdout.log")
-            stderr_log = Path(info.get("stderr_log") or log_dir / f"service-{name}.stderr.log")
+            stdout_log = Path(
+                info.get("stdout_log") or log_dir / f"service-{name}.stdout.log"
+            )
+            stderr_log = Path(
+                info.get("stderr_log") or log_dir / f"service-{name}.stderr.log"
+            )
 
             with open(stdout_log, "a") as out, open(stderr_log, "a") as err:
                 proc = subprocess.Popen(
@@ -626,8 +651,19 @@ def cmd_auto_start():
             with _flock():
                 services = _load()
                 # Preserve all extra fields (auto_start, health_url, etc.)
-                extra = {k: v for k, v in services.get(name, info).items()
-                         if k not in ("pid", "port", "command", "started", "stdout_log", "stderr_log")}
+                extra = {
+                    k: v
+                    for k, v in services.get(name, info).items()
+                    if k
+                    not in (
+                        "pid",
+                        "port",
+                        "command",
+                        "started",
+                        "stdout_log",
+                        "stderr_log",
+                    )
+                }
                 services[name] = {
                     **extra,
                     "pid": proc.pid,
@@ -646,7 +682,9 @@ def cmd_auto_start():
                 print(f"[auto-start] Started '{name}'{port_msg} (PID {proc.pid})")
                 started.append(name)
             else:
-                print(f"[auto-start] '{name}' started but exited immediately — check {stderr_log}")
+                print(
+                    f"[auto-start] '{name}' started but exited immediately — check {stderr_log}"
+                )
                 failed.append(name)
 
         except Exception as e:
@@ -654,7 +692,9 @@ def cmd_auto_start():
             failed.append(name)
 
     if skipped and not started and not failed:
-        print(f"[auto-start] All auto-start services already running: {', '.join(skipped)}")
+        print(
+            f"[auto-start] All auto-start services already running: {', '.join(skipped)}"
+        )
     if started:
         print(f"[auto-start] Started: {', '.join(started)}")
     if failed:
@@ -678,15 +718,24 @@ if __name__ == "__main__":
         if len(start_args) >= 2 and start_args[1] == "--":
             cmd_start(start_args[0], None, start_args[2:], auto_start=auto_start_flag)
         elif len(start_args) >= 3 and start_args[2] == "--":
-            cmd_start(start_args[0], start_args[1], start_args[3:], auto_start=auto_start_flag)
+            cmd_start(
+                start_args[0], start_args[1], start_args[3:], auto_start=auto_start_flag
+            )
         else:
-            print("Usage: service_manager.py start <name> [<port>] [--auto-start] -- <command...>")
+            print(
+                "Usage: service_manager.py start <name> [<port>] [--auto-start] -- <command...>"
+            )
             sys.exit(1)
     elif cmd in ("stop", "remove", "restart", "status"):
         if len(sys.argv) < 3:
             print(f"Usage: service_manager.py {cmd} <name>")
             sys.exit(1)
-        {"stop": cmd_stop, "remove": cmd_remove, "restart": cmd_restart, "status": cmd_status}[cmd](sys.argv[2])
+        {
+            "stop": cmd_stop,
+            "remove": cmd_remove,
+            "restart": cmd_restart,
+            "status": cmd_status,
+        }[cmd](sys.argv[2])
     elif cmd == "health":
         cmd_health()
     elif cmd == "cleanup":

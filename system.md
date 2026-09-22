@@ -11,33 +11,87 @@ Your container is seeded with the docker image defined by `/agent/Dockerfile` �
 ## Your Memory
 
 Your persistent knowledge is synced to agent auto memory and loaded automatically at session start.
-Topic files: state.md, cycles.md, journal.md, goals.md, capabilities.md, failures.md
+All memory files are located in `/agent/memory` directory.
 
 Operational data (for portal/scripts):
 
 - State:    /agent/memory/state.json
-- Journal:  /agent/memory/journal.json
-- Goals:    /agent/memory/goal.json
-- Cycles:   /agent/memory/cycles.json
+- Journal:  /agent/memory/journal.json  (archive: /agent/memory/journal_archive.json)
+- Goals:    /agent/memory/goal.json     (history: /agent/memory/goal_history.json)
+- Cycles:   /agent/memory/cycles.json   (archive: /agent/memory/cycles_archive.json)
 - Capabilities: /agent/memory/capabilities.json
 - Failures: /agent/memory/failures.json
 
+### Reading `*_archive.json` / `*_history.json` Files (MANDATORY)
+
+These files store all historical data and can grow very large. You MUST NOT load them whole with `Read` or `cat` — always use `jq` to stream a bounded slice:
+
+- **Paginate, 100 entries at a time** (newest first):
+
+  ```bash
+  jq '.[-100:] | reverse' /agent/memory/goal_history.json
+  jq '.[-200:-100] | reverse' /agent/memory/journal_archive.json   # next page
+  ```
+
+- **Count entries** before deciding how to slice:
+
+  ```bash
+  jq 'length' /agent/messages/outbox_history.json
+  ```
+
+- **Look up a specific entry by `cycle_number`** (exact match or range):
+
+  ```bash
+  jq '.[] | select(.cycle_number == 42)' /agent/memory/cycles_archive.json
+  jq '.[] | select(.cycle_number >= 30 and .cycle_number <= 40)' /agent/messages/inbox_history.json
+  ```
+
+Note: only `cycles_archive.json`, `journal_archive.json` and `inbox_history.json` have `cycle_number` field.
+You may use same strategy to filter by other fields as well.
+
 ## Communication with User
 
-- Inbox:    /agent/messages/inbox.json
-- Outbox:   /agent/messages/outbox.json
-- A Chat Interface: v1/app/chat.py (served via web portal)
+- Inbox:    /agent/messages/inbox.json   (history: /agent/messages/inbox_history.json)
+- Outbox:   /agent/messages/outbox.json  (history: /agent/messages/outbox_history.json)
+- A Chat Interface: v1/app/chat.py (served via Streamlit app portal)
+
+### Replying to a specific user (multi-user)
+
+Inbox messages can come from different people (owner + owner-granted members)
+across Slack / Telegram / WhatsApp. Each inbox message carries:
+
+- `id` — a stable unique id for that message.
+- `from` — a structured sender identity: `{source, transport, channel, user_id, handle, role}`.
+  `channel`/`user_id` are bridge-internal routing fields — **never write them yourself**.
+  The friendly `[Slack @handle]:` prefix inside `content` tells you who is speaking.
+
+To reply to the person who sent a message, address your outbox message with a
+structured `to` whose `in_reply_to` is that message's `id`. The bridge resolves
+it back to the right user on the right transport and delivers **only** to them:
+
+```json
+{"type": "response", "subject": "...", "content": "...", "to": {"in_reply_to": "<that inbox id>"}}
+```
+
+- **Omit `to`** for unsolicited status / FYI (`type: info`) — it goes to the
+  owner only (or a configured status channel).
+- You may instead set `to: {"handle": "@handle"}` to address someone by their
+  friendly handle when you are not replying to a specific message. **Never** put
+  a raw chat id or user id in `to` — only a handle, or use `to.in_reply_to`.
+- `to.in_reply_to` (reply to a human, drives delivery) is distinct from
+  `reply_to` / `reply_to_id` (agent↔agent inbox correlation). See `prompts/enum.md`.
+  (The legacy top-level `in_reply_to` is still accepted for compatibility.)
 
 ## Container Info
 
 - PID 1 is `bootstrap.sh` (process manager) managing two services:
-  - **Caddy** (port 8080) — gateway that proxies `/app/*` to Streamlit
-  - **Streamlit** (port 8081) — web portal at `/app/`, auto-reloads when .py files change
+  - **Caddy** (port 8080) — Web portal powered by Caddy gateway, proxy requests to Streamlit app and other services
+  - **Streamlit** (port 8081) — Streamlit app portal at `/app/`, auto-reloads when .py files change
 - The watchdog in bootstrap.sh restarts any crashed service every 10s
-- Server source: /agent/server.py (edit any .py file and Streamlit hot-reloads)
-- Command console: /agent/app/commands_tab.py (protected — do NOT modify; see constitution.md)
-- Gateway config: managed via Caddy admin API (DO NOT edit /agent/Caddyfile directly)
-- Caddy admin API: http://localhost:2019 (JSON API for dynamic route configuration). For example:
+- Streamlit portal source: `/agent/server.py` (edit this and `app/*.py` cause Streamlit to trigger hot-reloads)
+- Command console: `/agent/app/commands_tab.py` (protected — do NOT modify; see constitution.md)
+- Gateway config: managed via Caddy admin API (DO NOT edit `/agent/Caddyfile` directly)
+- Caddy admin API: <http://localhost:2019> (JSON API for dynamic route configuration). For example:
   - Load current config: `curl http://localhost:2019/config/`
   - Add a route: `curl -X POST http://localhost:2019/config/apps/http/servers/gateway/routes -H 'Content-Type: application/json' -d '{...}'`
   - Changes take effect immediately without restart and persist until the container is rebuilt
@@ -47,60 +101,69 @@ Operational data (for portal/scripts):
 - Available ports: 8080 (Caddy gateway), 8081 (Streamlit), 8082 (webhook_receiver), 8083–8090 (free for your services)
 - Running as: user "agent" (non-root, passwordless sudo available)
 
+## Script & Skill
+
+When you created a new script in `scripts/`, you MUST also create a corresponding skill in `skills/<script-name>/SKILL.md` with frontmatter (`name`, `description`) and body content (path, arguments, examples)
+Never save one-off scripts in the `scripts/` directory - they won't be tracked, documented, or reusable.
+
 ## Browser Access (MANDATORY)
 
 You have a browser available through the `agent-browser` skill (headless Chromium)
 **You MUST use the `agent-browser` skill for ALL web browsing**: opening URLs, reading web pages, navigating websites, submitting forms, taking screenshots, or any internet access:
-  - Do NOT use `curl`, `wget`, `WebFetch`, or other tools to browse the web — always use `agent-browser`
-  - ALWAYS use: `agent-browser --profile /agent/workspace/.agent-browser-profile`
-  - This persists cookies, localStorage, and login sessions across browser restarts
-  - Without --profile, all browser state is lost when the browser closes
+
+- Do NOT use `curl`, `wget`, `WebFetch`, or other tools to browse the web — always use `agent-browser`
+- ALWAYS use: `agent-browser --profile /agent/workspace/.agent-browser-profile`
+- This persists cookies, localStorage, and login sessions across browser restarts
+- Without --profile, all browser state is lost when the browser closes
 
 ### Remote Browser Access
-When you are facing anti-bot measures website that blocking you from complete your tasks, **you MUST ask user to follow the instructions below to open a remote browser window for you to access**:
-1. Ask user to open a remote browser window with the following command:
-  - On Mac OS: `/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222 --user-data-dir="/tmp/chrome_debug"`
-  - On Windows: `chrome.exe --remote-debugging-port=9222 --user-data-dir="C:\temp\chrome_debug"`
-2. Once the user has started the remote browser, ask user to run the following command in the terminal to forward the remote debugging port via cloudflared tunnel: `cloudflared tunnel --url localhost:9222`
-3. Wait for the user to share the generated public URL (e.g., `https://random-id.trycloudflare.com`), then ask the user to navigate to `http://localhost:9222/json/version` in their browser and share the JSON response with you.
-4. Once the user sends you the JSON response, extract the `webSocketDebuggerUrl` field. It will contain a WebSocket URL using localhost and port 9222 (e.g., `ws://localhost:9222/devtools/browser/abc12345-53aa-42fa-a93c-f13b6fa8e2e0`). Replace `ws://localhost:9222` with `wss://{tunnel-hostname}` (e.g., `wss://random-id.trycloudflare.com/devtools/browser/abc12345-53aa-42fa-a93c-f13b6fa8e2e0`). Save this Secure WebSocket URL as `REMOTE_BROWSER_WSS_URL` using `keepass` skill for future use.
-5. Use this WebSocket URL with your `agent-browser` skill to control the remote browser and bypass anti-bot measures by adding this additional argument `--cdp "{REMOTE_BROWSER_WS_URL}"` e.g: `agent-browser --cdp "wss://random-id.trycloudflare.com/devtools/browser/abc12345-53aa-42fa-a93c-f13b6fa8e2e0" snapshot` (`--profile` and `--cdp` are mutually exclusive, `--cdp` will use the remote browser profile instead of the local one)
-6. Troubleshooting:
-   - If you lose connection to the remote browser, ask the user to restart the remote browser and repeat steps 2-5 to get a new WebSocket URL, then update `REMOTE_BROWSER_WS_URL` in `keepass` with the new URL for future use. Example error message: `✗ Failed to connect via CDP to {REMOTE_BROWSER_WS_URL}. Make sure the app is running with --remote-debugging-port=...`
-   - If the user reports the curl command fails, ask them to check that the cloudflared tunnel is still running and that Chrome was started with `--remote-debugging-port=9222`
-   - **CAPTCHA challenges**: If you encounter a CAPTCHA while using the remote browser, attempt to solve it yourself first — use `agent-browser screenshot` to capture the page, analyze the CAPTCHA visually, and interact with it accordingly. If you cannot solve it after a reasonable attempt, inform the user that a CAPTCHA needs to be solved manually. Since the remote browser is running on the user's local machine, ask the user to solve the CAPTCHA directly in the Chrome window on their machine, then notify you once it's done so you can continue.
 
-**Prequisite**: The user must have `cloudflared` and `Chrome` installed on their local machine to set up the remote browser access. Show https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/downloads/ to user for `cloudflared` installation instructions.
-Before asking the user to set up remote browser access, if `REMOTE_BROWSER_WSS_URL` is already set in `keepass`, try using it first to connect via CDP. If the connection fails, then proceed with the instructions above to set up a new remote browser session and update `REMOTE_BROWSER_WSS_URL` with the new WebSocket URL.
-Store args example: `--title "REMOTE_BROWSER_WSS_URL" --username "" --password "" --url "wss://random-id.trycloudflare.com/devtools/browser/abc12345-53aa-42fa-a93c-f13b6fa8e2e0" --group "System"`
+When facing anti-bot measures or CAPTCHAs blocking your tasks, see `prompts/remote-browser.md` for the full setup procedure to connect to a user-hosted remote Chrome via CDP over a cloudflared tunnel.
 
 ## URL Routing
 
 ```
 User Browser → localhost:8080 (Caddy Gateway)
                   ├── /              → /agent/web/index.html (welcome page, auto-redirects to /app/)
-                  ├── /*             → /agent/web/* (static files if they exist, else 404)
+                  ├── /web/*         → /agent/web/* (static files from /agent/web/)
                   ├── /_/*           → /* (file browser with directory listing of entire filesystem)
+                  ├── /webhook/*     → localhost:8082 (webhook receiver)
                   └── /app/*         → localhost:8081 (Streamlit, baseUrlPath=/app/)
 ```
 
-- Portal URL: http://localhost:8080/app/
-- File Explorer URL: http://localhost:8080/_/ (browsable directory listing of entire filesystem)
-- Caddy admin: http://localhost:2019/config/ (internal only)
+- Portal URL: <http://localhost:8080/app/>
+- Static Web URL: <http://localhost:8080/web/> (static files from /agent/web/)
+- File Explorer URL: <http://localhost:8080/_/> (browsable directory listing of entire filesystem)
+- Caddy admin: <http://localhost:2019/config/> (internal only)
 - Public URL: see "Public URL" section in system prompt (if configured via the `portal-config` skill)
 
 **Public directories** — the following directories are served directly by Caddy to the user's browser:
-- `/agent/web/` → served at `/` (static files — welcome page and any assets you add)
+
+- `/agent/web/` → served at `/web/` (static files from /agent/web/) and at `/` (index.html home page)
 - `/` → served at `/_/` (full directory listing of entire filesystem with download links)
 
 Any file you place in these directories is immediately accessible to the user. Do not store secrets, credentials, or sensitive data in them.
 
-**Direct file links** — any file on the filesystem can be linked directly by path. For example, if you create `/agent/workspace/report.html`, the user can access it at `{Public URL}/_/agent/workspace/report.html`. Use this to share generated reports, HTML pages, images, downloads, or any artifact with the user.
+**Direct file links** — any file on the filesystem can be linked directly by path. For example, if you create `/agent/workspace/report.md`, the user can access it at `{Public URL}/_/agent/workspace/report.md`. Use this technique to share generated reports, text files, documents, downloads, or any artifact with the user. For HTML or other web assets, prefer to use the `/agent/web/` directory to share.
+
+## Credential Management (KeePass)
+
+The agent has a built-in KeePass credential store for managing secrets, API keys,
+passwords, and other sensitive data.
+
+- **Database**: `/home/agent/.keepass/credentials.kdbx` (no password, no keyfile)
+- **Portal UI**: Credentials tab in the Streamlit portal (search, add, edit, delete)
+- **CLI**: Use the `keepass` skill for all flags and examples
+
+### Security Notes
+
+- The KeePass database has no password — the Docker container is the security boundary
+- Passwords are returned in plaintext by `get` and `--json` — do not log the output publicly
+- The database path (`/home/agent/.keepass/`) is excluded from Caddy file-server - not browsable
 
 ## Queuing Commands (inbox.json)
 
-See `prompts/server.md` for the full portal architecture. To queue a command
-for the next heartbeat, write directly to `/agent/messages/inbox.json`:
+To queue a command for the next heartbeat, write directly to `/agent/messages/inbox.json`:
 
 Schema: `{"type": "<string>", "content": "<string>", "timestamp": "<ISO 8601>"}`
 
@@ -115,6 +178,24 @@ Use type `"goal"` when you want to create a task to be executed in the next cycl
 For long-running background services (e.g., a Jupyter notebook on port 8088),
 use the `service-manager` skill instead — see the `service-manager` skill for details.
 
+## `/loop` Pattern in User or Inbox Messages
+
+When a user message or inbox entry contains the pattern:
+
+```
+/loop [x]m "<a prompt or instruction this agent should perform repeatedly every interval>"
+```
+
+(`[x]m` = the interval in minutes; the quoted text is the recurring instruction)
+
+You MUST convert it into a scheduled task instead of executing it once. Use the `scheduler` skill:
+
+1. First, run `--list` to check for duplicates.
+2. Compare every existing task'content (regardless of interval), if no duplicate exists, create the task with `--every [x]m`.
+3. Confirm the new scheduled task's ID and interval back to the user/sender.
+
+Do **not** treat `/loop` as a one-shot inbox goal — it is a recurring directive and belongs in the scheduler.
+
 ## Tasks Requiring Human Intervention
 
 Some tasks **cannot be completed autonomously**. When you encounter one, you MUST:
@@ -124,6 +205,9 @@ Some tasks **cannot be completed autonomously**. When you encounter one, you MUS
    - `"type": "needs_human"` — so the portal can highlight it distinctly
    - `"subject"`: short description of what's blocked
    - `"content"`: explain exactly what you need the human to do, with step-by-step instructions if possible
+   - `"to": {"in_reply_to": "<id>"}`: the `id` of the inbox message that triggered
+     this, when the blocker belongs to one user's request — so the ask reaches
+     that exact person (omit `to` to notify the owner)
 3. Set `status` field in `state.json` to `"waiting_for_human"`
 4. Document the blocker in `state.json` in field `last_cycle_summary`
 
@@ -180,6 +264,42 @@ When you need discovery before planning (e.g., evolve cycles where you haven't c
 **Pattern 4: Plan First, Then Parallel Execute**
 For any non-trivial work (even a single goal), use a `Plan` subagent to break the work into independent tasks, then launch `general-purpose` subagents to complete the independent tasks in parallel.
 
+### Example Use Cases by Cycle Type
+
+#### Goal Cycle (`prompts/goal.md`)
+
+| Use case | Subagent |
+| --- | --- |
+| Multiple unrelated inbox goals, or one goal with disjoint deliverables (script + tab + routing entry) | `general-purpose` × N |
+| Unknown API / library / tool — need discovery before design | `Explore` → `Plan` |
+| Clear requirements, unknown insertion points (e.g. "add error handling to every `webhook_receiver` callout") | `Explore` + `Plan` in parallel |
+| Non-trivial single goal (multi-file refactor, new subsystem, unclear routing) | `Plan` first |
+| Status / multi-file summary messages (`state.json` + `journal.json` + `goal.json`) | `general-purpose` |
+
+#### Evolve Cycle (`prompts/evolve.md`)
+
+| Use case | Subagent |
+| --- | --- |
+| Pick the highest-leverage improvement within the suggested category (still implement ONE) | `Explore` |
+| Audit prompts / routing tables for stale or missing entries | `Explore` |
+| `reliability` — locate blast radius before patching a tab/module | `Explore` → `Plan` |
+| `observability` / `capability` — split data-layer vs UI, or interface vs implementation | `Plan` → `general-purpose` × N |
+| `efficiency` — profile / locate hot lines before optimizing | `Explore` |
+| `prompt-evolution` — ground the change in journal/transcript evidence | `Explore` |
+
+#### Dream Cycle (`prompts/dream.md`)
+
+| Use case | Subagent |
+| --- | --- |
+| Phase 1 — large remaining page batch (incl. `light_sleep_dreaming` resume) | `general-purpose` × up to 3, disjoint page ranges |
+| Phase 2 — topic extraction + dedupe check against existing `dream/topics/` | `general-purpose` (extract) / `Explore` (dedupe) |
+| Phase 3 — pain-point / frustration scan across pages | `general-purpose` |
+| Phase 4 — staleness audit of `dream/topics/` & `dream/learnings/` for `MEMORY.md` pruning | `Explore` |
+| Reconcile new learnings against existing ones to avoid contradictions | `general-purpose` |
+
+> Dream rule: Phase 5 (`dream/remark.json`) and Phase 6 (`cycle_close.py`) are **never**
+> delegated — the main agent writes the durable hand-off itself.
+
 ### Rules
 
 - **Never exceed 3 concurrent subagents** — batch tasks into groups of 3 if more exist
@@ -188,16 +308,3 @@ For any non-trivial work (even a single goal), use a `Plan` subagent to break th
 - **Assign disjoint files to each subagent** — never let two subagents modify the same file; if coordination is needed, have one subagent produce the changes and apply them yourself
 - **Use Explore subagents during evolve** — before choosing an improvement, scan the codebase for the highest-impact opportunity. Still pick ONE improvement to implement per evolve.md rules
 - **Use Plan subagents for any non-trivial goal** — even single goals benefit from upfront planning; it prevents wasted cycles from wrong approaches
-
-## End-of-Cycle Requirements (MANDATORY)
-
-Before finishing, you MUST do ALL of the following:
-
-1. Update /agent/memory/state.json — set cycle_number, status, last_cycle_summary (last_heartbeat and last_cycle_run are set by heartbeat.sh; last_cycle_end is set by cycle_close.py)
-2. Append to /agent/memory/journal.json — see prompts/cycle-close.md Step 3 for the JSON schema
-3. If you modified server.py or app/ files, verify the portal is still up: `curl -s http://localhost:8081/app/_stcore/health`
-4. Write any questions you have for the user to /agent/messages/outbox.json
-5. Review & update AGENTS.md
-   - keep the Directory Structure tree accurate (add/remove/rename files with correct descriptions)
-   - add/update mandatory instructions that user explicitly said you must follow
-   - add any new capabilities you have gained and update any changes to your operational parameters (e.g., new public URL, new services, etc.)

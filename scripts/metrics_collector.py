@@ -38,6 +38,7 @@ PROBED_ENDPOINTS = [
 
 # ─── Collection ───────────────────────────────────────────────────────────────
 
+
 def _probe_endpoint(path: str) -> dict:
     """Measure response time for one endpoint. Returns {ms, status, ok}."""
     url = BASE_URL + path
@@ -46,7 +47,7 @@ def _probe_endpoint(path: str) -> dict:
         req = urllib.request.urlopen(url, timeout=5)
         status = req.status
         body = req.read().decode("utf-8", errors="replace").strip()
-        ok = (status == 200 and body == "ok")
+        ok = status == 200 and body == "ok"
     except urllib.error.HTTPError as e:
         status = e.code
         ok = False
@@ -81,10 +82,10 @@ def _read_sys_resource(key: str) -> float | None:
             return float(parts[0])
         elif key == "disk_used_gb":
             usage = shutil.disk_usage("/agent/workspace")
-            return round(usage.used / (1024 ** 3), 3)
+            return round(usage.used / (1024**3), 3)
         elif key == "disk_total_gb":
             usage = shutil.disk_usage("/agent/workspace")
-            return round(usage.total / (1024 ** 3), 3)
+            return round(usage.total / (1024**3), 3)
     except Exception:
         pass
     return None
@@ -102,9 +103,9 @@ def collect_snapshot(max_entries: int = DEFAULT_MAX) -> dict:
 
     # System resources
     resources = {
-        "mem_used_mb":  _read_sys_resource("mem_used_mb"),
+        "mem_used_mb": _read_sys_resource("mem_used_mb"),
         "mem_total_mb": _read_sys_resource("mem_total_mb"),
-        "load_1m":      _read_sys_resource("load_1m"),
+        "load_1m": _read_sys_resource("load_1m"),
         "disk_used_gb": _read_sys_resource("disk_used_gb"),
         "disk_total_gb": _read_sys_resource("disk_total_gb"),
     }
@@ -131,6 +132,7 @@ def collect_snapshot(max_entries: int = DEFAULT_MAX) -> dict:
 
 # ─── Read ─────────────────────────────────────────────────────────────────────
 
+
 def _load_metrics() -> list:
     """Load existing metrics. Returns [] if file missing or invalid."""
     if not METRICS_FILE.exists():
@@ -148,6 +150,7 @@ def get_recent(limit: int = 10) -> list:
 
 
 # ─── Reporting ────────────────────────────────────────────────────────────────
+
 
 def _avg(values: list) -> float | None:
     clean = [v for v in values if isinstance(v, (int, float))]
@@ -173,7 +176,7 @@ def report_table(limit: int = 10) -> None:
         health_ms = api.get("_stcore_health", {}).get("ms", "-")
 
         load = sys_.get("load_1m", "-")
-        mem_used  = sys_.get("mem_used_mb")
+        mem_used = sys_.get("mem_used_mb")
         mem_total = sys_.get("mem_total_mb")
         if mem_used and mem_total:
             mem_pct = f"{round(mem_used / mem_total * 100)}%"
@@ -181,7 +184,9 @@ def report_table(limit: int = 10) -> None:
             mem_pct = "-"
         disk = sys_.get("disk_used_gb", "-")
 
-        print(f"{ts:<27} {str(health_ms):>10} {str(load):>6} {mem_pct:>6} {str(disk):>8}")
+        print(
+            f"{ts:<27} {str(health_ms):>10} {str(load):>6} {mem_pct:>6} {str(disk):>8}"
+        )
 
 
 def report_summary(limit: int = 10) -> str:
@@ -190,29 +195,40 @@ def report_summary(limit: int = 10) -> str:
     if not entries:
         return "No metrics data."
 
-    health_vals = [e["api"].get("_stcore_health", {}).get("ms") for e in entries if "api" in e]
-    load_vals   = [e["sys"].get("load_1m") for e in entries if "sys" in e]
-    mem_vals    = [e["sys"].get("mem_used_mb") for e in entries if "sys" in e]
-    mem_totals  = [e["sys"].get("mem_total_mb") for e in entries if "sys" in e]
+    health_vals = [
+        e["api"].get("_stcore_health", {}).get("ms") for e in entries if "api" in e
+    ]
+    load_vals = [e["sys"].get("load_1m") for e in entries if "sys" in e]
+    mem_vals = [e["sys"].get("mem_used_mb") for e in entries if "sys" in e]
+    mem_totals = [e["sys"].get("mem_total_mb") for e in entries if "sys" in e]
 
     avg_health = _avg(health_vals)
-    avg_load   = _avg(load_vals)
+    avg_load = _avg(load_vals)
 
     mem_pct = None
-    clean_used  = [v for v in mem_vals if isinstance(v, (int, float))]
+    clean_used = [v for v in mem_vals if isinstance(v, (int, float))]
     clean_total = [v for v in mem_totals if isinstance(v, (int, float))]
     if clean_used and clean_total:
-        mem_pct = round(sum(clean_used) / len(clean_used) / (sum(clean_total) / len(clean_total)) * 100)
+        mem_pct = round(
+            sum(clean_used)
+            / len(clean_used)
+            / (sum(clean_total) / len(clean_total))
+            * 100
+        )
 
     n = len(entries)
     parts = [f"n={n}"]
-    if avg_health: parts.append(f"portal={avg_health}ms")
-    if avg_load:   parts.append(f"load={avg_load}")
-    if mem_pct:    parts.append(f"mem={mem_pct}%")
+    if avg_health:
+        parts.append(f"portal={avg_health}ms")
+    if avg_load:
+        parts.append(f"load={avg_load}")
+    if mem_pct:
+        parts.append(f"mem={mem_pct}%")
     return "avg: " + "  ".join(parts)
 
 
 # ─── Regression detection ─────────────────────────────────────────────────────
+
 
 def check_regressions(warn_thresholds: dict | None = None) -> list[str]:
     """
@@ -254,6 +270,7 @@ def check_regressions(warn_thresholds: dict | None = None) -> list[str]:
 
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────
+
 
 def main():
     args = sys.argv[1:]
@@ -310,11 +327,13 @@ def main():
     else:
         ts = snap["ts"][:19].replace("T", " ")
         health_ms = snap["api"].get("_stcore_health", {}).get("ms", "?")
-        load      = snap["sys"].get("load_1m", "?")
-        mem_used  = snap["sys"].get("mem_used_mb")
+        load = snap["sys"].get("load_1m", "?")
+        mem_used = snap["sys"].get("mem_used_mb")
         mem_total = snap["sys"].get("mem_total_mb")
-        mem_pct   = f"{round(mem_used / mem_total * 100)}%" if mem_used and mem_total else "?"
-        disk      = snap["sys"].get("disk_used_gb", "?")
+        mem_pct = (
+            f"{round(mem_used / mem_total * 100)}%" if mem_used and mem_total else "?"
+        )
+        disk = snap["sys"].get("disk_used_gb", "?")
         print(f"[{ts}] portal={health_ms}ms  load={load}  mem={mem_pct}  disk={disk}GB")
 
 

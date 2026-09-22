@@ -102,8 +102,14 @@ def store_credential(
             if group and existing.group != dest_group:
                 kp.move_entry(existing, dest_group)
         else:
-            kp.add_entry(dest_group, title=title, username=username,
-                         password=password, url=url or "", notes=notes or "")
+            kp.add_entry(
+                dest_group,
+                title=title,
+                username=username,
+                password=password,
+                url=url or "",
+                notes=notes or "",
+            )
         kp.save()
         clear_credential_cache()
         return True

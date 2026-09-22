@@ -7,7 +7,7 @@ gained, cycle throughput, goal success rate, and category balance.
 
 Usage:
     uv run python scripts/milestone_report.py              # auto-detect current cycle
-    uv run python scripts/milestone_report.py --cycle 50  # report for cycle 50
+    uv run python scripts/milestone_report.py --cycle 101  # report for cycle 101
     uv run python scripts/milestone_report.py --save      # write to workspace/
     uv run python scripts/milestone_report.py --json      # machine-readable output
     uv run python scripts/milestone_report.py --list      # show all milestone cycles
@@ -28,11 +28,13 @@ SCRIPTS_DIR = AGENT_DIR / "scripts"
 MILESTONE_INTERVAL = 25  # Report at 25, 50, 75, 100, ...
 
 _CATEGORY_ICONS = {
-    "capability":       "⚡",
-    "observability":    "👁️",
-    "reliability":      "🛡️",
-    "efficiency":       "⚙️",
+    "capability": "⚡",
+    "observability": "👁️",
+    "reliability": "🛡️",
+    "efficiency": "⚙️",
     "prompt_evolution": "📝",
+    "memory_consolidation": "🧠",
+    "deep_sleep": "💤",
 }
 
 
@@ -45,11 +47,21 @@ def _load_json(path, default=None):
 
 
 def _load_state():
-    return _load_json(MEMORY_DIR / "state.json", {})
+    from scripts.repair_memory_files import migrate_state_dict
+
+    state = _load_json(MEMORY_DIR / "state.json", {})
+    if isinstance(state, dict):
+        migrate_state_dict(state)
+    return state
 
 
 def _load_cycles():
-    return _load_json(MEMORY_DIR / "cycles.json", [])
+    from scripts.repair_memory_files import migrate_cycles_list
+
+    cycles = _load_json(MEMORY_DIR / "cycles.json", [])
+    if isinstance(cycles, list):
+        migrate_cycles_list(cycles)
+    return cycles
 
 
 def _load_goals():
@@ -59,22 +71,41 @@ def _load_goals():
 def _load_capabilities():
     """Compute capabilities on-the-fly from filesystem."""
     import glob as _glob
+
     scripts_dir = MEMORY_DIR.parent / "scripts"
     return {
-        "utility_scripts": sorted(f.name for f in scripts_dir.glob("*.py")) if scripts_dir.exists() else [],
+        "utility_scripts": (
+            sorted(f.name for f in scripts_dir.glob("*.py"))
+            if scripts_dir.exists()
+            else []
+        ),
         "portal_modules": 0,
         "capabilities": [],
     }
 
 
 def _load_journal():
-    return _load_json(MEMORY_DIR / "journal.json", [])
+    from scripts.repair_memory_files import migrate_journal_list
+
+    journal = _load_json(MEMORY_DIR / "journal.json", [])
+    if isinstance(journal, list):
+        migrate_journal_list(journal)
+    return journal
+
+
+def _load_notes():
+    return _load_json(MEMORY_DIR / "notes.json", [])
+
+
+def _load_server_errors():
+    return _load_json(MEMORY_DIR / "server_errors.json", [])
 
 
 def _list_scripts():
     try:
         return sorted(
-            f.name for f in SCRIPTS_DIR.iterdir()
+            f.name
+            for f in SCRIPTS_DIR.iterdir()
             if f.suffix in (".py", ".sh") and not f.name.endswith(".backup")
         )
     except Exception:
@@ -96,7 +127,7 @@ def _cycles_up_to(cycles, cycle_num):
     result = []
     for c in cycles:
         try:
-            if int(c.get("cycle", 0)) <= cycle_num:
+            if int(c.get("cycle_number", 0)) <= cycle_num:
                 result.append(c)
         except (ValueError, TypeError):
             pass
@@ -113,27 +144,69 @@ def _format_duration(seconds):
     return f"{int(seconds)//3600}h {(int(seconds)%3600)//60}m"
 
 
-def build_report(target_cycle, all_cycles, all_goals, caps, journal_entries):
+def _summarize_notes(notes):
+    if not isinstance(notes, list):
+        return {
+            "total": 0,
+            "pinned": 0,
+            "unique_tags": 0,
+            "top_tags": [],
+            "latest": None,
+        }
+    pinned = sum(1 for n in notes if n.get("pinned"))
+    tag_counts = {}
+    for n in notes:
+        for t in n.get("tags", []) or []:
+            tag_counts[t] = tag_counts.get(t, 0) + 1
+    top_tags = sorted(tag_counts.items(), key=lambda x: -x[1])[:5]
+    latest = None
+    if notes:
+        latest_n = max(notes, key=lambda n: n.get("updated_at", ""))
+        latest = {
+            "id": latest_n.get("id"),
+            "title": (latest_n.get("title") or "")[:80],
+            "updated_at": latest_n.get("updated_at", ""),
+        }
+    return {
+        "total": len(notes),
+        "pinned": pinned,
+        "unique_tags": len(tag_counts),
+        "top_tags": top_tags,
+        "latest": latest,
+    }
+
+
+def build_report(
+    target_cycle,
+    all_cycles,
+    all_goals,
+    caps,
+    journal_entries,
+    notes=None,
+    server_errors=None,
+):
     """Build milestone report data for a given target cycle number."""
     subset = _cycles_up_to(all_cycles, target_cycle)
-    completed = [c for c in subset if c.get("status") == "completed"]
+    completed = [c for c in subset if c.get("cycle_status") == "completed"]
 
     # Type breakdown
     type_counts = {}
     for c in completed:
-        t = c.get("type", "unknown")
+        t = c.get("cycle_type", "unknown")
         type_counts[t] = type_counts.get(t, 0) + 1
 
     # Category breakdown (evolve cycles only)
     cat_counts = {}
     for c in completed:
-        if c.get("type") == "evolve":
-            cat = c.get("category", "")
+        if c.get("cycle_type") == "evolve":
+            cat = c.get("cycle_category", "")
             if cat:
                 cat_counts[cat] = cat_counts.get(cat, 0) + 1
 
     # Duration stats
-    durations = [c.get("duration_seconds") for c in completed if c.get("duration_seconds")]
+    durations = [
+        c.get("duration_seconds") for c in completed if c.get("duration_seconds")
+    ]
     avg_dur = sum(durations) / len(durations) if durations else None
     min_dur = min(durations) if durations else None
     max_dur = max(durations) if durations else None
@@ -179,18 +252,20 @@ def build_report(target_cycle, all_cycles, all_goals, caps, journal_entries):
     window_low = max(1, target_cycle - 9)
     for je in journal_entries:
         try:
-            cn = int(je.get("cycle", 0))
+            cn = int(je.get("cycle_number", 0))
         except (ValueError, TypeError):
             continue
         if window_low <= cn <= target_cycle:
             summary = je.get("summary") or ""
             if summary:
-                highlights.append({
-                    "cycle": cn,
-                    "type": je.get("type", ""),
-                    "category": je.get("category", ""),
-                    "summary": summary[:120],
-                })
+                highlights.append(
+                    {
+                        "cycle": cn,
+                        "type": je.get("cycle_type", ""),
+                        "category": je.get("cycle_category", ""),
+                        "summary": summary[:120],
+                    }
+                )
     highlights.sort(key=lambda x: x["cycle"])
 
     return {
@@ -208,12 +283,18 @@ def build_report(target_cycle, all_cycles, all_goals, caps, journal_entries):
         "goal_total": goal_total,
         "goal_completed": len(goal_completed),
         "goal_failed": len(goal_failed),
-        "goal_completion_rate": round(len(goal_completed) / goal_total, 3) if goal_total else None,
+        "goal_completion_rate": (
+            round(len(goal_completed) / goal_total, 3) if goal_total else None
+        ),
         "scripts_count": scripts_count,
         "portal_tabs": portal_tabs,
         "skills_count": len(skills),
         "commands_count": len(commands),
         "core_capabilities_count": len(core_caps),
+        "notes": _summarize_notes(notes or []),
+        "server_errors_total": (
+            len(server_errors or []) if isinstance(server_errors, list) else 0
+        ),
         "last_10_highlights": highlights[-10:],
     }
 
@@ -252,6 +333,8 @@ def render_markdown(report):
         f"| Agent skills | {report['skills_count']} |",
         f"| Slash commands | {report['commands_count']} |",
         f"| Core capabilities | {report['core_capabilities_count']} |",
+        f"| Notes (pinned) | {report['notes']['total']} ({report['notes']['pinned']}) |",
+        f"| Server errors logged | {report['server_errors_total']} |",
         f"",
         f"## Goal Performance",
         f"",
@@ -274,7 +357,13 @@ def render_markdown(report):
 
     type_b = report["type_breakdown"]
     for t, count in sorted(type_b.items(), key=lambda x: -x[1]):
-        type_icons = {"evolve": "🧬", "goal": "🎯", "bootstrap": "🌱", "self-heal": "🔧"}
+        type_icons = {
+            "evolve": "🧬",
+            "goal": "🎯",
+            "bootstrap": "🌱",
+            "self-heal": "🔧",
+            "dream": "💤",
+        }
         icon = type_icons.get(t, "•")
         lines.append(f"- {icon} **{t}**: {count}")
 
@@ -286,6 +375,19 @@ def render_markdown(report):
         pct = f"{round(count/total_evolve*100)}%" if total_evolve else "—"
         lines.append(f"- {icon} **{cat.replace('_', ' ')}**: {count} ({pct})")
 
+    notes = report.get("notes", {})
+    if notes.get("total"):
+        lines += ["", "## Notes", ""]
+        lines.append(
+            f"- Total: **{notes['total']}**  |  Pinned: {notes['pinned']}  |  Unique tags: {notes['unique_tags']}"
+        )
+        if notes.get("top_tags"):
+            tags_str = ", ".join(f"`{t}` ({c})" for t, c in notes["top_tags"])
+            lines.append(f"- Top tags: {tags_str}")
+        if notes.get("latest"):
+            lt = notes["latest"]
+            lines.append(f"- Latest: **{lt.get('title', '')}** _({lt.get('id', '')})_")
+
     highlights = report["last_10_highlights"]
     if highlights:
         lines += ["", f"## Last 10 Cycles Before Milestone", ""]
@@ -294,7 +396,11 @@ def render_markdown(report):
             cat = h["category"]
             ctype = h["type"]
             summary = h["summary"]
-            icon = _CATEGORY_ICONS.get(cat, "•") if cat else ("🎯" if ctype == "goal" else "🧬")
+            icon = (
+                _CATEGORY_ICONS.get(cat, "•")
+                if cat
+                else ("🎯" if ctype == "goal" else "🧬")
+            )
             lines.append(f"**#{cn}** {icon} {summary}")
 
     lines += ["", "---", f"_Report generated by milestone_report.py_", ""]
@@ -305,14 +411,23 @@ def main():
     parser = argparse.ArgumentParser(
         description="Generate milestone report for significant cycle numbers"
     )
-    parser.add_argument("--cycle", type=int, default=None,
-                        help="Target cycle number (default: current cycle)")
-    parser.add_argument("--save", action="store_true",
-                        help="Save markdown to workspace/milestone_<N>.md")
-    parser.add_argument("--json", action="store_true",
-                        help="Output raw JSON instead of markdown")
-    parser.add_argument("--list", action="store_true",
-                        help="List all milestone cycles in cycles.json")
+    parser.add_argument(
+        "--cycle",
+        type=int,
+        default=None,
+        help="Target cycle number (default: current cycle)",
+    )
+    parser.add_argument(
+        "--save",
+        action="store_true",
+        help="Save markdown to workspace/milestone_<N>.md",
+    )
+    parser.add_argument(
+        "--json", action="store_true", help="Output raw JSON instead of markdown"
+    )
+    parser.add_argument(
+        "--list", action="store_true", help="List all milestone cycles in cycles.json"
+    )
     args = parser.parse_args()
 
     state = _load_state()
@@ -320,6 +435,8 @@ def main():
     all_goals = _load_goals()
     caps = _load_capabilities()
     journal_entries = _load_journal()
+    notes = _load_notes()
+    server_errors = _load_server_errors()
 
     current_cycle = state.get("cycle_number") or len(all_cycles)
 
@@ -328,13 +445,21 @@ def main():
         print(f"Milestone cycles (every {MILESTONE_INTERVAL}):")
         for m in milestones:
             subset = _cycles_up_to(all_cycles, m)
-            completed = len([c for c in subset if c.get("status") == "completed"])
+            completed = len([c for c in subset if c.get("cycle_status") == "completed"])
             print(f"  Cycle {m:4d} — {completed} completed cycles in range")
         return 0
 
     target = args.cycle if args.cycle is not None else current_cycle
 
-    report = build_report(target, all_cycles, all_goals, caps, journal_entries)
+    report = build_report(
+        target,
+        all_cycles,
+        all_goals,
+        caps,
+        journal_entries,
+        notes=notes,
+        server_errors=server_errors,
+    )
 
     if args.json:
         print(json.dumps(report, indent=2))

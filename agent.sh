@@ -62,7 +62,9 @@ show_usage() {
 # ── Parse arguments ────────────────────────────────────────────
 AGENT_USER=""
 TASK_PROMPT=""
+TASK_PROMPT_FILE=""
 SYSTEM_PROMPT=""
+SYSTEM_PROMPT_FILE=""
 YOLO_MODE=false
 RESUME_SESSION=""
 OUTPUT_FORMAT=""
@@ -86,8 +88,16 @@ while [[ $# -gt 0 ]]; do
             SYSTEM_PROMPT="$2"
             shift 2
             ;;
+        --system-prompt-file)
+            SYSTEM_PROMPT_FILE="$2"
+            shift 2
+            ;;
         -p)
             TASK_PROMPT="$2"
+            shift 2
+            ;;
+        --task-prompt-file)
+            TASK_PROMPT_FILE="$2"
             shift 2
             ;;
         --output-format)
@@ -156,27 +166,15 @@ claude_run() {
         cmd_args+=("--dangerously-skip-permissions")
     fi
 
-    # System prompt with auto-append from claude-system-prompt.md
-    local final_system_prompt="$SYSTEM_PROMPT"
-    if [ -f "/home/agent/claude-system-prompt.md" ]; then
-        local claude_system_content
-        claude_system_content=$(cat /home/agent/claude-system-prompt.md)
-        if [ -n "$final_system_prompt" ]; then
-            final_system_prompt="${final_system_prompt}
-
-${claude_system_content}"
-        else
-            final_system_prompt="$claude_system_content"
-        fi
+    # System prompt: pass file paths and text directly to claude using its
+    # native --system-prompt-file / --append-system-prompt-file options.
+    if [ -n "$SYSTEM_PROMPT_FILE" ]; then
+        cmd_args+=("--system-prompt-file" "$SYSTEM_PROMPT_FILE")
+    elif [ -n "$SYSTEM_PROMPT" ]; then
+        cmd_args+=("--system-prompt" "$SYSTEM_PROMPT")
     fi
-
-    if [ -n "$final_system_prompt" ]; then
-        cmd_args+=("--system-prompt" "$final_system_prompt")
-    fi
-
-    # Task prompt
-    if [ -n "$TASK_PROMPT" ]; then
-        cmd_args+=("-p" "$TASK_PROMPT")
+    if [ -f "./claude-system-prompt.md" ]; then
+        cmd_args+=("--append-system-prompt-file" "./claude-system-prompt.md")
     fi
 
     # Resume session
@@ -193,7 +191,38 @@ ${claude_system_content}"
         cmd_args+=("--output-format" "$OUTPUT_FORMAT")
     fi
 
-    run_cmd claude "${cmd_args[@]}"
+    # Memory prefix: prepend first 200 lines of ./memory/MEMORY.md to user prompt
+    # (per claude-system-prompt.md: MEMORY.md is always loaded into context, truncated at 200 lines)
+    local memory_block=""
+    if [ -f "./memory/MEMORY.md" ]; then
+        local memory_content
+        memory_content=$(head -n 200 ./memory/MEMORY.md)
+        if [ -n "$memory_content" ]; then
+            memory_block="<memory>
+${memory_content}
+</memory>
+
+"
+        fi
+    fi
+
+    # Task prompt: prefer file redirection (avoids ARG_MAX), fall back to -p flag or no prompt
+    # claude reads stdin as the user prompt when --output-format is set (non-interactive mode)
+    if [ -n "$TASK_PROMPT_FILE" ]; then
+        if [ -n "$memory_block" ]; then
+            { printf '%s' "$memory_block"; cat "$TASK_PROMPT_FILE"; } | run_cmd claude "${cmd_args[@]}"
+        else
+            run_cmd claude "${cmd_args[@]}" < "$TASK_PROMPT_FILE"
+        fi
+    elif [ -n "$TASK_PROMPT" ]; then
+        printf '%s%s' "$memory_block" "$TASK_PROMPT" | run_cmd claude "${cmd_args[@]}"
+    else
+        if [ -n "$memory_block" ]; then
+            printf '%s' "$memory_block" | run_cmd claude "${cmd_args[@]}"
+        else
+            run_cmd claude "${cmd_args[@]}"
+        fi
+    fi
 }
 
 # ══════════════════════════════════════════════════════════════

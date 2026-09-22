@@ -5,6 +5,47 @@
 TOP PRIORITY. Do not work on any other goal until the portal is healthy.
 The portal is your only communication channel with the user.
 
+## Step 0: Check for Active DNA Update (MANDATORY FIRST STEP)
+
+Before attempting any triage, recovery, or file modifications, inspect `/agent/messages/inbox.json` for an active DNA update notice:
+
+```bash
+# Check for DNA update messages in inbox
+grep -E "DNA UPDATE IN PROGRESS|DNA UPDATE COMPLETE|DNA UPDATE ABORTED" /agent/messages/inbox.json 2>/dev/null
+```
+
+### When to Stand Down (Active Update in Progress)
+
+If `[DNA UPDATE IN PROGRESS]` is present in `inbox.json` AND:
+- Neither `[DNA UPDATE COMPLETE]` nor `[DNA UPDATE ABORTED]` is present, AND
+- The message `timestamp` / `received_at` is **recent (< 15 minutes old)**
+
+Then the update is actively underway:
+- **DO NOT attempt self-healing.** Portal downtime or health check failures are expected while git rebase, conflict resolution, or dependency sync is actively underway.
+- **DO NOT run `git rebase --abort`, `git checkout`, `git reset`, or modify/restore any files.** Interfering will disrupt or corrupt the update.
+- **Stand down immediately:**
+  - Keep `state.json:agent_status` as `"idle"`.
+  - Close the cycle via `cycle_close.py` with:
+    `--goal "Self-heal: portal unhealthy"`
+    `--summary "Self-heal deferred: DNA update actively in progress (detected in inbox.json). Awaiting rebase/sync completion."`
+- Exit the cycle cleanly and let the DNA update finish.
+
+### Exceptions — When Self-Heal IS Allowed to Proceed
+
+Self-healing is permitted and required if any of the following exception conditions apply:
+
+1. **Completion or Abort Notice Present:**
+   `inbox.json` contains `[DNA UPDATE COMPLETE]` or `[DNA UPDATE ABORTED]`. The DNA update has finished or aborted, but the portal remains unhealthy (e.g. pending restart, syntax regression, or missing `uv sync`). Proceed to **Step 1** to recover the portal.
+
+2. **Stale / Abandoned Update Notice (> 15 minutes old):**
+   `[DNA UPDATE IN PROGRESS]` has a timestamp older than 15 minutes with no subsequent completion/abort notice. The update has likely hung, crashed, or was abandoned mid-process.
+   - Inspect git state (`git status`).
+   - If stuck in a broken/hung rebase, abort the hung rebase: `git rebase --abort 2>/dev/null || true`
+   - Proceed to **Step 1** to triage and restore the portal.
+
+3. **No DNA Update Notice:**
+   If no DNA update message is present in `inbox.json`, proceed directly to **Step 1**.
+
 ## Step 1: Quick Triage (use existing scripts)
 
 ```bash
@@ -33,6 +74,7 @@ bash /agent/scripts/server_restart.sh --verify
 ```
 
 If `server_restart.sh` fails, do it manually:
+
 ```bash
 # Find and kill stale streamlit/server processes (never kill PID 1)
 ps aux | grep -E "streamlit.*server|python.*server\.py" | grep -v grep | awk 'NR>1 && $2 != 1 {print $2}' | xargs -r kill
@@ -58,6 +100,7 @@ every boot — it backs up corrupt files as `.corrupt` and recreates defaults.
 **A server restart (Fix A) usually resolves this automatically.**
 
 If you still need to check manually:
+
 ```bash
 uv run python scripts/maintain.py --fix
 ```
@@ -74,12 +117,14 @@ uv sync
 ```
 
 If the module is not yet listed in `pyproject.toml`, add it first:
+
 ```bash
 uv add <package-name>
 # uv add automatically runs uv sync after updating pyproject.toml
 ```
 
 Then verify the import works:
+
 ```bash
 uv run python -c "import xxx; print('OK')"
 ```
@@ -91,6 +136,7 @@ uv run python -c "import xxx; print('OK')"
 - Run self-test to identify specific failures: `uv run python scripts/self_test.py --record`
 - Check for Python tracebacks via Streamlit logs or: `journalctl -u streamlit 2>/dev/null`
 - Verify all app modules import cleanly (use dynamic list — hardcoded lists go stale):
+
   ```bash
   uv run python -c "
   import os, importlib
@@ -100,6 +146,7 @@ uv run python -c "import xxx; print('OK')"
       except Exception as e: print(f'  FAIL app.{m}: {e}')
   "
   ```
+
 - If a specific tab is broken, check the corresponding `app/*.py` module
 - Restore from backup if you recently modified app files (look for `*.backup` files)
 
@@ -110,6 +157,7 @@ during headless rendering. The `/_stcore/health` endpoint still returned "ok"
 because the Streamlit process is alive — but the Python app itself is broken.
 
 Diagnostic commands:
+
 ```bash
 # Reproduce the error
 cd /agent && uv run python scripts/app_check.py
@@ -131,6 +179,7 @@ for m in mods:
 ```
 
 Common causes:
+
 - **Missing dependency** → `uv sync` (or `uv add <package>` then `uv sync`)
 - **Broken import chain** → a module in `app/` imports something that no longer exists
 - **Error in `_startup_check()`** → the init routine in `app/shared.py` is failing
@@ -180,7 +229,16 @@ All checks must pass before this cycle is complete.
 
 ## Step 5: Record the Failure
 
-Follow the `/agent/prompts/cycle-close.md` checklist. Record the failure in your journal entry (via `cycle_close.py`) and update auto memory `failures.md` with:
+Follow the `/agent/prompts/cycle-close.md` checklist. When you invoke `cycle_close.py`, set:
+
+- `--goal` to the *symptom you set out to repair* (e.g. `"Self-heal: portal /app returning 502"`),
+- `--summary` to the *delivered fix and verification* (e.g. `"Restarted Streamlit; health 200; root cause: stale lockfile"`).
+
+The two fields must differ — `--goal` is the plan, `--summary` is the outcome. See
+`prompts/cycle-close.md` for the full rule.
+
+Record the failure in your journal entry (via `cycle_close.py`) and update `/agent/memory/failures.json` with:
+
 - Symptom: what health check found
 - Diagnosis: actual root cause
 - Fix: what you did
@@ -189,4 +247,4 @@ Follow the `/agent/prompts/cycle-close.md` checklist. Record the failure in your
 
 ## Step 6: Update State
 
-Set status to "recovering" during the fix, then "idle" once verified.
+Set `state.json:agent_status` to `"recovering"` during the fix, then `"idle"` once verified.

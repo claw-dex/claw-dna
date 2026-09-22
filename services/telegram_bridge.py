@@ -24,11 +24,12 @@ Management:
 """
 
 import fcntl
-import hashlib
 import json
 import logging
 import os
 import re
+import secrets
+import shutil
 import signal
 import subprocess
 import sys
@@ -38,42 +39,77 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-# Ensure /agent is on sys.path so 'from scripts.keepass import ...' works
-# regardless of the working directory when launched via service-manager
-if "/agent" not in sys.path:
-    sys.path.insert(0, "/agent")
-
 import requests
 
+from envelope import (
+    dedup_key,
+    ensure_id,
+    make_from,
+    msg_hash,
+    record_origin,
+    reply_target,
+    resolve_handle,
+    resolve_origin,
+    sanitize_origin_map,
+)
 from shared import atomic_write_json, write_to_inbox, append_to_history
 
 # --- Paths ---
 BASE = Path("/agent")
-STATE_FILE         = BASE / "memory" / "telegram_state.json"
-INBOX_FILE         = BASE / "messages" / "inbox.json"
-OUTBOX_FILE        = BASE / "messages" / "outbox.json"
-INBOX_HISTORY_FILE  = BASE / "memory" / "telegram_inbox_history.json"
-OUTBOX_HISTORY_FILE = BASE / "memory" / "outbox_history.json"
-CHAT_HISTORY_FILE   = BASE / "memory" / "telegram_chat_history.json"
-LOG_DIR             = BASE / "memory" / "logs"
-LOG_FILE            = LOG_DIR / "telegram_bridge.log"
-HEARTBEAT_DIR       = BASE / "memory" / "heartbeats"
-HEARTBEAT_FILE      = HEARTBEAT_DIR / "telegram_bridge.heartbeat"
-LOCK_FILE           = BASE / "memory" / "telegram_bridge.lock"
-
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-HEARTBEAT_DIR.mkdir(parents=True, exist_ok=True)
+STATE_FILE = BASE / "memory" / "telegram_state.json"
+INBOX_FILE = BASE / "messages" / "inbox.json"
+OUTBOX_FILE = BASE / "messages" / "outbox.json"
+BRIDGE_DIR = BASE / "messages" / "bridge" / "telegram"
+INBOX_HISTORY_FILE = BRIDGE_DIR / "inbox_history.json"
+OUTBOX_HISTORY_FILE = BRIDGE_DIR / "outbox_history.json"
+CHAT_HISTORY_FILE = BRIDGE_DIR / "chat_history.json"
+LOG_DIR = BASE / "memory" / "logs"
+LOG_FILE = LOG_DIR / "telegram_bridge.log"
+HEARTBEAT_DIR = BASE / "memory" / "heartbeats"
+HEARTBEAT_FILE = HEARTBEAT_DIR / "telegram_bridge.heartbeat"
+LOCK_FILE = BASE / "memory" / "telegram_bridge.lock"
 
 # --- Logging ---
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler(sys.stdout),
-    ],
-)
 log = logging.getLogger("telegram_bridge")
+
+
+def _setup_logging():
+    """Create log/heartbeat dirs and attach handlers.
+
+    Deferred to main() so the module can be imported on hosts without /agent
+    (e.g. tests, dev machines).
+    """
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    HEARTBEAT_DIR.mkdir(parents=True, exist_ok=True)
+    BRIDGE_DIR.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[
+            logging.FileHandler(LOG_FILE),
+            logging.StreamHandler(sys.stdout),
+        ],
+    )
+
+
+def _migrate_legacy_message_files():
+    """Move pre-existing message records from /agent/memory/ to BRIDGE_DIR.
+
+    Idempotent: skips when the new path already exists. Non-fatal on errors.
+    """
+    legacy_pairs = [
+        (BASE / "memory" / "telegram_inbox_history.json", INBOX_HISTORY_FILE),
+        (BASE / "memory" / "outbox_history.json", OUTBOX_HISTORY_FILE),
+        (BASE / "memory" / "telegram_chat_history.json", CHAT_HISTORY_FILE),
+    ]
+    for old, new in legacy_pairs:
+        try:
+            if old.exists() and not new.exists():
+                new.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(old), str(new))
+                log.info(f"Migrated {old} -> {new}")
+        except (OSError, shutil.Error) as exc:
+            log.warning(f"Failed to migrate {old} -> {new}: {exc}")
 
 
 def _write_heartbeat():
@@ -91,10 +127,14 @@ def _write_heartbeat():
 KEEPASS_TELEGRAM_BOT_TOKEN = "TELEGRAM_BOT_TOKEN"
 KEEPASS_TELEGRAM_CHAT_ID = "TELEGRAM_CHAT_ID"
 KEEPASS_TELEGRAM_OWNER_USERNAME = "TELEGRAM_OWNER_USERNAME"
+# Optional: chat id that unaddressed outbox messages (status/FYI with no
+# in_reply_to/to) redirect to instead of the owner. env first, then KeePass.
+KEEPASS_TELEGRAM_UNADDRESSED_CHANNEL = "TELEGRAM_UNADDRESSED_CHANNEL"
 TELEGRAM_API = "https://api.telegram.org/bot{token}/{method}"
-POLL_TIMEOUT  = 25   # Telegram long-poll timeout (seconds)
-SEND_TIMEOUT  = 10   # HTTP timeout for non-polling API calls (sendMessage etc.)
+POLL_TIMEOUT = 25  # Telegram long-poll timeout (seconds)
+SEND_TIMEOUT = 10  # HTTP timeout for non-polling API calls (sendMessage etc.)
 OUTBOX_INTERVAL = 60  # How often to check outbox (seconds)
+MAX_PASSCODE_ATTEMPTS = 5  # Max wrong passcode tries before permanent block
 STATE_JSON = BASE / "memory" / "state.json"
 MEDIA_DIR = BASE / "workspace" / "telegram"
 TELEGRAM_FILE_API = "https://api.telegram.org/file/bot{token}/{file_path}"
@@ -163,19 +203,26 @@ def build_ack_message() -> str:
 # KeePass helpers
 # ---------------------------------------------------------------------------
 
+
 def keepass_get(title: str) -> str | None:
     try:
         from scripts.keepass import get_credential
+
         return get_credential(title)
     except Exception as e:
         log.warning(f"KeePass get({title!r}) failed: {e}")
     return None
 
 
-def keepass_store(title: str, username: str, value: str, group: str = "API Keys") -> bool:
+def keepass_store(
+    title: str, username: str, value: str, group: str = "API Keys"
+) -> bool:
     try:
         from scripts.keepass import store_credential
-        return store_credential(title=title, username=username, password=value, group=group)
+
+        return store_credential(
+            title=title, username=username, password=value, group=group
+        )
     except Exception as e:
         log.warning(f"KeePass store({title!r}) failed: {e}")
     return False
@@ -184,6 +231,7 @@ def keepass_store(title: str, username: str, value: str, group: str = "API Keys"
 # ---------------------------------------------------------------------------
 # Chat ID helpers
 # ---------------------------------------------------------------------------
+
 
 def parse_chat_ids(csv_string: str | None) -> list[str]:
     """Parse a comma-separated string of chat IDs into a list."""
@@ -199,41 +247,228 @@ def serialize_chat_ids(chat_ids: list[str]) -> str:
 
 def contains_username(text: str, username: str) -> bool:
     """Check if text contains the username (or @username) as a whole word, case-insensitive."""
-    pattern = r'(?<!\w)@?' + re.escape(username) + r'\b'
+    pattern = r"(?<!\w)@?" + re.escape(username) + r"\b"
     return bool(re.search(pattern, text, re.IGNORECASE))
+
+
+def is_group_chat(chat_type: str) -> bool:
+    """Return True for group and supergroup chats."""
+    return chat_type in ("group", "supergroup")
+
+
+def strip_bot_suffix(command: str, bot_username: str = "") -> str:
+    """Strip the ``@BotName`` suffix Telegram appends to commands in groups.
+
+    Only strips the suffix when it targets *this* bot (or when *bot_username*
+    is empty — e.g. during startup before ``getMe`` has returned).  For
+    commands addressed to other bots (``/goals@OtherBot``), the original
+    string is returned unchanged so the dispatcher won't match it.
+    """
+    if "@" not in command:
+        return command
+    base, _, suffix = command.partition("@")
+    if not bot_username or suffix.lower() == bot_username.lower():
+        return base
+    return command
+
+
+def bot_is_addressed(msg: dict, bot_username: str, check_text: str) -> bool:
+    """Return True if the bot should respond to this message in a group.
+
+    In groups Telegram's privacy mode means the bot only receives:
+      • Commands  (/something or /something@BotName)
+      • Messages that @mention the bot
+      • Replies to one of the bot's own messages
+    This helper mirrors that logic so we don't respond to every message
+    even when privacy mode is disabled.
+    """
+    text = check_text or ""
+    # Any slash-command
+    if text.lstrip().startswith("/"):
+        return True
+    # @mention of this bot — word-boundary match so @foo doesn't match @foobar
+    if bot_username and contains_username(text, bot_username):
+        return True
+    # Reply to the bot's own message
+    reply_to = msg.get("reply_to_message") or {}
+    reply_from = reply_to.get("from") or {}
+    if bot_username and reply_from.get("username", "").lower() == bot_username.lower():
+        return True
+    return False
+
+
+def generate_passcode() -> str:
+    """Generate a cryptographically secure random 4-digit passcode (zero-padded)."""
+    return f"{secrets.randbelow(10000):04d}"
+
+
+# ---------------------------------------------------------------------------
+# Block-list helpers
+# ---------------------------------------------------------------------------
+# blocked_chat_ids entries are dicts: {"chat_id": "...", "username": "..."}
+# Legacy string entries (plain chat_id) are migrated in _validate_state.
+
+
+def is_blocked(state: dict, chat_id: str) -> bool:
+    """Return True if chat_id is in the blocked list."""
+    for entry in state.get("blocked_chat_ids", []):
+        if isinstance(entry, dict):
+            if entry.get("chat_id") == chat_id:
+                return True
+        elif entry == chat_id:  # legacy string format
+            return True
+    return False
+
+
+def find_blocked_entry(state: dict, identifier: str) -> dict | None:
+    """Find a blocked entry by chat_id or username (leading @ stripped).
+
+    Returns the entry dict on match, or None if not found.
+    """
+    needle = identifier.lstrip("@").lower()
+    for entry in state.get("blocked_chat_ids", []):
+        if isinstance(entry, dict):
+            if entry.get("chat_id") == needle:
+                return entry
+            if entry.get("username", "").lower() == needle:
+                return entry
+        elif entry == needle:  # legacy string
+            return {"chat_id": entry, "username": ""}
+    return None
+
+
+def add_block(state: dict, chat_id: str, username: str = "") -> None:
+    """Add chat_id to the blocked list, storing username alongside it.
+
+    Removes any existing entry for that chat_id first (no duplicates).
+    """
+    _remove_block_by_chat_id(state, chat_id)
+    state["blocked_chat_ids"].append(
+        {"chat_id": chat_id, "username": username.lstrip("@")}
+    )
+
+
+def _remove_block_by_chat_id(state: dict, chat_id: str) -> bool:
+    """Internal: remove by exact chat_id only."""
+    before = len(state.get("blocked_chat_ids", []))
+    state["blocked_chat_ids"] = [
+        e
+        for e in state.get("blocked_chat_ids", [])
+        if not (isinstance(e, dict) and e.get("chat_id") == chat_id)
+        and not (isinstance(e, str) and e == chat_id)
+    ]
+    return len(state["blocked_chat_ids"]) < before
+
+
+def remove_block(state: dict, identifier: str) -> dict | None:
+    """Remove a blocked entry by chat_id or username (leading @ stripped).
+
+    Returns the removed entry dict on success, or None if not found.
+    """
+    needle = identifier.lstrip("@").lower()
+    found = None
+    kept = []
+    for entry in state.get("blocked_chat_ids", []):
+        matched = False
+        if isinstance(entry, dict):
+            if (
+                entry.get("chat_id") == needle
+                or entry.get("username", "").lower() == needle
+            ):
+                matched = True
+                found = entry
+        elif isinstance(entry, str) and entry == needle:
+            matched = True
+            found = {"chat_id": entry, "username": ""}
+        if not matched:
+            kept.append(entry)
+    state["blocked_chat_ids"] = kept
+    return found
 
 
 # ---------------------------------------------------------------------------
 # State management
 # ---------------------------------------------------------------------------
 
+
 def _validate_state(data) -> dict:
     """Ensure state has the expected structure, repairing wrong types."""
-    default = {"last_update_id": 0, "sent_hashes": []}
+    default = {
+        "last_update_id": 0,
+        "sent_hashes": [],
+        "pending_authorizations": {},
+        "blocked_chat_ids": [],
+        # id -> origin resolution map for per-user reply routing (envelope.py).
+        "origin_map": {},
+    }
     if not isinstance(data, dict):
-        log.warning(f"Telegram state has unexpected type {type(data).__name__}, resetting")
+        log.warning(
+            f"Telegram state has unexpected type {type(data).__name__}, resetting"
+        )
         return dict(default)
     # Validate last_update_id — must be int
     uid = data.get("last_update_id")
     if not isinstance(uid, int):
-        log.warning(f"Telegram state last_update_id has wrong type {type(uid).__name__}, resetting to 0")
+        log.warning(
+            f"Telegram state last_update_id has wrong type {type(uid).__name__}, resetting to 0"
+        )
         data["last_update_id"] = 0
     # Validate sent_hashes — must be list of strings
     hashes = data.get("sent_hashes")
     if not isinstance(hashes, list):
-        log.warning(f"Telegram state sent_hashes has wrong type {type(hashes).__name__}, resetting to []")
+        log.warning(
+            f"Telegram state sent_hashes has wrong type {type(hashes).__name__}, resetting to []"
+        )
         data["sent_hashes"] = []
     else:
         # Filter out any non-string entries
         cleaned = [h for h in hashes if isinstance(h, str)]
         if len(cleaned) != len(hashes):
-            log.warning(f"Removed {len(hashes) - len(cleaned)} non-string entries from sent_hashes")
+            log.warning(
+                f"Removed {len(hashes) - len(cleaned)} non-string entries from sent_hashes"
+            )
             data["sent_hashes"] = cleaned
+    # Validate pending_authorizations — must be dict
+    pending = data.get("pending_authorizations")
+    if not isinstance(pending, dict):
+        log.warning(
+            f"Telegram state pending_authorizations has wrong type {type(pending).__name__}, resetting to {{}}"
+        )
+        data["pending_authorizations"] = {}
+    # Validate blocked_chat_ids — must be list of dicts; migrate legacy string entries
+    blocked = data.get("blocked_chat_ids")
+    if not isinstance(blocked, list):
+        log.warning(
+            f"Telegram state blocked_chat_ids has wrong type {type(blocked).__name__}, resetting to []"
+        )
+        data["blocked_chat_ids"] = []
+    else:
+        migrated = []
+        for entry in blocked:
+            if isinstance(entry, str):
+                # Legacy format: plain chat_id string → upgrade to dict
+                migrated.append({"chat_id": entry, "username": ""})
+                log.info(
+                    f"Migrated legacy blocked_chat_ids entry '{entry}' to dict format"
+                )
+            elif isinstance(entry, dict) and entry.get("chat_id"):
+                migrated.append(entry)
+            # else: malformed entry, drop it
+        data["blocked_chat_ids"] = migrated
+    # origin_map: sanitize via the shared helper (drops malformed, bounds size).
+    data["origin_map"] = sanitize_origin_map(data.get("origin_map"))
     return data
 
 
 def load_state() -> dict:
-    default = {"last_update_id": 0, "sent_hashes": []}
+    default = {
+        "last_update_id": 0,
+        "sent_hashes": [],
+        "pending_authorizations": {},
+        "blocked_chat_ids": [],
+        # id -> origin resolution map for per-user reply routing (envelope.py).
+        "origin_map": {},
+    }
     if STATE_FILE.exists():
         try:
             data = json.loads(STATE_FILE.read_text())
@@ -247,10 +482,7 @@ def save_state(state: dict):
     atomic_write_json(STATE_FILE, state, indent=2)
 
 
-def msg_hash(msg: dict) -> str:
-    """Stable 16-char hash of an outbox message to detect duplicates."""
-    key = json.dumps(msg, sort_keys=True, ensure_ascii=False)
-    return hashlib.sha256(key.encode()).hexdigest()[:16]
+# msg_hash / dedup_key are imported from envelope (single canonical impl).
 
 
 def protect_urls_in_markdown(text: str) -> str:
@@ -262,31 +494,30 @@ def protect_urls_in_markdown(text: str) -> str:
     """
     # Match URLs: http(s)://... until whitespace or end of string
     # Lookahead/lookbehind ensure we don't wrap already-wrapped URLs
-    url_pattern = r'(?<!`)(?<!`)\b(https?://[^\s`]+)(?!`)(?!`)'
+    url_pattern = r"(?<!`)(?<!`)\b(https?://[^\s`]+)(?!`)(?!`)"
 
     def wrap_url(match):
         url = match.group(1)
-        if url.endswith('`'):
+        if url.endswith("`"):
             return url
-        return f'`{url}`'
+        return f"`{url}`"
 
     return re.sub(url_pattern, wrap_url, text)
 
 
 def _strip_markdown_preserve_code(text: str) -> str:
-    """Strip Markdown formatting but preserve backtick-wrapped content.
+    """Strip MarkdownV2 formatting but preserve backtick-wrapped content.
 
-    Used as fallback when Telegram's Markdown parser fails. Removes
-    bold (*) and italic (_) markers but keeps backtick-wrapped URLs intact.
+    Used as fallback when Telegram's MarkdownV2 parser fails. Removes
+    formatting markers and unescapes backslash-escaped characters.
     """
     # Extract backtick-wrapped content (URLs, code blocks)
-    backtick_pattern = r'`([^`]+)`'
+    backtick_pattern = r"`([^`]+)`"
     placeholders = {}
     counter = 0
 
     def replace_with_placeholder(match):
         nonlocal counter
-        # Use placeholder without underscores to avoid stripping issues
         placeholder = f"{{{{PRESERVED{counter}}}}}"
         placeholders[placeholder] = match.group(1)  # Store without backticks
         counter += 1
@@ -295,8 +526,12 @@ def _strip_markdown_preserve_code(text: str) -> str:
     # Replace backtick blocks with placeholders
     text = re.sub(backtick_pattern, replace_with_placeholder, text)
 
-    # Strip markdown formatting chars
-    text = text.replace("*", "").replace("_", "")
+    # Unescape backslash-escaped chars first, so stripped markers are not confused
+    # with escape targets (e.g. \* should become * not be swallowed by the * strip)
+    text = re.sub(r"\\(.)", r"\1", text)
+
+    # Strip unescaped MarkdownV2 formatting chars
+    text = text.replace("*", "").replace("_", "").replace("~", "").replace("||", "")
 
     # Restore preserved content
     for placeholder, content in placeholders.items():
@@ -305,9 +540,61 @@ def _strip_markdown_preserve_code(text: str) -> str:
     return text
 
 
+# Copied from python-telegram-bot (LGPL-3.0-or-later), telegram/helpers.py.
+# Copyright (C) 2015-2026 Leandro Toledo de Souza <devs@python-telegram-bot.org>.
+# Source: https://github.com/python-telegram-bot/python-telegram-bot
+def escape_markdown(
+    text: str, version: int | str = 1, entity_type: str | None = None
+) -> str:
+    """Escape Telegram markup symbols.
+
+    Args:
+        text: The text to escape.
+        version: Telegram Markdown version, ``1`` or ``2``. Defaults to ``1``.
+        entity_type: For MarkdownV2, ``"pre"`` / ``"code"`` escape only ``\\`` and
+            ``` ` ```; ``"text_link"`` / ``"custom_emoji"`` escape only ``\\`` and ``)``.
+            Ignored for v1.
+    """
+    if int(version) == 1:
+        escape_chars = r"_*`["
+    elif int(version) == 2:
+        if entity_type in ["pre", "code"]:
+            escape_chars = r"\`"
+        elif entity_type in ["text_link", "custom_emoji"]:
+            escape_chars = r"\)"
+        else:
+            escape_chars = r"\_*[]()~`>#+-=|{}.!"
+    else:
+        raise ValueError("Markdown version must be either 1 or 2!")
+
+    return re.sub(f"([{re.escape(escape_chars)}])", r"\\\1", text)
+
+
+def escape_markdown_v2(text: str, entity_type: str | None = None) -> str:
+    """Shorthand for ``escape_markdown(text, version=2, entity_type=...)``."""
+    return escape_markdown(text, version=2, entity_type=entity_type)
+
+
+# Copied from python-telegram-bot (LGPL-3.0-or-later), telegram/helpers.py.
+# Copyright (C) 2015-2026 Leandro Toledo de Souza <devs@python-telegram-bot.org>.
+def mention_markdown(user_id: int | str, name: str, version: int | str = 1) -> str:
+    """Create a tappable user mention in Markdown syntax.
+
+    Args:
+        user_id: The user's numeric Telegram ID to mention.
+        name: The display name shown for the mention.
+        version: Telegram Markdown version, ``1`` or ``2``. Defaults to ``1``.
+    """
+    tg_link = f"tg://user?id={user_id}"
+    if version == 1:
+        return f"[{name}]({tg_link})"
+    return f"[{escape_markdown(name, version=version)}]({tg_link})"
+
+
 # ---------------------------------------------------------------------------
 # Chat history (in-memory + disk-synced)
 # ---------------------------------------------------------------------------
+
 
 def load_chat_history() -> dict:
     """Load per-chat conversation history from disk."""
@@ -331,11 +618,13 @@ def append_chat_message(history: dict, chat_id: str, role: str, text: str):
     """Append a message to a chat's history, keeping last 50 per chat."""
     if chat_id not in history:
         history[chat_id] = []
-    history[chat_id].append({
-        "role": role,
-        "text": text,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    })
+    history[chat_id].append(
+        {
+            "role": role,
+            "text": text,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    )
     history[chat_id] = history[chat_id][-50:]
 
 
@@ -390,7 +679,7 @@ def build_chat_context(history: dict, chat_id: str) -> str:
     lines = []
     for m in selected:
         label = "User" if m["role"] == "user" else "Agent"
-        lines.append(f"{label}: {m['text']}")
+        lines.append(f"<message>{label}: {m['text']}</message>")
 
     return "\n".join(lines)
 
@@ -398,6 +687,7 @@ def build_chat_context(history: dict, chat_id: str) -> str:
 # ---------------------------------------------------------------------------
 # Telegram API
 # ---------------------------------------------------------------------------
+
 
 def tg(token: str, method: str, _http_timeout: float | None = None, **params):
     """Call the Telegram Bot API. Returns result on success, None on failure.
@@ -408,8 +698,10 @@ def tg(token: str, method: str, _http_timeout: float | None = None, **params):
     Pass an explicit value to override (e.g. file downloads need more time).
     """
     is_long_poll = method == "getUpdates"
-    http_timeout = _http_timeout if _http_timeout is not None else (
-        POLL_TIMEOUT + 5 if is_long_poll else SEND_TIMEOUT
+    http_timeout = (
+        _http_timeout
+        if _http_timeout is not None
+        else (POLL_TIMEOUT + 5 if is_long_poll else SEND_TIMEOUT)
     )
     url = TELEGRAM_API.format(token=token, method=method)
     try:
@@ -417,14 +709,18 @@ def tg(token: str, method: str, _http_timeout: float | None = None, **params):
         try:
             data = resp.json()
         except (ValueError, requests.exceptions.JSONDecodeError):
-            log.warning(f"Telegram API non-JSON response ({method}, HTTP {resp.status_code}): {resp.text[:200]}")
+            log.warning(
+                f"Telegram API non-JSON response ({method}, HTTP {resp.status_code}): {resp.text[:200]}"
+            )
             return None
         if data.get("ok"):
             return data.get("result")
         log.warning(f"Telegram API error ({method}): {data.get('description')}")
     except requests.exceptions.Timeout:
         if not is_long_poll:
-            log.warning(f"Telegram request timed out ({method}, timeout={http_timeout}s)")
+            log.warning(
+                f"Telegram request timed out ({method}, timeout={http_timeout}s)"
+            )
         # else: normal for long-poll — no log noise
     except Exception as e:
         log.error(f"Telegram request failed ({method}): {e}")
@@ -434,6 +730,7 @@ def tg(token: str, method: str, _http_timeout: float | None = None, **params):
 # ---------------------------------------------------------------------------
 # Media download helpers
 # ---------------------------------------------------------------------------
+
 
 def extract_media(msg: dict) -> list[tuple[str, str, str]]:
     """Extract downloadable media from a Telegram message.
@@ -469,7 +766,9 @@ def extract_media(msg: dict) -> list[tuple[str, str, str]]:
     return media
 
 
-def download_telegram_file(token: str, file_id: str, chat_id: str, filename_hint: str) -> str | None:
+def download_telegram_file(
+    token: str, file_id: str, chat_id: str, filename_hint: str
+) -> str | None:
     """Download a file from Telegram and save to /agent/workspace/telegram/{chat_id}/.
 
     Returns the local file path on success, None on failure.
@@ -498,7 +797,9 @@ def download_telegram_file(token: str, file_id: str, chat_id: str, filename_hint
             # Check Content-Length header if available for early rejection
             content_length = resp.headers.get("Content-Length")
             if content_length and int(content_length) > max_size:
-                log.warning(f"File {remote_path} too large ({content_length} bytes), skipping")
+                log.warning(
+                    f"File {remote_path} too large ({content_length} bytes), skipping"
+                )
                 return None
             size = 0
             exceeded = False
@@ -506,7 +807,9 @@ def download_telegram_file(token: str, file_id: str, chat_id: str, filename_hint
                 for chunk in resp.iter_content(chunk_size=8192):
                     size += len(chunk)
                     if size > max_size:
-                        log.warning(f"File {remote_path} exceeded {max_size} byte limit at {size} bytes, aborting")
+                        log.warning(
+                            f"File {remote_path} exceeded {max_size} byte limit at {size} bytes, aborting"
+                        )
                         exceeded = True
                         break
                     f.write(chunk)
@@ -529,7 +832,14 @@ def download_telegram_file(token: str, file_id: str, chat_id: str, filename_hint
 # Command handlers
 # ---------------------------------------------------------------------------
 
-def handle_heartbeat_command(token: str, from_chat: str, from_user: str, chat_history: dict, extra_args: list[str] = None) -> bool:
+
+def handle_heartbeat_command(
+    token: str,
+    from_chat: str,
+    from_user: str,
+    chat_history: dict,
+    extra_args: list[str] = None,
+) -> bool:
     """Handle the /heartbeat command by triggering an immediate heartbeat.
 
     Args:
@@ -555,7 +865,7 @@ def handle_heartbeat_command(token: str, from_chat: str, from_user: str, chat_hi
             capture_output=True,
             text=True,
             timeout=300,  # 5 minute timeout
-            cwd="/agent"
+            cwd="/agent",
         )
 
         if result.returncode == 0:
@@ -563,14 +873,18 @@ def handle_heartbeat_command(token: str, from_chat: str, from_user: str, chat_hi
             log.info(f"Heartbeat completed successfully for @{from_user}")
         else:
             response = f"⚠️ Heartbeat triggered but returned non-zero exit code: {result.returncode}\n\nCheck logs for details."
-            log.warning(f"Heartbeat failed with code {result.returncode}: {result.stderr}")
+            log.warning(
+                f"Heartbeat failed with code {result.returncode}: {result.stderr}"
+            )
 
         tg(token, "sendMessage", chat_id=from_chat, text=response)
         append_chat_message(chat_history, from_chat, "bot", response)
         return True
 
     except subprocess.TimeoutExpired:
-        response = "⏱️ Heartbeat timed out after 5 minutes. The cycle may still be running."
+        response = (
+            "⏱️ Heartbeat timed out after 5 minutes. The cycle may still be running."
+        )
         log.error(f"Heartbeat timeout for @{from_user}")
         tg(token, "sendMessage", chat_id=from_chat, text=response)
         append_chat_message(chat_history, from_chat, "bot", response)
@@ -588,7 +902,10 @@ def handle_heartbeat_command(token: str, from_chat: str, from_user: str, chat_hi
 # Quick-reply commands (no heartbeat needed)
 # ---------------------------------------------------------------------------
 
-def handle_status_command(token: str, from_chat: str, from_user: str, chat_history: dict) -> None:
+
+def handle_status_command(
+    token: str, from_chat: str, from_user: str, chat_history: dict
+) -> None:
     """Handle /status — return live agent status from memory files instantly."""
     try:
         state_path = BASE / "memory" / "state.json"
@@ -600,14 +917,21 @@ def handle_status_command(token: str, from_chat: str, from_user: str, chat_histo
         goals = json.loads(goals_path.read_text()) if goals_path.exists() else []
         cycles = json.loads(cycles_path.read_text()) if cycles_path.exists() else []
 
-        status = state.get("status", "unknown")
+        from scripts.repair_memory_files import migrate_state_dict
+
+        if isinstance(state, dict):
+            migrate_state_dict(state)
+
+        status = state.get("agent_status", "unknown")
         cycle_num = state.get("cycle_number", "?")
         last_hb = state.get("last_heartbeat", "unknown")
         summary = state.get("last_cycle_summary", "")
 
         # Count goals by status
         if isinstance(goals, list):
-            active = sum(1 for g in goals if g.get("status") in ("pending", "in_progress"))
+            active = sum(
+                1 for g in goals if g.get("status") in ("pending", "in_progress")
+            )
             completed = sum(1 for g in goals if g.get("status") == "completed")
             failed = sum(1 for g in goals if g.get("status") == "failed")
         else:
@@ -616,20 +940,33 @@ def handle_status_command(token: str, from_chat: str, from_user: str, chat_histo
         # Count cycles
         total_cycles = len(cycles) if isinstance(cycles, list) else 0
 
-        status_emoji = {"running": "⚙️", "idle": "✅", "waiting_for_human": "⏳"}.get(status, "❓")
+        status_emoji = {"running": "⚙️", "idle": "✅", "waiting_for_human": "⏳"}.get(
+            status, "❓"
+        )
 
+        hb_display = (
+            escape_markdown_v2(last_hb[:19])
+            if last_hb and last_hb != "unknown"
+            else "unknown"
+        )
         lines = [
             f"{status_emoji} *Agent Status*",
-            f"Cycle: #{cycle_num}  |  Status: `{status}`",
-            f"Last heartbeat: {last_hb[:19] if last_hb and last_hb != 'unknown' else 'unknown'}",
+            f"Cycle: \\#{cycle_num}  \\|  Status: `{status}`",
+            f"Last heartbeat: {hb_display}",
             f"Goals: {active} active, {completed} done, {failed} failed",
             f"Total cycles: {total_cycles}",
         ]
         if summary:
-            lines.append(f"\n_Last: {summary[:200]}_")
+            lines.append(f"\n_Last: {escape_markdown_v2(summary[:200])}_")
 
         response = "\n".join(lines)
-        tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="Markdown")
+        tg(
+            token,
+            "sendMessage",
+            chat_id=from_chat,
+            text=response,
+            parse_mode="MarkdownV2",
+        )
         append_chat_message(chat_history, from_chat, "bot", response)
         log.info(f"/status command served to @{from_user}")
     except Exception as e:
@@ -638,7 +975,9 @@ def handle_status_command(token: str, from_chat: str, from_user: str, chat_histo
         log.error(f"/status error for @{from_user}: {e}", exc_info=True)
 
 
-def handle_goals_command(token: str, from_chat: str, from_user: str, chat_history: dict, limit: int = 5) -> None:
+def handle_goals_command(
+    token: str, from_chat: str, from_user: str, chat_history: dict, limit: int = 5
+) -> None:
     """Handle /goals [N] — show the N most recent goals and their status."""
     try:
         goals_path = BASE / "memory" / "goal.json"
@@ -663,18 +1002,23 @@ def handle_goals_command(token: str, from_chat: str, from_user: str, chat_histor
             "pending": "⏳",
         }
 
-        lines = [f"📋 *Last {len(recent)} goal(s)*"]
+        lines = [f"📋 *Last {len(recent)} goal\\(s\\)*"]
         for g in recent:
             st = g.get("status", "?")
             emoji = status_emoji.get(st, "❓")
             goal_text = g.get("goal", "untitled")
-            # Truncate long goal text
             if len(goal_text) > 80:
                 goal_text = goal_text[:77] + "..."
-            lines.append(f"{emoji} `{st}` — {goal_text}")
+            lines.append(f"{emoji} `{st}` — {escape_markdown_v2(goal_text)}")
 
         response = "\n".join(lines)
-        tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="Markdown")
+        tg(
+            token,
+            "sendMessage",
+            chat_id=from_chat,
+            text=response,
+            parse_mode="MarkdownV2",
+        )
         append_chat_message(chat_history, from_chat, "bot", response)
         log.info(f"/goals command served to @{from_user} (limit={limit})")
     except Exception as e:
@@ -683,7 +1027,9 @@ def handle_goals_command(token: str, from_chat: str, from_user: str, chat_histor
         log.error(f"/goals error for @{from_user}: {e}", exc_info=True)
 
 
-def handle_journal_command(token: str, from_chat: str, from_user: str, chat_history: dict, limit: int = 3) -> None:
+def handle_journal_command(
+    token: str, from_chat: str, from_user: str, chat_history: dict, limit: int = 3
+) -> None:
     """Handle /journal [N] — show the N most recent journal entries with summaries."""
     try:
         journal_path = BASE / "memory" / "journal.json"
@@ -696,7 +1042,9 @@ def handle_journal_command(token: str, from_chat: str, from_user: str, chat_hist
             return
 
         # Sort by timestamp desc and take limit
-        sorted_entries = sorted(entries, key=lambda e: e.get("timestamp", ""), reverse=True)
+        sorted_entries = sorted(
+            entries, key=lambda e: e.get("timestamp", ""), reverse=True
+        )
         recent = sorted_entries[:limit]
 
         type_emoji = {
@@ -704,9 +1052,12 @@ def handle_journal_command(token: str, from_chat: str, from_user: str, chat_hist
             "goal": "🎯",
             "self-heal": "🔧",
             "self_heal": "🔧",
+            "dream": "💤",
         }
 
-        lines = [f"📓 *Last {len(recent)} journal entr{'y' if len(recent) == 1 else 'ies'}*"]
+        lines = [
+            f"📓 *Last {len(recent)} journal entr{'y' if len(recent) == 1 else 'ies'}*"
+        ]
         for e in recent:
             cycle_num = e.get("cycle", "?")
             etype = e.get("type", "unknown")
@@ -717,10 +1068,21 @@ def handle_journal_command(token: str, from_chat: str, from_user: str, chat_hist
             if len(summary) > 120:
                 summary = summary[:117] + "..."
             ts = (e.get("timestamp", "") or "")[:10]
-            lines.append(f"{emoji} *#{cycle_num}*{cat_label} — {summary or '(no summary)'} _{ts}_")
+            summary_display = (
+                escape_markdown_v2(summary) if summary else "\\(no summary\\)"
+            )
+            lines.append(
+                f"{emoji} *\\#{cycle_num}*{cat_label} — {summary_display} _{escape_markdown_v2(ts)}_"
+            )
 
         response = "\n".join(lines)
-        tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="Markdown")
+        tg(
+            token,
+            "sendMessage",
+            chat_id=from_chat,
+            text=response,
+            parse_mode="MarkdownV2",
+        )
         append_chat_message(chat_history, from_chat, "bot", response)
         log.info(f"/journal command served to @{from_user} (limit={limit})")
     except Exception as e:
@@ -729,10 +1091,13 @@ def handle_journal_command(token: str, from_chat: str, from_user: str, chat_hist
         log.error(f"/journal error for @{from_user}: {e}", exc_info=True)
 
 
-def handle_today_command(token: str, from_chat: str, from_user: str, chat_history: dict) -> None:
+def handle_today_command(
+    token: str, from_chat: str, from_user: str, chat_history: dict
+) -> None:
     """Handle /today — show today's activity summary: completed goals, cycle count."""
     try:
         from datetime import datetime, timezone, timedelta
+
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(hours=24)
         cutoff_str = cutoff.isoformat()
@@ -747,7 +1112,8 @@ def handle_today_command(token: str, from_chat: str, from_user: str, chat_histor
                 all_goals.extend(bucket)
 
         completed_today = [
-            g for g in all_goals
+            g
+            for g in all_goals
             if g.get("status") == "completed"
             and (g.get("updated_at") or "") >= cutoff_str
         ]
@@ -755,27 +1121,34 @@ def handle_today_command(token: str, from_chat: str, from_user: str, chat_histor
         # --- Cycles run today ---
         cycles_path = BASE / "memory" / "cycles.json"
         cycles = json.loads(cycles_path.read_text()) if cycles_path.exists() else []
+        from scripts.repair_memory_files import migrate_cycles_list
+
+        if isinstance(cycles, list):
+            migrate_cycles_list(cycles)
         cycles_today = [
-            c for c in cycles
-            if c.get("status") == "completed"
+            c
+            for c in cycles
+            if c.get("cycle_status") == "completed"
             and (c.get("end_time") or c.get("start_time") or "") >= cutoff_str
         ]
-        evolve_today = [c for c in cycles_today if c.get("type") == "evolve"]
-        goal_today = [c for c in cycles_today if c.get("type") == "goal"]
+        evolve_today = [c for c in cycles_today if c.get("cycle_type") == "evolve"]
+        goal_today = [c for c in cycles_today if c.get("cycle_type") == "goal"]
 
-        lines = [f"📅 *Today's Summary* _(last 24h as of {now.strftime('%H:%M')} UTC)_\n"]
+        lines = [
+            f"📅 *Today's Summary* _\\(last 24h as of {escape_markdown_v2(now.strftime('%H:%M'))} UTC\\)_\n"
+        ]
 
         # Goals completed today
         if completed_today:
             lines.append(f"*Goals Completed* — {len(completed_today)}")
             for g in completed_today[-5:]:
-                goal_text = g.get("goal", "")[:70]
+                goal_text = escape_markdown_v2(g.get("goal", "")[:70])
                 lines.append(f"  🎯 {goal_text}")
 
         # Cycles summary
         lines.append(f"\n*Cycles* — {len(cycles_today)} total")
         if evolve_today:
-            cats = [c.get("category", "?") for c in evolve_today]
+            cats = [escape_markdown_v2(c.get("category", "?")) for c in evolve_today]
             lines.append(f"  ⚙️ {len(evolve_today)} evolve: {', '.join(cats[:5])}")
         if goal_today:
             lines.append(f"  🎯 {len(goal_today)} goal cycles")
@@ -784,22 +1157,38 @@ def handle_today_command(token: str, from_chat: str, from_user: str, chat_histor
         outbox_path = BASE / "messages" / "outbox.json"
         if outbox_path.exists():
             outbox_data = json.loads(outbox_path.read_text())
-            msgs = outbox_data if isinstance(outbox_data, list) else outbox_data.get("messages", [])
+            msgs = (
+                outbox_data
+                if isinstance(outbox_data, list)
+                else outbox_data.get("messages", [])
+            )
             blocked = [m for m in msgs if m.get("type") == "needs_human"]
             if blocked:
-                lines.append(f"\n⚠️ *Blocked* — {len(blocked)} item(s) need human attention (`/outbox` for details)")
+                lines.append(
+                    f"\n⚠️ *Blocked* — {len(blocked)} item\\(s\\) need human attention \\(`/outbox` for details\\)"
+                )
 
         response = "\n".join(lines)
-        tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="Markdown")
+        tg(
+            token,
+            "sendMessage",
+            chat_id=from_chat,
+            text=response,
+            parse_mode="MarkdownV2",
+        )
         append_chat_message(chat_history, from_chat, "bot", response)
-        log.info(f"/today command served to @{from_user} ({len(completed_today)} goals, {len(cycles_today)} cycles)")
+        log.info(
+            f"/today command served to @{from_user} ({len(completed_today)} goals, {len(cycles_today)} cycles)"
+        )
     except Exception as e:
         err = f"❌ Failed to generate today summary: {e}"
         tg(token, "sendMessage", chat_id=from_chat, text=err)
         log.error(f"/today error for @{from_user}: {e}", exc_info=True)
 
 
-def handle_outbox_command(token: str, from_chat: str, from_user: str, chat_history: dict, limit: int = 5) -> None:
+def handle_outbox_command(
+    token: str, from_chat: str, from_user: str, chat_history: dict, limit: int = 5
+) -> None:
     """Handle /outbox [N] — show the N most recent outbox messages, highlighting needs_human items."""
     try:
         outbox_path = BASE / "messages" / "outbox.json"
@@ -812,7 +1201,9 @@ def handle_outbox_command(token: str, from_chat: str, from_user: str, chat_histo
             return
 
         # Sort by timestamp desc and take limit
-        sorted_msgs = sorted(messages, key=lambda m: m.get("timestamp", ""), reverse=True)
+        sorted_msgs = sorted(
+            messages, key=lambda m: m.get("timestamp", ""), reverse=True
+        )
         recent = sorted_msgs[:limit]
 
         # Count needs_human
@@ -826,7 +1217,7 @@ def handle_outbox_command(token: str, from_chat: str, from_user: str, chat_histo
             "success": "✅",
         }
 
-        header = f"📤 *Outbox* (last {len(recent)} of {len(messages)})"
+        header = f"📤 *Outbox* \\(last {len(recent)} of {len(messages)}\\)"
         if needs_human_count > 0:
             header += f" — 🚨 *{needs_human_count} needs human*"
         lines = [header]
@@ -837,23 +1228,34 @@ def handle_outbox_command(token: str, from_chat: str, from_user: str, chat_histo
             subject = m.get("subject", "") or ""
             content = m.get("content", "") or ""
             ts = (m.get("timestamp", "") or "")[:16].replace("T", " ")
-            # Use subject if available, otherwise truncate content
             display = subject if subject else content
             if len(display) > 100:
                 display = display[:97] + "..."
-            lines.append(f"{emoji} `{mtype}` — {display} _{ts}_")
+            lines.append(
+                f"{emoji} `{mtype}` — {escape_markdown_v2(display)} _{escape_markdown_v2(ts)}_"
+            )
 
         response = "\n".join(lines)
-        tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="Markdown")
+        tg(
+            token,
+            "sendMessage",
+            chat_id=from_chat,
+            text=response,
+            parse_mode="MarkdownV2",
+        )
         append_chat_message(chat_history, from_chat, "bot", response)
-        log.info(f"/outbox command served to @{from_user} (limit={limit}, needs_human={needs_human_count})")
+        log.info(
+            f"/outbox command served to @{from_user} (limit={limit}, needs_human={needs_human_count})"
+        )
     except Exception as e:
         err = f"❌ Failed to read outbox: {e}"
         tg(token, "sendMessage", chat_id=from_chat, text=err)
         log.error(f"/outbox error for @{from_user}: {e}", exc_info=True)
 
 
-def handle_cycles_command(token: str, from_chat: str, from_user: str, chat_history: dict, limit: int = 5) -> None:
+def handle_cycles_command(
+    token: str, from_chat: str, from_user: str, chat_history: dict, limit: int = 5
+) -> None:
     """Handle /cycles [N] — show the N most recent completed cycles with type, category, duration, and summary."""
     try:
         cycles_path = BASE / "memory" / "cycles.json"
@@ -865,20 +1267,30 @@ def handle_cycles_command(token: str, from_chat: str, from_user: str, chat_histo
             append_chat_message(chat_history, from_chat, "bot", response)
             return
 
+        from scripts.repair_memory_files import migrate_cycles_list
+
+        migrate_cycles_list(cycles)
+
         # Filter to completed cycles only, most recent first
-        completed = [c for c in cycles if c.get("status") == "completed"]
+        completed = [c for c in cycles if c.get("cycle_status") == "completed"]
         recent = completed[-limit:][::-1]  # last N, reversed to newest-first
 
         total = len(completed)
-        type_emoji = {"evolve": "🔧", "goal": "🎯", "self-heal": "🩺", "unknown": "❓"}
+        type_emoji = {
+            "evolve": "🔧",
+            "goal": "🎯",
+            "self-heal": "🩺",
+            "dream": "💤",
+            "unknown": "❓",
+        }
 
-        header = f"📊 *Recent Cycles* (last {len(recent)} of {total} completed)"
+        header = f"📊 *Recent Cycles* \\(last {len(recent)} of {total} completed\\)"
         lines = [header]
 
         for c in recent:
-            num = c.get("cycle", "?")
-            ctype = c.get("type", "unknown")
-            cat = c.get("category", "")
+            num = c.get("cycle_number", "?")
+            ctype = c.get("cycle_type", "unknown")
+            cat = c.get("cycle_category", "")
             dur = c.get("duration_seconds")
             summary = (c.get("summary", "") or "")[:120]
             if len(c.get("summary", "") or "") > 120:
@@ -888,12 +1300,20 @@ def handle_cycles_command(token: str, from_chat: str, from_user: str, chat_histo
             dur_str = f"{dur}s" if dur is not None else "?"
             label = f"{ctype}/{cat}" if cat else ctype
 
-            lines.append(f"{emoji} *#{num}* `{label}` — {dur_str}")
+            lines.append(
+                f"{emoji} *\\#{num}* `{escape_markdown_v2(label, entity_type='code')}` — {escape_markdown_v2(dur_str)}"
+            )
             if summary:
-                lines.append(f"   _{summary}_")
+                lines.append(f"   _{escape_markdown_v2(summary)}_")
 
         response = "\n".join(lines)
-        tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="Markdown")
+        tg(
+            token,
+            "sendMessage",
+            chat_id=from_chat,
+            text=response,
+            parse_mode="MarkdownV2",
+        )
         append_chat_message(chat_history, from_chat, "bot", response)
         log.info(f"/cycles command served to @{from_user} (limit={limit})")
     except Exception as e:
@@ -902,12 +1322,17 @@ def handle_cycles_command(token: str, from_chat: str, from_user: str, chat_histo
         log.error(f"/cycles error for @{from_user}: {e}", exc_info=True)
 
 
-def handle_services_command(token: str, from_chat: str, from_user: str, chat_history: dict) -> None:
+def handle_services_command(
+    token: str, from_chat: str, from_user: str, chat_history: dict
+) -> None:
     """Handle /services — show background service status from services.json."""
     try:
         import os
+
         services_path = BASE / "memory" / "services.json"
-        services = json.loads(services_path.read_text()) if services_path.exists() else {}
+        services = (
+            json.loads(services_path.read_text()) if services_path.exists() else {}
+        )
 
         if not services:
             response = "⚙️ *Services*\n\nNo services registered."
@@ -939,13 +1364,22 @@ def handle_services_command(token: str, from_chat: str, from_user: str, chat_his
                     meta.append(f"PID {pid}")
                 if started:
                     meta.append(f"since {started[:10]}")
-                meta_str = f" _({', '.join(meta)})_" if meta else ""
+                escaped_meta = [escape_markdown_v2(m) for m in meta]
+                meta_str = f" _\\({', '.join(escaped_meta)}\\)_" if escaped_meta else ""
 
-                lines.append(f"{status_icon} `{name}` — {status_label}{meta_str}")
+                lines.append(
+                    f"{status_icon} `{name}` — {escape_markdown_v2(status_label)}{meta_str}"
+                )
 
             response = "\n".join(lines)
 
-        tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="Markdown")
+        tg(
+            token,
+            "sendMessage",
+            chat_id=from_chat,
+            text=response,
+            parse_mode="MarkdownV2",
+        )
         append_chat_message(chat_history, from_chat, "bot", response)
         log.info(f"/services command served to @{from_user}")
     except Exception as e:
@@ -954,7 +1388,9 @@ def handle_services_command(token: str, from_chat: str, from_user: str, chat_his
         log.error(f"/services error for @{from_user}: {e}", exc_info=True)
 
 
-def handle_remind_command(token: str, from_chat: str, from_user: str, chat_history: dict, args: list[str]) -> None:
+def handle_remind_command(
+    token: str, from_chat: str, from_user: str, chat_history: dict, args: list[str]
+) -> None:
     """Handle /remind <duration> <text> — create a one-time reminder.
 
     Duration formats: 30m, 2h, 1d (minutes, hours, days).
@@ -966,7 +1402,7 @@ def handle_remind_command(token: str, from_chat: str, from_user: str, chat_histo
             "Duration: `30m`, `2h`, `1d`\n"
             "Example: `/remind 30m check deployment`"
         )
-        tg(token, "sendMessage", chat_id=from_chat, text=usage, parse_mode="Markdown")
+        tg(token, "sendMessage", chat_id=from_chat, text=usage, parse_mode="MarkdownV2")
         append_chat_message(chat_history, from_chat, "bot", usage)
         return
 
@@ -986,16 +1422,19 @@ def handle_remind_command(token: str, from_chat: str, from_user: str, chat_histo
         if minutes <= 0:
             raise ValueError("non-positive")
     except (ValueError, IndexError):
-        err = f"Invalid duration `{duration_str}`. Use formats like `30m`, `2h`, `1d`."
-        tg(token, "sendMessage", chat_id=from_chat, text=err, parse_mode="Markdown")
+        err = f"Invalid duration `{escape_markdown_v2(duration_str, entity_type='code')}`\\. Use formats like `30m`, `2h`, `1d`\\."
+        tg(token, "sendMessage", chat_id=from_chat, text=err, parse_mode="MarkdownV2")
         append_chat_message(chat_history, from_chat, "bot", err)
         return
 
     # Compute fire-at time
-    fire_at = (datetime.now(timezone.utc) + timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M")
+    fire_at = (datetime.now(timezone.utc) + timedelta(minutes=minutes)).strftime(
+        "%Y-%m-%dT%H:%M"
+    )
 
     # Create reminder via direct import
     from scripts.reminder import add_reminder
+
     rid = add_reminder(reminder_text, at=fire_at)
 
     if rid:
@@ -1006,27 +1445,26 @@ def handle_remind_command(token: str, from_chat: str, from_user: str, chat_histo
             label = f"{minutes // 60}h"
         else:
             label = f"{minutes}m"
-        response = f"Reminder set for *{label}* from now: _{reminder_text}_"
+        response = f"Reminder set for *{escape_markdown_v2(label)}* from now: _{escape_markdown_v2(reminder_text)}_"
         log.info(f"/remind command: '{reminder_text}' in {label} by @{from_user}")
     else:
         response = f"Failed to create reminder."
         log.error(f"/remind error for @{from_user}: add_reminder returned None")
 
-    tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="Markdown")
+    tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="MarkdownV2")
     append_chat_message(chat_history, from_chat, "bot", response)
 
 
-def handle_note_command(token: str, from_chat: str, from_user: str, chat_history: dict, args: list[str]) -> None:
+def handle_note_command(
+    token: str, from_chat: str, from_user: str, chat_history: dict, args: list[str]
+) -> None:
     """Handle /note <text> — save a quick note via Telegram.
 
     Example: /note check the deploy logs tomorrow
     """
     if not args:
-        usage = (
-            "Usage: `/note <text>`\n"
-            "Example: `/note review PR 125 tomorrow`"
-        )
-        tg(token, "sendMessage", chat_id=from_chat, text=usage, parse_mode="Markdown")
+        usage = "Usage: `/note <text>`\n" "Example: `/note review PR 125 tomorrow`"
+        tg(token, "sendMessage", chat_id=from_chat, text=usage, parse_mode="MarkdownV2")
         append_chat_message(chat_history, from_chat, "bot", usage)
         return
 
@@ -1035,20 +1473,23 @@ def handle_note_command(token: str, from_chat: str, from_user: str, chat_history
     title = content[:60].rstrip() + ("..." if len(content) > 60 else "")
 
     from scripts.notes import add_note
+
     note_id = add_note(title, content, tags=["telegram"])
 
     if note_id:
-        response = f"Note saved: _{title}_"
+        response = f"Note saved: _{escape_markdown_v2(title)}_"
         log.info(f"/note command: '{title}' by @{from_user}")
     else:
-        response = f"Failed to save note."
+        response = "Failed to save note\\."
         log.error(f"/note error for @{from_user}: add_note returned None")
 
-    tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="Markdown")
+    tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="MarkdownV2")
     append_chat_message(chat_history, from_chat, "bot", response)
 
 
-def handle_notes_command(token: str, from_chat: str, from_user: str, chat_history: dict, args: list[str]) -> None:
+def handle_notes_command(
+    token: str, from_chat: str, from_user: str, chat_history: dict, args: list[str]
+) -> None:
     """Handle /notes [query] — list recent notes or search by keyword.
 
     Examples:
@@ -1060,14 +1501,24 @@ def handle_notes_command(token: str, from_chat: str, from_user: str, chat_histor
     if args:
         query = " ".join(args)
         notes = search_notes(query)
-        header = f"Notes matching _{query}_:"
+        header = f"Notes matching _{escape_markdown_v2(query)}_:"
     else:
         notes = list_notes()
         header = "Recent notes:"
 
     if not notes:
-        response = "No notes found." if not args else f"No notes matching _{' '.join(args)}_."
-        tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="Markdown")
+        response = (
+            "No notes found\\."
+            if not args
+            else f"No notes matching _{escape_markdown_v2(' '.join(args))}_\\."
+        )
+        tg(
+            token,
+            "sendMessage",
+            chat_id=from_chat,
+            text=response,
+            parse_mode="MarkdownV2",
+        )
         append_chat_message(chat_history, from_chat, "bot", response)
         return
 
@@ -1078,43 +1529,101 @@ def handle_notes_command(token: str, from_chat: str, from_user: str, chat_histor
         title = n.get("title", "Untitled")
         content = n.get("content", "")
         tags = n.get("tags", [])
-        # Truncate content preview
         preview = content[:80].replace("\n", " ")
         if len(content) > 80:
             preview += "..."
-        tag_str = f" _#{' #'.join(tags)}_" if tags else ""
-        lines.append(f"• *{title}*{tag_str}")
+        if tags:
+            tag_sep = " \\#"
+            tag_joined = tag_sep.join(escape_markdown_v2(t) for t in tags)
+            tag_str = f" _\\#{tag_joined}_"
+        else:
+            tag_str = ""
+        lines.append(f"• *{escape_markdown_v2(title)}*{tag_str}")
         if preview and preview != title:
-            lines.append(f"  {preview}")
+            lines.append(f"  {escape_markdown_v2(preview)}")
 
     if len(notes) > 5:
         lines.append(f"\n_…and {len(notes) - 5} more_")
 
     response = "\n".join(lines)
-    tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="Markdown")
+    tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="MarkdownV2")
     append_chat_message(chat_history, from_chat, "bot", response)
-    log.info(f"/notes command served to @{from_user} (query={' '.join(args) if args else None}, count={len(shown)})")
+    log.info(
+        f"/notes command served to @{from_user} (query={' '.join(args) if args else None}, count={len(shown)})"
+    )
 
 
-def handle_help_command(token: str, from_chat: str, from_user: str, chat_history: dict) -> None:
+def handle_unblock_command(
+    token: str,
+    from_chat: str,
+    from_user: str,
+    chat_history: dict,
+    state: dict,
+    args: list[str],
+) -> None:
+    """Handle /unblock <@username|chat_id> — remove a user from the permanent block list."""
+    if not args:
+        usage = (
+            "Usage: `/unblock <@username or chat\\_id>`\n"
+            "Examples:\n"
+            "  `/unblock @vinhbachsy`\n"
+            "  `/unblock 98313829`"
+        )
+        tg(token, "sendMessage", chat_id=from_chat, text=usage, parse_mode="MarkdownV2")
+        append_chat_message(chat_history, from_chat, "bot", usage)
+        return
+
+    identifier = args[0]
+    entry = remove_block(state, identifier)
+
+    if entry:
+        display = f"@{entry['username']}" if entry.get("username") else entry["chat_id"]
+        chat_id_label = (
+            f" \\(chat ID: `{entry['chat_id']}`\\)" if entry.get("username") else ""
+        )
+        response = (
+            f"✅ *{escape_markdown_v2(display)}*{chat_id_label} has been unblocked\\.\n"
+            "They can now message the bot again and will be prompted for a new passcode challenge\\."
+        )
+        log.info(
+            f"/unblock: removed {display} (chat_id={entry['chat_id']}) from block list by @{from_user}"
+        )
+        save_state(state)
+    else:
+        response = (
+            f"⚠️ `{escape_markdown_v2(identifier, entity_type='code')}` was not found in the block list\\.\n"
+            "Check the identifier and try again\\."
+        )
+        log.info(
+            f"/unblock: '{identifier}' not found in block list (requested by @{from_user})"
+        )
+
+    tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="MarkdownV2")
+    append_chat_message(chat_history, from_chat, "bot", response)
+
+
+def handle_help_command(
+    token: str, from_chat: str, from_user: str, chat_history: dict
+) -> None:
     """Handle /help — list available bot commands."""
     response = (
         "🤖 *Agent — Available Commands*\n\n"
-        "/status — Live agent status (cycle, goals, last heartbeat)\n"
-        "/goals [N] — Show last N goals (default 5, max 20)\n"
-        "/cycles [N] — Show last N completed cycles with type/category/duration (default 5, max 20)\n"
-        "/journal [N] — Show last N journal entries (default 3, max 10)\n"
-        "/outbox [N] — Show last N outbox messages, highlights needs\\_human (default 5, max 20)\n"
-        "/services — Show background service status (running/dead, PID, port)\n"
+        "/status — Live agent status \\(cycle, goals, last heartbeat\\)\n"
+        "/goals \\[N\\] — Show last N goals \\(default 5, max 20\\)\n"
+        "/cycles \\[N\\] — Show last N completed cycles with type/category/duration \\(default 5, max 20\\)\n"
+        "/journal \\[N\\] — Show last N journal entries \\(default 3, max 10\\)\n"
+        "/outbox \\[N\\] — Show last N outbox messages, highlights needs\\_human \\(default 5, max 20\\)\n"
+        "/services — Show background service status \\(running/dead, PID, port\\)\n"
         "/today — Summary of last 24h: goals, cycles, blockers\n"
-        "/remind <duration> <text> — Set a reminder (e.g. `/remind 30m check deploy`)\n"
-        "/note <text> — Save a quick note (e.g. `/note review PR 125 tomorrow`)\n"
-        "/notes [query] — List recent notes or search (e.g. `/notes deploy`)\n"
+        "/remind <duration> <text> — Set a reminder \\(e\\.g\\. `/remind 30m check deploy`\\)\n"
+        "/note <text> — Save a quick note \\(e\\.g\\. `/note review PR 125 tomorrow`\\)\n"
+        "/notes \\[query\\] — List recent notes or search \\(e\\.g\\. `/notes deploy`\\)\n"
         "/heartbeat — Trigger an immediate agent cycle\n"
+        "/unblock <@username\\|chat\\_id> — Remove a user from the permanent block list\n"
         "/help — Show this help message\n\n"
-        "_Any other message is queued as a goal for the next heartbeat._"
+        "_Any other message is queued as a goal for the next heartbeat\\._"
     )
-    tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="Markdown")
+    tg(token, "sendMessage", chat_id=from_chat, text=response, parse_mode="MarkdownV2")
     append_chat_message(chat_history, from_chat, "bot", response)
     log.info(f"/help command served to @{from_user}")
 
@@ -1123,15 +1632,38 @@ def handle_help_command(token: str, from_chat: str, from_user: str, chat_history
 # Incoming messages (Telegram → inbox.json)
 # ---------------------------------------------------------------------------
 
+
 def _process_authorized_message(
-    token: str, msg: dict, text: str, from_user: str, from_chat: str,
-    chat_history: dict, inbox_items: list,
+    token: str,
+    msg: dict,
+    text: str,
+    from_user: str,
+    from_chat: str,
+    chat_history: dict,
+    inbox_items: list,
+    state: dict | None = None,
+    history_key: str | None = None,
+    bot_username: str = "",
+    from_user_id: str = "",
+    owner_username: str | None = None,
 ):
-    """Process an authorized incoming message (text and/or media) into an inbox item."""
+    """Process an authorized incoming message (text and/or media) into an inbox item.
+
+    *history_key* is the key used for chat-history lookups.  For private chats it
+    equals *from_chat*; for group chats it is ``"<group_chat_id>:<user_id>"`` so
+    each group member gets their own conversation context.  Falls back to
+    *from_chat* when not supplied.
+    """
+    hkey = history_key if history_key is not None else from_chat
+    chat_type = msg.get("chat", {}).get("type", "private")
+    group_chat = is_group_chat(chat_type)
+
     # Check for commands first
     if text and text.startswith("/"):
         parts = text.split()
-        command = parts[0].lower()
+        # Strip @BotName suffix (only when it targets *this* bot — commands
+        # addressed to other bots in a group will not match any handler).
+        command = strip_bot_suffix(parts[0].lower(), bot_username)
 
         if command == "/heartbeat":
             # Whitelist allowed flags to prevent arbitrary arg injection
@@ -1140,10 +1672,10 @@ def _process_authorized_message(
             extra_args = [a for a in raw_args if a in ALLOWED_HEARTBEAT_ARGS]
             rejected = [a for a in raw_args if a not in ALLOWED_HEARTBEAT_ARGS]
             if rejected:
-                log.warning(
-                    f"Rejected heartbeat args from @{from_user}: {rejected}"
-                )
-            handle_heartbeat_command(token, from_chat, from_user, chat_history, extra_args)
+                log.warning(f"Rejected heartbeat args from @{from_user}: {rejected}")
+            handle_heartbeat_command(
+                token, from_chat, from_user, chat_history, extra_args
+            )
             return  # Don't process as regular message
 
         if command == "/status":
@@ -1198,6 +1730,17 @@ def _process_authorized_message(
             handle_notes_command(token, from_chat, from_user, chat_history, parts[1:])
             return
 
+        if command == "/unblock":
+            handle_unblock_command(
+                token, from_chat, from_user, chat_history, state, parts[1:]
+            )
+            return
+
+        if command == "/start":
+            # Authorized user — /start is equivalent to /help
+            handle_help_command(token, from_chat, from_user, chat_history)
+            return
+
         if command == "/help":
             handle_help_command(token, from_chat, from_user, chat_history)
             return
@@ -1217,20 +1760,24 @@ def _process_authorized_message(
     for file_id, media_type, filename_hint in media_list:
         local_path = download_telegram_file(token, file_id, from_chat, filename_hint)
         if local_path:
-            attachments.append({
-                "type": media_type,
-                "path": local_path,
-                "filename": Path(local_path).name,
-            })
+            attachments.append(
+                {
+                    "type": media_type,
+                    "path": local_path,
+                    "filename": Path(local_path).name,
+                }
+            )
 
     # Build content string
-    context = build_chat_context(chat_history, from_chat)
-    base_content = f"[Telegram @{from_user}]: {effective_text}" if effective_text else f"[Telegram @{from_user}]:"
+    context = build_chat_context(chat_history, hkey)
+    base_content = (
+        f"[Telegram @{from_user}]: {effective_text}"
+        if effective_text
+        else f"[Telegram @{from_user}]:"
+    )
 
     if attachments:
-        attachment_lines = "\n".join(
-            f"- {a['type']}: {a['path']}" for a in attachments
-        )
+        attachment_lines = "\n".join(f"- {a['type']}: {a['path']}" for a in attachments)
         base_content += f"\n[Attachments]\n{attachment_lines}"
 
     if context:
@@ -1239,34 +1786,82 @@ def _process_authorized_message(
         content = base_content
 
     chat_text = effective_text or "(media)"
-    append_chat_message(chat_history, from_chat, "user", chat_text)
+    append_chat_message(chat_history, hkey, "user", chat_text)
 
+    # role is an identity label only (no permission gating). Telegram
+    # identifies the owner by username.
+    def _norm(name):
+        return str(name or "").lstrip("@").strip().lower()
+
+    role = (
+        "owner"
+        if owner_username and _norm(from_user) == _norm(owner_username)
+        else "member"
+    )
+    # source="telegram" (origin); transport="polling_script" — the telegram
+    # bridge long-polls Telegram and writes the message into the inbox.
+    from_obj = make_from(
+        "telegram",
+        transport="polling_script",
+        channel=from_chat,
+        user_id=from_user_id,
+        handle=from_user,
+        role=role,
+    )
+    now_iso = datetime.now(timezone.utc).isoformat()
     inbox_item = {
         "type": "message",
         "content": content,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "received_at": datetime.now(timezone.utc).isoformat(),
-        "source": "telegram",
+        "timestamp": now_iso,
+        "received_at": now_iso,
+        # source now lives in from.source (envelope normalization).
+        "from": from_obj,
     }
+    # Stamp a stable id so the agent can reply via outbox `in_reply_to`.
+    msg_id = ensure_id(inbox_item)
     if attachments:
         inbox_item["attachments"] = attachments
 
     inbox_items.append(inbox_item)
-    log.info(f"Received from @{from_user}: {chat_text[:100]}" + (f" (+{len(attachments)} attachment(s))" if attachments else ""))
+    # Record id -> origin so a reply resolves back to this user's chat.
+    # origin_ref = the message_id, used as reply_to_message_id when delivering
+    # (best-effort per-user isolation in shared groups; no native threads).
+    if state is not None:
+        record_origin(
+            state.setdefault("origin_map", {}),
+            msg_id=msg_id,
+            from_obj=from_obj,
+            origin_ref=msg.get("message_id"),
+        )
+    log.info(
+        f"Received from @{from_user}: {chat_text[:100]}"
+        + (f" (+{len(attachments)} attachment(s))" if attachments else "")
+    )
 
-    ack = build_ack_message()
-    tg(token, "sendMessage", chat_id=from_chat, text=ack)
-    append_chat_message(chat_history, from_chat, "bot", ack)
-    log.info(f"Sent ack reply to {from_chat}")
+    # Suppress the public ack in groups — the agent's actual reply will be
+    # delivered via the outbox, and acking every message publicly is noisy.
+    if not group_chat:
+        ack = build_ack_message()
+        tg(token, "sendMessage", chat_id=from_chat, text=ack)
+        append_chat_message(chat_history, hkey, "bot", ack)
+        log.info(f"Sent ack reply to {from_chat}")
 
 
-def poll_updates(token: str, state: dict, owner_username: str | None, chat_ids: list[str], chat_history: dict) -> tuple[str | None, list[str], list]:  # noqa: E501
+def poll_updates(
+    token: str,
+    state: dict,
+    owner_username: str | None,
+    chat_ids: list[str],
+    chat_history: dict,
+    bot_username: str = "",
+) -> tuple[str | None, list[str], list]:  # noqa: E501
     """
     Long-poll Telegram for new updates.
     Returns (updated_owner_username, updated_chat_ids, list_of_inbox_items).
     """
     updates = tg(
-        token, "getUpdates",
+        token,
+        "getUpdates",
         offset=state["last_update_id"] + 1,
         timeout=POLL_TIMEOUT,
         limit=100,
@@ -1278,7 +1873,9 @@ def poll_updates(token: str, state: dict, owner_username: str | None, chat_ids: 
     for update in updates:
         uid = update.get("update_id")
         if uid is None:
-            log.warning(f"Skipping malformed update (no update_id): {str(update)[:200]}")
+            log.warning(
+                f"Skipping malformed update (no update_id): {str(update)[:200]}"
+            )
             continue
         state["last_update_id"] = max(state["last_update_id"], uid)
 
@@ -1289,46 +1886,320 @@ def poll_updates(token: str, state: dict, owner_username: str | None, chat_ids: 
 
             from_chat = str(msg.get("chat", {}).get("id", ""))
             from_info = msg.get("from", {})
-            from_user = (
-                from_info.get("username")
-                or from_info.get("first_name", "user")
-            )
+            from_user = from_info.get("username") or from_info.get("first_name", "user")
             text = msg.get("text", "").strip()
             caption = msg.get("caption", "").strip()
             check_text = text or caption  # for auth checks on media-with-caption
 
-            # --- Session authorization logic ---
+            # --- Chat-type metadata ---
+            chat_type = msg.get("chat", {}).get("type", "private")
+            group_chat = is_group_chat(chat_type)
+            from_user_id = str(from_info.get("id", ""))
 
-            if not chat_ids and from_chat:
-                # First-ever message: auto-accept as owner
+            # --- Channel posts are out of scope ---
+            # Channels don't fit the private-chat or group-chat auth model and
+            # have no per-user `from` metadata to gate on.  Ignore entirely.
+            if chat_type == "channel":
+                log.debug(
+                    f"Ignoring channel_post from chat {from_chat} (channels not supported)"
+                )
+                continue
+
+            # Per-user history key in groups; per-chat in private chats.
+            # This prevents different group members' contexts from bleeding together.
+            history_key = f"{from_chat}:{from_user_id}" if group_chat else from_chat
+
+            # --- Privacy-mode guard for groups ---
+            # In groups, only respond to commands, @bot mentions, or replies to the bot.
+            # Ignore all other messages (mirrors Telegram's default bot privacy mode).
+            if group_chat and not bot_is_addressed(msg, bot_username, check_text):
+                continue
+
+            # --- Session authorization logic ---
+            state.setdefault("pending_authorizations", {})
+            state.setdefault("blocked_chat_ids", [])
+
+            # ── BLOCKED ──────────────────────────────────────────────────────────────
+            if is_blocked(state, from_chat):
+                # Permanently blocked — silent reject for both private and group
+                log.info(
+                    f"Silently rejected message from permanently blocked "
+                    f"@{from_user} (chat_id: {from_chat})"
+                )
+
+            # ── KNOWN / AUTHORIZED SESSION ───────────────────────────────────────────
+            elif from_chat in chat_ids:
+                # Per-user gate in groups: authorization is granted to individual
+                # users (identified by their Telegram user-id == private chat-id).
+                # A member of an authorized group who is NOT themselves authorized
+                # should not be able to run commands or forward messages to the
+                # agent inbox — silently drop their messages.
+                if group_chat and from_user_id not in chat_ids:
+                    log.info(
+                        f"Ignoring message from non-authorized user @{from_user} "
+                        f"(user_id={from_user_id}) in authorized group {from_chat}"
+                    )
+                    continue
+
+                _process_authorized_message(
+                    token,
+                    msg,
+                    text,
+                    from_user,
+                    from_chat,
+                    chat_history,
+                    inbox_items,
+                    state,
+                    history_key,
+                    bot_username,
+                    from_user_id=from_user_id,
+                    owner_username=owner_username,
+                )
+
+            # ── GROUP CHAT — special auth path ───────────────────────────────────────
+            elif group_chat:
+                # Groups are never auto-discovered and never get passcode challenges.
+                # A group becomes authorized when an already-authorized user (identified
+                # by their Telegram user-ID, which equals their private chat-ID) sends
+                # a message in it.  That user's private chat-ID must already be in
+                # chat_ids for the check to succeed.
+                if from_user_id and from_user_id in chat_ids:
+                    # Sender is an authorized user → auto-authorize this group
+                    chat_ids.append(from_chat)
+                    keepass_store(
+                        KEEPASS_TELEGRAM_CHAT_ID,
+                        "telegram",
+                        serialize_chat_ids(chat_ids),
+                        group="System",
+                    )
+                    log.info(
+                        f"Auto-authorized group {from_chat} because member "
+                        f"@{from_user} (user_id={from_user_id}) is an authorized user"
+                    )
+                    _process_authorized_message(
+                        token,
+                        msg,
+                        text,
+                        from_user,
+                        from_chat,
+                        chat_history,
+                        inbox_items,
+                        state,
+                        history_key,
+                        bot_username,
+                    )
+                else:
+                    # Group not authorized — tell them how to add it
+                    log.info(
+                        f"Rejected group message from @{from_user} "
+                        f"in unauthorized group {from_chat}"
+                    )
+                    tg(
+                        token,
+                        "sendMessage",
+                        chat_id=from_chat,
+                        text=(
+                            "🔒 *This group is not authorized\\.*\n\n"
+                            "An already\\-authorized user needs to send any message here "
+                            "to grant this group access to the bot\\."
+                        ),
+                        parse_mode="MarkdownV2",
+                    )
+
+            # ── PRIVATE CHAT — owner auto-discovery (first-ever DM) ─────────────────
+            elif not chat_ids and from_chat:
+                # First-ever private message: auto-accept as owner (no passcode)
                 log.info(f"Auto-discovered owner: @{from_user} (chat_id: {from_chat})")
                 owner_username = from_user
                 chat_ids.append(from_chat)
-                keepass_store(KEEPASS_TELEGRAM_OWNER_USERNAME, "telegram", from_user, group="System")
-                keepass_store(KEEPASS_TELEGRAM_CHAT_ID, "telegram", serialize_chat_ids(chat_ids), group="System")
+                keepass_store(
+                    KEEPASS_TELEGRAM_OWNER_USERNAME,
+                    "telegram",
+                    from_user,
+                    group="System",
+                )
+                keepass_store(
+                    KEEPASS_TELEGRAM_CHAT_ID,
+                    "telegram",
+                    serialize_chat_ids(chat_ids),
+                    group="System",
+                )
                 log.info("Owner username and chat ID saved to KeePass.")
-                _process_authorized_message(token, msg, text, from_user, from_chat, chat_history, inbox_items)
+                _process_authorized_message(
+                    token,
+                    msg,
+                    text,
+                    from_user,
+                    from_chat,
+                    chat_history,
+                    inbox_items,
+                    state,
+                    history_key,
+                    bot_username,
+                    from_user_id=from_user_id,
+                    owner_username=owner_username,
+                )
 
-            elif from_chat in chat_ids:
-                # Known session — process normally
-                _process_authorized_message(token, msg, text, from_user, from_chat, chat_history, inbox_items)
+            # ── PRIVATE CHAT — active passcode challenge ─────────────────────────────
+            elif from_chat in state["pending_authorizations"]:
+                pending = state["pending_authorizations"][from_chat]
 
-            elif from_chat and owner_username and check_text and contains_username(check_text, owner_username):
-                # New session authorized — message contains owner's username
-                log.info(f"Authorized new session: @{from_user} (chat_id: {from_chat})")
-                chat_ids.append(from_chat)
-                keepass_store(KEEPASS_TELEGRAM_CHAT_ID, "telegram", serialize_chat_ids(chat_ids), group="System")
+                if check_text and strip_bot_suffix(
+                    check_text.strip().lower().split()[0], bot_username
+                ) in ("/start", "/help"):
+                    # /start or /help during challenge — remind them
+                    remaining = MAX_PASSCODE_ATTEMPTS - pending.get("attempts", 0)
+                    tg(
+                        token,
+                        "sendMessage",
+                        chat_id=from_chat,
+                        parse_mode="MarkdownV2",
+                        text=(
+                            "🔐 *Access pending*\n\n"
+                            "A 4\\-digit passcode was sent to the bot owner\\.\n"
+                            "Please enter that passcode here to gain access\\.\n\n"
+                            f"_{remaining} attempt{'s' if remaining != 1 else ''} remaining_"
+                        ),
+                    )
+                elif check_text and check_text.strip() == pending["passcode"]:
+                    # ✅ Correct passcode — authorize
+                    del state["pending_authorizations"][from_chat]
+                    chat_ids.append(from_chat)
+                    keepass_store(
+                        KEEPASS_TELEGRAM_CHAT_ID,
+                        "telegram",
+                        serialize_chat_ids(chat_ids),
+                        group="System",
+                    )
+                    log.info(
+                        f"Passcode accepted — authorized new session: "
+                        f"@{from_user} (chat_id: {from_chat})"
+                    )
+                    welcome = "✅ Correct! You've been authorized. I'll forward messages to you from now on."
+                    tg(token, "sendMessage", chat_id=from_chat, text=welcome)
+                    append_chat_message(chat_history, history_key, "bot", welcome)
+                    # Passcode text itself is NOT forwarded to the agent inbox.
+                else:
+                    # ❌ Wrong passcode
+                    pending["attempts"] = pending.get("attempts", 0) + 1
+                    remaining = MAX_PASSCODE_ATTEMPTS - pending["attempts"]
 
-                tg(token, "sendMessage", chat_id=from_chat,
-                   text="Welcome! You've been authorized. I'll forward messages to you from now on.")
-                append_chat_message(chat_history, from_chat, "bot", "Welcome! You've been authorized. I'll forward messages to you from now on.")
-                _process_authorized_message(token, msg, text, from_user, from_chat, chat_history, inbox_items)
+                    if pending["attempts"] >= MAX_PASSCODE_ATTEMPTS:
+                        # 5th wrong attempt → permanently block
+                        blocked_user = pending.get("from_user", from_user)
+                        del state["pending_authorizations"][from_chat]
+                        add_block(state, from_chat, blocked_user)
+                        log.warning(
+                            f"Permanently blocked @{blocked_user} (chat_id: {from_chat}) "
+                            f"after {MAX_PASSCODE_ATTEMPTS} failed passcode attempts"
+                        )
+                        tg(
+                            token,
+                            "sendMessage",
+                            chat_id=from_chat,
+                            text="🚫 Too many wrong attempts. You have been permanently blocked.",
+                        )
+                        if chat_ids:
+                            tg(
+                                token,
+                                "sendMessage",
+                                chat_id=chat_ids[0],
+                                text=(
+                                    f"🚫 @{blocked_user} has been permanently blocked "
+                                    f"after {MAX_PASSCODE_ATTEMPTS} failed passcode attempts."
+                                ),
+                            )
+                    else:
+                        log.info(
+                            f"Wrong passcode from @{from_user} "
+                            f"(attempt {pending['attempts']}/{MAX_PASSCODE_ATTEMPTS})"
+                        )
+                        tg(
+                            token,
+                            "sendMessage",
+                            chat_id=from_chat,
+                            text=(
+                                f"❌ Wrong passcode. "
+                                f"{remaining} attempt{'s' if remaining != 1 else ''} remaining."
+                            ),
+                        )
 
+            # ── PRIVATE CHAT — new user mentions owner username → start challenge ────
+            elif (
+                from_chat
+                and owner_username
+                and check_text
+                and contains_username(check_text, owner_username)
+            ):
+                if not chat_ids:
+                    log.info(
+                        f"Rejected @{from_user}: owner username mentioned but no owner chat_id stored"
+                    )
+                    tg(
+                        token,
+                        "sendMessage",
+                        chat_id=from_chat,
+                        text="Sorry, I can't verify you right now. Please try again later.",
+                    )
+                else:
+                    passcode = generate_passcode()
+                    state["pending_authorizations"][from_chat] = {
+                        "passcode": passcode,
+                        "attempts": 0,
+                        "from_user": from_user,
+                    }
+                    owner_chat_id = chat_ids[0]
+                    log.info(
+                        f"Passcode challenge started for @{from_user} (chat_id: {from_chat}), "
+                        f"passcode sent to owner (chat_id: {owner_chat_id})"
+                    )
+                    tg(
+                        token,
+                        "sendMessage",
+                        chat_id=owner_chat_id,
+                        parse_mode="MarkdownV2",
+                        text=(
+                            f"🔐 *New access request*\n"
+                            f"User {mention_markdown(from_chat, from_user, version=2)} \\(chat ID: `{from_chat}`\\) wants to connect\\.\n\n"
+                            f"Passcode: *{passcode}*\n\n"
+                            f"_\\(Max {MAX_PASSCODE_ATTEMPTS} attempts\\)_"
+                        ),
+                    )
+                    tg(
+                        token,
+                        "sendMessage",
+                        chat_id=from_chat,
+                        text=(
+                            "🔐 A 4-digit passcode has been sent to the owner.\n"
+                            "Please enter it here to gain access:"
+                        ),
+                    )
+
+            # ── PRIVATE CHAT — unknown user, no owner-username mention ───────────────
             else:
-                # Unauthorized new session — reject
-                log.info(f"Rejected message from @{from_user} (chat_id: {from_chat})")
-                tg(token, "sendMessage", chat_id=from_chat,
-                   text="Sorry, I don't know you. Please include my owner's username in your message to get access.")
+                is_start_cmd = check_text and strip_bot_suffix(
+                    check_text.strip().lower().split()[0], bot_username
+                ) in ("/start",)
+                if is_start_cmd:
+                    log.info(
+                        f"/start from unauthorized @{from_user} (chat_id: {from_chat})"
+                    )
+                    tg(
+                        token,
+                        "sendMessage",
+                        chat_id=from_chat,
+                        text="Enter the bot owner username to start.",
+                    )
+                else:
+                    log.info(
+                        f"Rejected message from @{from_user} (chat_id: {from_chat})"
+                    )
+                    tg(
+                        token,
+                        "sendMessage",
+                        chat_id=from_chat,
+                        text="Sorry, I don't know you. Please include my owner's username in your message to get access.",
+                    )
 
         except Exception as e:
             log.error(f"Error processing update {uid}: {e}", exc_info=True)
@@ -1337,15 +2208,26 @@ def poll_updates(token: str, state: dict, owner_username: str | None, chat_ids: 
     return owner_username, chat_ids, inbox_items
 
 
-def poll_updates_and_persist(token: str, state: dict, owner_username: str | None, chat_ids: list[str], chat_history: dict):
+def poll_updates_and_persist(
+    token: str,
+    state: dict,
+    owner_username: str | None,
+    chat_ids: list[str],
+    chat_history: dict,
+    bot_username: str = "",
+):
     """Poll for updates, write to inbox AND persist to history."""
-    owner_username, chat_ids, items = poll_updates(token, state, owner_username, chat_ids, chat_history)
+    owner_username, chat_ids, items = poll_updates(
+        token, state, owner_username, chat_ids, chat_history, bot_username
+    )
     if items:
         if write_to_inbox(items):
             append_to_inbox_history(items)
             save_chat_history(chat_history)
         else:
-            log.error(f"Inbox write failed for {len(items)} item(s) — skipping history/chat save to allow retry")
+            log.error(
+                f"Inbox write failed for {len(items)} item(s) — skipping history/chat save to allow retry"
+            )
     return owner_username, chat_ids
 
 
@@ -1362,51 +2244,95 @@ def append_to_inbox_history(items: list):
 # Outgoing messages (outbox.json → Telegram)
 # ---------------------------------------------------------------------------
 
-def send_outbox_messages(token: str, chat_ids: list[str], state: dict, chat_history: dict):
-    """Forward unsent outbox messages to all authorized Telegram chats."""
-    from services.shared import read_outbox_locked
+
+def _tg_send(token: str, cid: str, text: str, reply_to=None) -> bool:
+    """Send one Telegram message (MarkdownV2, falling back to plain). True on success."""
+    kwargs = {"chat_id": cid, "text": text, "parse_mode": "MarkdownV2"}
+    if reply_to is not None:
+        kwargs["reply_to_message_id"] = reply_to
+    result = tg(token, "sendMessage", **kwargs)
+    if result:
+        return True
+    # Retry without Markdown (preserve backtick-wrapped content as-is).
+    fallback = {"chat_id": cid, "text": _strip_markdown_preserve_code(text)}
+    if reply_to is not None:
+        fallback["reply_to_message_id"] = reply_to
+    return bool(tg(token, "sendMessage", **fallback))
+
+
+def send_outbox_messages(
+    token: str,
+    chat_ids: list[str],
+    state: dict,
+    chat_history: dict,
+    unaddressed_channel: str | None = None,
+):
+    """Forward unsent outbox messages to Telegram with per-recipient routing.
+
+    Applies the 3-way delivery rule (see slack_bridge.send_outbox_messages):
+      1. Addressed (``in_reply_to``/``to``) and resolvable here → deliver to
+         that one user's chat, quoting their original message.
+      2. Addressed but NOT resolvable here → skip WITHOUT marking sent.
+      3. Unaddressed → owner only (or the configured redirect chat).
+    """
+    # Bare-name import to share `sys.modules["shared"]` with the rest of
+    # the daemon (and pytest fixtures that monkeypatch on `shared`). Using
+    # `services.shared` here would create a duplicate module instance with
+    # its own copy of CHAT_DIR / paths and silently drift from the rest.
+    from shared import read_outbox_locked
 
     outbox = read_outbox_locked()
     if not outbox:
         return
 
+    origin_map = state.get("origin_map", {})
+    # Owner chat = first authorized id (the owner's private chat by discovery
+    # order); the optional redirect overrides it for unaddressed messages.
+    owner_channel = chat_ids[0] if chat_ids else None
+    default_channel = unaddressed_channel or owner_channel
+
     sent_count = 0
     sent_history_batch: list[dict] = []
     for msg in outbox:
-        h = msg_hash(msg)
-        if h in state["sent_hashes"]:
+        key = dedup_key(msg)
+        if key in state["sent_hashes"]:
             continue  # already sent
 
-        text = _format_outbox_msg(msg)
+        # Recipient from the structured `to` (to.in_reply_to / to.handle), with
+        # legacy fallback to top-level in_reply_to or a bare-string `to`.
+        target = reply_target(msg)
+        reply_to = None
+        if target:
+            resolved = resolve_origin(origin_map, str(target))
+            if resolved is None:
+                frm = resolve_handle(origin_map, str(target))
+                if frm is None:
+                    continue  # case 2: another transport — do NOT mark sent
+                resolved = (frm, None)
+            from_obj, origin_ref = resolved
+            destination = (from_obj or {}).get("channel")
+            if not destination:
+                continue
+            reply_to = origin_ref
+        elif default_channel:
+            destination = default_channel
+        else:
+            continue  # no owner chat known yet
 
+        text = _format_outbox_msg(msg)
         # Telegram max message length is 4096 chars
         if len(text) > 4000:
             text = text[:3997] + "..."
 
-        succeeded_cids = []
-        for cid in chat_ids:
-            result = tg(token, "sendMessage",
-                        chat_id=cid,
-                        text=text,
-                        parse_mode="Markdown")
-            if result:
-                succeeded_cids.append(cid)
-            else:
-                # Try without Markdown (preserve backtick-wrapped content as-is)
-                fallback_text = _strip_markdown_preserve_code(text)
-                result2 = tg(token, "sendMessage",
-                             chat_id=cid,
-                             text=fallback_text)
-                if result2:
-                    succeeded_cids.append(cid)
-
-        if succeeded_cids:
-            state["sent_hashes"].append(h)
+        if _tg_send(token, destination, text, reply_to=reply_to):
+            state["sent_hashes"].append(key)
             sent_count += 1
-            log.info(f"Sent to Telegram ({len(succeeded_cids)} chat(s)): {msg.get('subject', text[:60])!r}")
+            log.info(
+                f"Sent to Telegram chat {destination}: "
+                f"{msg.get('subject', text[:60])!r}"
+            )
             sent_history_batch.append(msg)
-            for cid in succeeded_cids:
-                append_chat_message(chat_history, cid, "bot", text)
+            append_chat_message(chat_history, destination, "bot", text)
 
     # Cap hash list to last 1000 to prevent unbounded growth
     state["sent_hashes"] = state["sent_hashes"][-1000:]
@@ -1417,15 +2343,14 @@ def send_outbox_messages(token: str, chat_ids: list[str], state: dict, chat_hist
 
     if sent_count:
         save_chat_history(chat_history)
-        log.info(f"Forwarded {sent_count} outbox message(s) to {len(chat_ids)} Telegram chat(s).")
-
+        log.info(f"Forwarded {sent_count} outbox message(s) to Telegram.")
 
 
 def _format_outbox_msg(msg: dict) -> str:
     """Convert an outbox dict to a readable Telegram message."""
     msg_type = msg.get("type", "")
-    subject  = msg.get("subject", "")
-    content  = msg.get("content", "")
+    subject = msg.get("subject", "")
+    content = msg.get("content", "")
 
     lines = []
 
@@ -1434,26 +2359,27 @@ def _format_outbox_msg(msg: dict) -> str:
         "needs_human": "🚨 *ACTION REQUIRED*",
         "goal_complete": "✅ *Goal Completed*",
         "goal_failed": "❌ *Goal Failed*",
-        "status": "📊 *Status Report*",
     }
     if msg_type in type_badges:
         lines.append(type_badges[msg_type])
 
     if subject:
-        lines.append(f"*{subject}*")
+        lines.append(f"*{escape_markdown_v2(subject)}*")
 
     if content:
-        lines.append(content)
+        lines.append(escape_markdown_v2(content))
 
-    formatted = "\n".join(lines) if lines else json.dumps(msg, indent=2)
-    return protect_urls_in_markdown(formatted)
+    return "\n".join(lines) if lines else escape_markdown_v2(json.dumps(msg, indent=2))
 
 
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 
+
 def main():
+    _setup_logging()
+    _migrate_legacy_message_files()
     # --- Singleton lock: prevent multiple instances from running simultaneously ---
     # Open in append mode so existing content (PID) is not truncated before we read it
     lock_fh = open(LOCK_FILE, "a+")
@@ -1501,10 +2427,32 @@ def main():
     else:
         log.error("Failed to authenticate with Telegram. Check your bot token.")
         sys.exit(1)
+    bot_username: str = (me or {}).get("username", "") if me else ""
+    # A missing bot_username would make strip_bot_suffix() unconditionally strip
+    # any @suffix — allowing this bot to handle commands addressed to OTHER bots
+    # in a shared group (e.g. `/goals@OtherBot`).  Refuse to start in that case.
+    if not bot_username:
+        log.error(
+            "getMe returned no username — cannot safely run in groups without knowing "
+            "our own bot handle. Check the bot token / BotFather setup."
+        )
+        sys.exit(1)
 
     owner_username = keepass_get(KEEPASS_TELEGRAM_OWNER_USERNAME)
     if owner_username:
         log.info(f"Owner username: @{owner_username}")
+
+    # Optional redirect for unaddressed (status/FYI) outbox messages: env wins,
+    # then KeePass. Resolved once at startup to avoid a per-poll credential read.
+    unaddressed_channel = (
+        os.environ.get(KEEPASS_TELEGRAM_UNADDRESSED_CHANNEL)
+        or keepass_get(KEEPASS_TELEGRAM_UNADDRESSED_CHANNEL)
+        or None
+    )
+    if unaddressed_channel:
+        unaddressed_channel = unaddressed_channel.strip() or None
+    if unaddressed_channel:
+        log.info(f"Unaddressed outbox messages will route to {unaddressed_channel}")
 
     chat_ids_raw = keepass_get(KEEPASS_TELEGRAM_CHAT_ID)
     chat_ids = parse_chat_ids(chat_ids_raw)
@@ -1536,7 +2484,9 @@ def main():
         while not shutdown_requested:
             try:
                 # 1. Poll Telegram for incoming messages
-                owner_username, chat_ids = poll_updates_and_persist(token, state, owner_username, chat_ids, chat_history)
+                owner_username, chat_ids = poll_updates_and_persist(
+                    token, state, owner_username, chat_ids, chat_history, bot_username
+                )
                 try:
                     save_state(state)
                 except Exception as e:
@@ -1545,11 +2495,16 @@ def main():
                 # 2. Forward outbox messages periodically
                 now = time.time()
                 if chat_ids and (now - last_outbox_check >= OUTBOX_INTERVAL):
-                    send_outbox_messages(token, chat_ids, state, chat_history)
+                    send_outbox_messages(
+                        token, chat_ids, state, chat_history, unaddressed_channel
+                    )
                     try:
                         save_state(state)
                     except Exception as e:
-                        log.error(f"Failed to save state after outbox send: {e}", exc_info=True)
+                        log.error(
+                            f"Failed to save state after outbox send: {e}",
+                            exc_info=True,
+                        )
                     last_outbox_check = now
 
                 # Reset backoff on successful iteration
@@ -1562,8 +2517,11 @@ def main():
             except Exception as e:
                 consecutive_errors += 1
                 backoff = min(10 * (2 ** (consecutive_errors - 1)), MAX_BACKOFF)
-                log.error(f"Unexpected error in main loop (attempt {consecutive_errors}, "
-                          f"backoff {backoff}s): {e}", exc_info=True)
+                log.error(
+                    f"Unexpected error in main loop (attempt {consecutive_errors}, "
+                    f"backoff {backoff}s): {e}",
+                    exc_info=True,
+                )
                 time.sleep(backoff)
     finally:
         log.info("Saving final state before exit...")

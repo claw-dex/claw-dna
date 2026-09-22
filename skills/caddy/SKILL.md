@@ -1,6 +1,6 @@
 ---
 name: caddy
-description: Manage local development proxies using Caddy server's Admin API. Use when users need to allocate localhost ports, create reverse proxies for local dev servers. Triggers on "set up a proxy", "what's running on localhost", "register my app", or any Caddy configuration task.
+description: Use when the user wants to expose a local dev server under a stable hostname/path, share a localhost app with someone, route multiple local apps through a single entry point, or check what local services are currently running. Triggers on phrases like "set up a proxy for my app", "give me a URL for this localhost server", "what's running on localhost", "register my app", "make this dev server reachable", or when the user mentions port conflicts between local services.
 ---
 
 # Caddy Local Proxy Manager

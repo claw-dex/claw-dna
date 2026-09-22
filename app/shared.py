@@ -16,10 +16,13 @@ MEMORY_DIR = f"{AGENT_DIR}/memory"
 LOGS_DIR = f"{MEMORY_DIR}/logs"
 MESSAGES_DIR = f"{AGENT_DIR}/messages"
 SCRIPTS_DIR = f"{AGENT_DIR}/scripts"
-HISTORY_PATH = f"{MEMORY_DIR}/command_history.json"
 GOALS_PATH = f"{MEMORY_DIR}/goal.json"
+PORTAL_AUDIT_LOG_PATH = f"{LOGS_DIR}/portal_commands.log"
 ERROR_LOG_PATH = f"{MEMORY_DIR}/server_errors.json"
-CHAT_HISTORY_PATH = f"{MEMORY_DIR}/chat_history.json"
+# Portal chat now uses the unified per-surface layout under
+# /agent/memory/chat/main/ (history, archive, main.session). See
+# `services.shared.chat_history_path` / `session_path` and the
+# `migrate_chat_layout()` helper that moves legacy files on first start.
 PORTAL_CONFIG_PATH = f"{MEMORY_DIR}/portal_config.json"
 AGENT_CREDENTIALS_PATH = "/home/agent/.claude/.credentials.json"
 SCHEDULED_TASKS_PATH = os.path.join(MEMORY_DIR, "scheduled_tasks.json")
@@ -27,8 +30,19 @@ SCHEDULED_TASKS_PATH = os.path.join(MEMORY_DIR, "scheduled_tasks.json")
 # ── Status / type styling ─────────────────────────────────────
 # See prompts/enum.md for complete enum definitions
 _STATUS_COLORS = {
-    "completed": "#4CAF50", "failed": "#F44336",
-    "in_progress": "#2196F3", "pending": "#FF9800",
+    "completed": "#4CAF50",
+    "failed": "#F44336",
+    "in_progress": "#2196F3",
+    "pending": "#FF9800",
+}
+# Streamlit markdown color names per status — used to colorize status text
+# inside expander labels / markdown contexts (which only support markdown,
+# not HTML). Kept in sync with _STATUS_COLORS above.
+_STATUS_MD_COLORS = {
+    "completed": "green",
+    "failed": "red",
+    "in_progress": "blue",
+    "pending": "orange",
 }
 _TYPE_COLORS = {
     # Inbox types
@@ -40,6 +54,8 @@ _TYPE_COLORS = {
     "needs_human": "#F44336",
     "goal_complete": "#4CAF50",
     "goal_failed": "#F44336",
+    # Goal delegation marker
+    "delegated": "#00BCD4",
 }
 
 
@@ -49,8 +65,6 @@ def _badge(text, color):
         f'<span style="background:{_html.escape(str(color))};color:#fff;padding:1px 8px;'
         f'border-radius:10px;font-size:11px;font-weight:600">{_html.escape(str(text))}</span>'
     )
-
-MAX_HISTORY = 50  # keep last 50 commands
 
 
 def parse_dt(s):
@@ -96,19 +110,33 @@ def heartbeat_freshness(hb_str):
     except (ValueError, TypeError):
         return str(hb_str)[:16].replace("T", " "), "⚪"
 
+
 # Critical directories and files with sensible defaults
-_CRITICAL_DIRS = [MEMORY_DIR, LOGS_DIR, MESSAGES_DIR, f"{AGENT_DIR}/web", f"{AGENT_DIR}/workspace"]
+_CRITICAL_DIRS = [
+    MEMORY_DIR,
+    LOGS_DIR,
+    MESSAGES_DIR,
+    f"{AGENT_DIR}/web",
+    f"{AGENT_DIR}/workspace",
+]
+# Canonical defaults for /agent/memory/state.json. Single source of truth —
+# scripts/app_check.py imports this; scripts/repair_memory_files.py keeps a
+# parallel copy (with timestamps) because it must run even when app/ is
+# unimportable, and that copy carries a comment pointing back here.
+STATE_DEFAULTS = {
+    "cycle_number": 0,
+    "agent_status": "idle",
+    "current_goal": None,
+    "last_cycle_summary": None,
+    "last_heartbeat": None,
+    "last_cycle_run": None,
+    "services": {},
+}
+
 _CRITICAL_FILES = {
-    f"{MEMORY_DIR}/state.json": {
-        "cycle_number": 0, "status": "idle", "current_goal": None,
-        "last_cycle_summary": None,
-        "created_at": None, "last_heartbeat": None,
-        "last_cycle_run": None, "last_cycle_end": None,
-        "services": {},
-    },
+    f"{MEMORY_DIR}/state.json": dict(STATE_DEFAULTS),
     f"{MEMORY_DIR}/cycles.json": [],
     GOALS_PATH: [],
-    HISTORY_PATH: [],
     ERROR_LOG_PATH: [],
     f"{MESSAGES_DIR}/inbox.json": [],
     f"{MESSAGES_DIR}/outbox.json": [],
@@ -152,6 +180,51 @@ def _startup_check():
             except OSError:
                 pass
 
+    # 4. One-time migration: outbox_history.json was previously written to
+    # /agent/memory/, but it belongs alongside the other messaging files
+    # under /agent/messages/. If only the old location exists, move it; if
+    # both exist, merge the legacy file into the new one (deduped by
+    # timestamp) and drop the legacy file.
+    legacy_outbox_history = f"{MEMORY_DIR}/outbox_history.json"
+    new_outbox_history = f"{MESSAGES_DIR}/outbox_history.json"
+    if os.path.exists(legacy_outbox_history):
+        try:
+            if not os.path.exists(new_outbox_history):
+                shutil.move(legacy_outbox_history, new_outbox_history)
+                issues.append(
+                    f"Migrated outbox_history.json: {legacy_outbox_history} → {new_outbox_history}"
+                )
+            else:
+                with open(legacy_outbox_history) as f:
+                    legacy = json.load(f)
+                with open(new_outbox_history) as f:
+                    current = json.load(f)
+                if not isinstance(legacy, list):
+                    legacy = []
+                if not isinstance(current, list):
+                    current = []
+                seen_ts = {
+                    e.get("timestamp")
+                    for e in current
+                    if isinstance(e, dict) and e.get("timestamp")
+                }
+                merged = list(current)
+                for entry in legacy:
+                    if not isinstance(entry, dict):
+                        continue
+                    ts = entry.get("timestamp")
+                    if ts and ts in seen_ts:
+                        continue
+                    merged.append(entry)
+                    if ts:
+                        seen_ts.add(ts)
+                _write_json_atomic(new_outbox_history, merged, indent=2)
+                os.unlink(legacy_outbox_history)
+                issues.append(
+                    f"Merged legacy outbox_history.json into {new_outbox_history}"
+                )
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            issues.append(f"outbox_history migration failed: {exc}")
 
     if issues:
         print(f"[Agent] Startup check: fixed {len(issues)} issue(s):", flush=True)
@@ -166,6 +239,7 @@ def _write_json_atomic(path, data, indent=None):
     """Write JSON to a file atomically: write to temp, then os.replace().
     Prevents corruption if the process is killed mid-write."""
     import tempfile
+
     tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
     try:
         with os.fdopen(tmp_fd, "w") as f:
@@ -189,25 +263,34 @@ def _safe_int(value, default=0):
         return default
 
 
-def _append_history(entry):
-    """Append a command entry to the history file, keeping last MAX_HISTORY."""
-    try:
-        with open(HISTORY_PATH) as f:
-            history = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        history = []
-    history.append(entry)
-    if len(history) > MAX_HISTORY:
-        history = history[-MAX_HISTORY:]
-    _write_json_atomic(HISTORY_PATH, history)
+def message_source(msg):
+    """Return a message's source, preferring the new ``from.source`` location.
+
+    Mirrors services/envelope.message_source: falls back to the legacy
+    top-level ``source`` for messages written before the relocation (and for
+    non-message objects like goals/reminders that keep their own ``source``).
+    """
+    if not isinstance(msg, dict):
+        return None
+    frm = msg.get("from")
+    if isinstance(frm, dict) and frm.get("source"):
+        return frm["source"]
+    return msg.get("source")
 
 
 def _truncate_history(history, max_content=500):
     """Return history with content fields truncated for dashboard use."""
     result = []
     for entry in history:
-        if isinstance(entry, dict) and isinstance(entry.get("content"), str) and len(entry["content"]) > max_content:
-            entry = {**entry, "content": entry["content"][:max_content] + "...(truncated)"}
+        if (
+            isinstance(entry, dict)
+            and isinstance(entry.get("content"), str)
+            and len(entry["content"]) > max_content
+        ):
+            entry = {
+                **entry,
+                "content": entry["content"][:max_content] + "...(truncated)",
+            }
         result.append(entry)
     return result
 

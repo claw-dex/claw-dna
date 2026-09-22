@@ -4,17 +4,20 @@ Tab: Command Center — goal/message form, scheduled tasks, goals, inbox/outbox,
 Enum Reference: See prompts/enum.md → Message Type for valid command types, Goal Status for status values.
 """
 
+import json
 from datetime import datetime, timezone
 
 import streamlit as st
 
-from app.shared import _badge, _STATUS_COLORS, _TYPE_COLORS
+from app.shared import _badge, _STATUS_COLORS, _TYPE_COLORS, message_source
 
 # ── Status / type icons (tab-specific, not in shared) ────────
 # See prompts/enum.md for complete enum definitions
 _STATUS_ICONS = {
-    "completed": "✅", "failed": "❌",
-    "in_progress": "🔄", "pending": "⏳",
+    "completed": "✅",
+    "failed": "❌",
+    "in_progress": "🔄",
+    "pending": "⏳",
 }
 _TYPE_ICONS = {
     # Inbox types
@@ -31,17 +34,34 @@ _TYPE_ICONS = {
 
 def render():
     from app.data import (
-        load_goals, load_inbox, load_outbox, load_outbox_history,
-        load_history, queue_to_inbox,
-        update_goal_status, delete_inbox_item, clear_outbox,
+        load_goals,
+        load_inbox,
+        load_inbox_history,
+        load_outbox,
+        load_outbox_history,
+        queue_to_inbox,
+        update_goal_status,
+        archive_goals,
+        is_archivable_goal,
+        delete_inbox_item,
+        clear_outbox,
     )
 
     # ── Command form ──────────────────────────────────────────
-    st.subheader("Queue Command For Next Cycle")
+    st.subheader("Queue Command to Agent Inbox for Next Cycle")
     with st.form("command_form", clear_on_submit=True):
         cmd_type = st.selectbox("Type", ["goal", "message"])
-        content = st.text_area("Content", placeholder="Enter your command or goal here...")
-        priority = st.slider("Priority", 1, 5, 3, help="1 = highest priority, 5 = lowest")
+        content = st.text_area(
+            "Content", placeholder="Enter your command or goal here..."
+        )
+        priority_options = ["P5", "P4", "P3", "P2", "P1"]
+        priority_label = st.select_slider(
+            "Priority",
+            options=priority_options,
+            value="P3",
+            help="P1 = highest priority (right), P5 = lowest (left)",
+        )
+        priority = {"P1": 1, "P2": 2, "P3": 3, "P4": 4, "P5": 5}[priority_label]
         submitted = st.form_submit_button("Send")
 
     if submitted:
@@ -50,7 +70,12 @@ def render():
         else:
             ts = datetime.now(timezone.utc).isoformat()
             queue_to_inbox(content.strip(), cmd_type, ts, priority=priority)
-            st.success(f"Queued {cmd_type} command to inbox (priority {priority}).")
+            # Toast survives the rerun; st.success would be torn down instantly.
+            st.toast(
+                f"Queued {cmd_type} command to inbox (priority {priority}).",
+                icon="✅",
+            )
+            st.rerun()
 
     st.divider()
 
@@ -59,32 +84,56 @@ def render():
     with col_title:
         st.subheader("Cycle Command History")
     with col_limit:
-        show_n = st.selectbox("Show", [1, 5, 25, 100], index=0, key="cmd_hist_limit", label_visibility="collapsed")
-    cmd_history = load_history() or []
+        show_n = st.selectbox(
+            "Show",
+            [1, 5, 25, 100],
+            index=0,
+            key="cmd_hist_limit",
+            label_visibility="collapsed",
+        )
+    inbox_hist = load_inbox_history() or []
     outbox_hist = load_outbox_history() or []
 
-    # Merge user commands and agent responses into a unified timeline
+    # inbox_history.json is the archived inbox from cycle_close and captures
+    # items from all sources (portal, Telegram, internal/external agents).
     events = []
-    for cmd in cmd_history:
-        ts = cmd.get("timestamp", "")
-        events.append({
-            "ts": ts,
-            "role": "user",
-            "type": cmd.get("type", "?"),
-            "content": cmd.get("content", ""),
-        })
+    for item in inbox_hist:
+        ts = item.get("timestamp", "")
+        raw_content = item.get("content", "")
+        # Coerce non-string content (dicts/lists from non-portal producers) so
+        # the render path's len()/slice ops don't crash the whole tab.
+        if isinstance(raw_content, str):
+            content = raw_content
+        elif raw_content is None:
+            content = ""
+        else:
+            try:
+                content = json.dumps(raw_content, default=str)
+            except Exception:
+                content = str(raw_content)
+        events.append(
+            {
+                "ts": ts,
+                "role": "user",
+                "type": item.get("type", "message"),
+                "content": content,
+                "source": message_source(item) or item.get("channel") or "",
+            }
+        )
     for msg in outbox_hist:
         ts = msg.get("timestamp", "")
         subject = msg.get("subject", "")
         content = msg.get("content", "")
-        events.append({
-            "ts": ts,
-            "role": "agent",
-            "type": msg.get("type", "response"),
-            "subject": subject,
-            "content": content,
-        })
-    events.sort(key=lambda e: e.get("ts", ""))
+        events.append(
+            {
+                "ts": ts,
+                "role": "agent",
+                "type": msg.get("type", "response"),
+                "subject": subject,
+                "content": content,
+            }
+        )
+    events.sort(key=lambda e: str(e.get("ts") or ""))
 
     if not events:
         st.caption("No command history yet.")
@@ -93,10 +142,16 @@ def render():
         for ev in reversed(events[-show_n:]):
             ts_str = str(ev.get("ts", ""))[:19].replace("T", " ")
             if ev["role"] == "user":
-                label = f"**You** [{ev['type']}]  ·  {ts_str}"
+                src = ev.get("source", "")
+                label = f"**You** [{ev['type']}]  ·  {ts_str}" + (
+                    f"  ·  _{src}_" if src else ""
+                )
                 with st.chat_message("user"):
                     st.caption(label)
-                    st.write(ev["content"][:500] + ("..." if len(ev["content"]) > 500 else ""))
+                    st.write(
+                        ev["content"][:500]
+                        + ("..." if len(ev["content"]) > 500 else "")
+                    )
             else:
                 subj = ev.get("subject", "")
                 is_needs_human = ev.get("type") == "needs_human"
@@ -128,20 +183,40 @@ def render():
     # Summary metrics strip
     m1, m2, m3 = st.columns(3)
     with m1:
-        st.metric("Active Goals", len(active_goals), help=f"{len(goals)} total goals" if goals else None)
+        st.metric(
+            "Active Goals",
+            len(active_goals),
+            help=f"{len(goals)} total goals" if goals else None,
+        )
     with m2:
         st.metric("Inbox", len(inbox))
     with m3:
         st.metric("Outbox", len(outbox))
 
     # Tabbed layout
-    tab_goals, tab_inbox, tab_outbox = st.tabs([
-        f"Goals ({len(goals)})",
-        f"Inbox ({len(inbox)})",
-        f"Outbox ({len(outbox)})",
-    ])
+    tab_goals, tab_inbox, tab_outbox = st.tabs(
+        [
+            f"Goals ({len(goals)})",
+            f"Inbox ({len(inbox)})",
+            f"Outbox ({len(outbox)})",
+        ]
+    )
 
     with tab_goals:
+        archivable = [g for g in goals if is_archivable_goal(g)]
+        if archivable:
+            if st.button(
+                f"Archive & Clean Up ({len(archivable)})",
+                key="archive_goals",
+                help=(
+                    "Archives completed/failed short-term goals to "
+                    "goal_history.json. Long-term goals (id prefixed 'goal') "
+                    "are kept."
+                ),
+            ):
+                archive_goals()
+                st.rerun()
+
         if not goals:
             st.caption("No goals yet.")
         else:
@@ -152,38 +227,77 @@ def render():
                 preview = goal_text[:100] + ("..." if len(goal_text) > 100 else "")
                 icon = _STATUS_ICONS.get(status, "•")
                 created = (g.get("created_at") or "")[:10]
+                delegated_to = (
+                    g.get("delegated_to")
+                    if isinstance(g.get("delegated_to"), dict)
+                    else None
+                )
+                # Prepend a 🤝 to the header so delegation is visible without
+                # expanding (matches the Agents-tab Goals view).
+                header_prefix = f"{icon} 🤝 " if delegated_to else f"{icon} "
 
-                with st.expander(f"{icon} {goal_id} — {preview}", expanded=(status == "in_progress")):
-                    # Status + source badges
+                with st.expander(
+                    f"{header_prefix}{goal_id} — {preview}",
+                    expanded=(status == "in_progress"),
+                ):
+                    # Status + source + delegation badges
                     s_color = _STATUS_COLORS.get(status, "#666")
                     source = g.get("source", "")
                     badges = _badge(status.replace("_", " ").replace("-", " "), s_color)
                     if source:
                         badges += " " + _badge(f"source: {source}", "#555")
+                    if delegated_to:
+                        d_name = delegated_to.get("name") or "?"
+                        d_type = delegated_to.get("type") or "?"
+                        badges += " " + _badge(
+                            f"🤝 → {d_name} ({d_type})",
+                            _TYPE_COLORS.get("delegated", "#00BCD4"),
+                        )
                     st.markdown(badges, unsafe_allow_html=True)
 
                     st.markdown(goal_text)
 
                     if created:
                         st.caption(f"Created: {created}")
+                    if delegated_to:
+                        d_at = (g.get("delegated_at") or "")[:19].replace("T", " ")
+                        d_mid = str(g.get("delegated_message_id") or "")
+                        d_mid_short = (d_mid[:8] + "…") if len(d_mid) > 8 else d_mid
+                        parts = []
+                        if d_at:
+                            parts.append(f"Delegated at: {d_at}")
+                        if d_mid_short:
+                            parts.append(f"message_id: `{d_mid_short}`")
+                        if parts:
+                            st.caption(" · ".join(parts))
                     notes = g.get("notes", "")
                     if notes:
                         st.info(f"**Notes:** {notes}")
 
                     # Status change control
                     status_options = ["pending", "in_progress", "completed", "failed"]
-                    # Normalize legacy "in-progress" to "in_progress"
-                    status_normalized = status.replace("-", "_") if status else "pending"
-                    current_idx = status_options.index(status_normalized) if status_normalized in status_options else 0
-                    new_status = st.selectbox(
+                    status_normalized = (
+                        status.replace("-", "_") if status else "pending"
+                    )
+                    if status_normalized not in status_options:
+                        status_normalized = "pending"
+
+                    widget_key = f"goal_status_{goal_id}"
+                    # Resync widget state with on-disk status every render so
+                    # externally-applied status changes (agent heartbeat, other
+                    # browser tabs) don't resurface as phantom user selections.
+                    # on_change captures real user edits before the next rerun.
+                    st.session_state[widget_key] = status_normalized
+
+                    def _on_goal_status_change(idx: int = i, key: str = widget_key):
+                        update_goal_status(idx, st.session_state[key])
+
+                    st.selectbox(
                         "Change status",
                         status_options,
-                        index=current_idx,
-                        key=f"goal_status_{i}",
+                        key=widget_key,
+                        on_change=_on_goal_status_change,
                     )
-                    if new_status != status_normalized:
-                        update_goal_status(i, new_status)
-                        st.rerun()
 
     with tab_inbox:
         if not inbox:
@@ -209,7 +323,11 @@ def render():
         if not outbox:
             st.caption("Empty outbox.")
         else:
-            if st.button("Archive & Clear All", key="clear_outbox", help="Archives messages to history before clearing"):
+            if st.button(
+                "Archive & Clear All",
+                key="clear_outbox",
+                help="Archives messages to history before clearing",
+            ):
                 clear_outbox()
                 st.rerun()
             for i, item in enumerate(outbox):
@@ -232,4 +350,3 @@ def render():
                             st.markdown(f"**{subject}**")
                         st.markdown(content)
                     st.caption(f"Sent: {ts}")
-

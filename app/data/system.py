@@ -7,7 +7,14 @@ from datetime import datetime, timezone
 
 from app.data._cache import _mfile_cache, _cache, _register_cache
 from app.data._helpers import _read_json_safe
-from app.shared import AGENT_DIR, MEMORY_DIR, MESSAGES_DIR, GOALS_PATH, ERROR_LOG_PATH, SCHEDULED_TASKS_PATH
+from app.shared import (
+    AGENT_DIR,
+    MEMORY_DIR,
+    MESSAGES_DIR,
+    GOALS_PATH,
+    ERROR_LOG_PATH,
+    SCHEDULED_TASKS_PATH,
+)
 
 
 @_mfile_cache(lambda: SCHEDULED_TASKS_PATH, list)
@@ -20,7 +27,6 @@ def load_scheduled_tasks(data):
 def load_errors(data):
     """Load server_errors.json — mtime-cached; called on every render, changes only on tab crash."""
     return data if isinstance(data, list) else []
-
 
 
 @_mfile_cache(lambda: f"{AGENT_DIR}/.claude/settings.json", dict)
@@ -69,7 +75,11 @@ def load_system_info():
 
     try:
         load1, load5, load15 = os.getloadavg()
-        info["load"] = {"1m": round(load1, 2), "5m": round(load5, 2), "15m": round(load15, 2)}
+        info["load"] = {
+            "1m": round(load1, 2),
+            "5m": round(load5, 2),
+            "15m": round(load15, 2),
+        }
     except Exception:
         info["load"] = None
 
@@ -82,18 +92,14 @@ def load_system_info():
     except Exception:
         info["uptime"] = None
 
+    # Workspace size is a metric, not live system state: it is a full recursive
+    # walk of a directory that grows toward its 1 GB limit. scripts/metrics_db.py
+    # measures it (throttled) and this reads the stored value, so the walk never
+    # happens on a render path. Everything above is a cheap live /proc read.
     try:
-        total_bytes = 0
-        for dirpath, dirs, filenames in os.walk("/agent/workspace"):
-            # Skip hidden dirs (e.g. .agent-browser-profile with thousands of files)
-            dirs[:] = [d for d in dirs if not d.startswith(".")]
-            for fname in filenames:
-                if not fname.startswith("."):
-                    try:
-                        total_bytes += os.path.getsize(os.path.join(dirpath, fname))
-                    except OSError:
-                        pass
-        info["workspace_mb"] = round(total_bytes / (1024 ** 2), 1)
+        from app.data.metrics import load_workspace_mb
+
+        info["workspace_mb"] = load_workspace_mb()
     except Exception:
         info["workspace_mb"] = None
 
@@ -114,9 +120,9 @@ def load_validate():
     This reduces I/O from ~8 reads/15s to ~2 mtime stats/render between cycle boundaries.
     """
     state_path = os.path.join(MEMORY_DIR, "state.json")
-    cyc_path   = os.path.join(MEMORY_DIR, "cycles.json")
-    goal_path  = GOALS_PATH
-    jour_path  = os.path.join(MEMORY_DIR, "journal.json")
+    cyc_path = os.path.join(MEMORY_DIR, "cycles.json")
+    goal_path = GOALS_PATH
+    jour_path = os.path.join(MEMORY_DIR, "journal.json")
 
     def _mtime(p):
         try:
@@ -125,18 +131,22 @@ def load_validate():
             return 0.0
 
     state_m = _mtime(state_path)
-    cyc_m   = _mtime(cyc_path)
-    goal_m  = _mtime(goal_path)
-    jour_m  = _mtime(jour_path)
+    cyc_m = _mtime(cyc_path)
+    goal_m = _mtime(goal_path)
+    jour_m = _mtime(jour_path)
     # Bucket time into 30s windows so heartbeat freshness updates every 30s
     hb_bucket = int(time.monotonic() // 30)
 
     cached = _VALIDATE_CACHE.get("data")
     if cached is not None:
         result, c_sm, c_cy, c_go, c_jo, c_hb = cached
-        if (c_sm == state_m and c_cy == cyc_m and
-                c_go == goal_m and c_jo == jour_m and
-                c_hb == hb_bucket):
+        if (
+            c_sm == state_m
+            and c_cy == cyc_m
+            and c_go == goal_m
+            and c_jo == jour_m
+            and c_hb == hb_bucket
+        ):
             return result
 
     checks = []
@@ -150,8 +160,14 @@ def load_validate():
             warn_count += 1
         else:
             fail_count += 1
-        checks.append({"name": name, "passed": passed,
-                        "severity": severity if not passed else "ok", "detail": detail})
+        checks.append(
+            {
+                "name": name,
+                "passed": passed,
+                "severity": severity if not passed else "ok",
+                "detail": detail,
+            }
+        )
 
     json_files = {
         "state.json": ["cycle_number", "status", "last_heartbeat"],
@@ -172,18 +188,34 @@ def load_validate():
         check(f"{fname} valid JSON", True)
         if required_keys and isinstance(data, dict):
             missing = [k for k in required_keys if k not in data]
-            check(f"{fname} required fields", len(missing) == 0, "warning",
-                  f"Missing: {', '.join(missing)}" if missing else "")
+            check(
+                f"{fname} required fields",
+                len(missing) == 0,
+                "warning",
+                f"Missing: {', '.join(missing)}" if missing else "",
+            )
 
     jpath = os.path.join(MEMORY_DIR, "journal.json")
     if os.path.isfile(jpath):
         journal_data = _read_json_safe(jpath, None)
         check("journal.json exists", True)
-        check("journal.json valid JSON", journal_data is not None, "warning",
-              "Failed to parse" if journal_data is None else f"{len(journal_data) if isinstance(journal_data, list) else '?'} entries")
+        check(
+            "journal.json valid JSON",
+            journal_data is not None,
+            "warning",
+            (
+                "Failed to parse"
+                if journal_data is None
+                else f"{len(journal_data) if isinstance(journal_data, list) else '?'} entries"
+            ),
+        )
         if journal_data is not None:
-            check("journal.json is a list", isinstance(journal_data, list), "warning",
-                  f"Expected list, got {type(journal_data).__name__}")
+            check(
+                "journal.json is a list",
+                isinstance(journal_data, list),
+                "warning",
+                f"Expected list, got {type(journal_data).__name__}",
+            )
     else:
         check("journal.json exists", False)
 
@@ -191,23 +223,33 @@ def load_validate():
     cycles = parsed.get("cycles.json")
     if state and cycles and isinstance(cycles, list):
         state_cycle = state.get("cycle_number", 0)
-        max_cycle = max((c.get("cycle", 0) for c in cycles), default=0)
-        check("cycle_number consistent", state_cycle >= max_cycle, "warning",
-              f"state.json says {state_cycle}, cycles.json max is {max_cycle}")
+        max_cycle = max((c.get("cycle_number", 0) for c in cycles), default=0)
+        check(
+            "cycle_number consistent",
+            state_cycle >= max_cycle,
+            "warning",
+            f"state.json says {state_cycle}, cycles.json max is {max_cycle}",
+        )
 
     if cycles and isinstance(cycles, list) and len(cycles) > 1:
-        nums = sorted(c.get("cycle", 0) for c in cycles)
-        gaps = [nums[i+1] for i in range(len(nums)-1) if nums[i+1] != nums[i]+1]
-        check("cycle continuity", len(gaps) == 0, "warning",
-              f"Gaps before: {gaps}" if gaps else f"Continuous 1-{nums[-1]}")
+        nums = sorted(c.get("cycle_number", 0) for c in cycles)
+        gaps = [nums[i + 1] for i in range(len(nums) - 1) if nums[i + 1] != nums[i] + 1]
+        check(
+            "cycle continuity",
+            len(gaps) == 0,
+            "warning",
+            f"Gaps before: {gaps}" if gaps else f"Continuous 1-{nums[-1]}",
+        )
 
     if state and state.get("last_heartbeat"):
         try:
             hb = datetime.fromisoformat(state["last_heartbeat"])
             now = datetime.now(timezone.utc)
             delta = (now - hb).total_seconds()
-            stale = delta > 600
-            check("heartbeat fresh (<10min)", not stale, "warning", f"{int(delta)}s ago")
+            stale = delta > 900
+            check(
+                "heartbeat fresh (<15min)", not stale, "warning", f"{int(delta)}s ago"
+            )
         except (ValueError, TypeError):
             check("heartbeat parseable", False, "warning", "Invalid timestamp format")
 

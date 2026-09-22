@@ -1,0 +1,112 @@
+{
+  "webhook_receiver": {
+    "pid": null,
+    "port": 8082,
+    "auto_start": true,
+    "health_url": "http://localhost:8082/health",
+    "command": [
+      "uv",
+      "run",
+      "python",
+      "/agent/services/webhook_receiver.py"
+    ],
+    "started": null,
+    "stdout_log": "/agent/memory/logs/service-webhook_receiver.stdout.log",
+    "stderr_log": "/agent/memory/logs/service-webhook_receiver.stderr.log"
+  },
+  "external_agent_api": {
+    "pid": null,
+    "port": 8083,
+    "auto_start": true,
+    "health_url": "http://localhost:8083/health",
+    "command": [
+      "uv",
+      "run",
+      "python",
+      "/agent/services/external_agent_api.py"
+    ],
+    "started": null,
+    "stdout_log": "/agent/memory/logs/service-external_agent_api.stdout.log",
+    "stderr_log": "/agent/memory/logs/service-external_agent_api.stderr.log"
+  },
+  "internal_agent_chat": {
+    "pid": null,
+    "port": null,
+    "auto_start": true,
+    "command": [
+      "uv",
+      "run",
+      "python",
+      "/agent/services/internal_agent_chat.py"
+    ],
+    "started": null,
+    "stdout_log": "/agent/memory/logs/service-internal_agent_chat.stdout.log",
+    "stderr_log": "/agent/memory/logs/service-internal_agent_chat.stderr.log"
+  },
+  "scheduler_daemon": {
+    "pid": null,
+    "port": null,
+    "auto_start": true,
+    "command": [
+      "uv",
+      "run",
+      "python",
+      "/agent/services/scheduler_daemon.py"
+    ],
+    "started": null,
+    "stdout_log": "/agent/memory/logs/service-scheduler_daemon.stdout.log",
+    "stderr_log": "/agent/memory/logs/service-scheduler_daemon.stderr.log"
+  },
+  "metrics_daemon": {
+    "pid": null,
+    "port": null,
+    "auto_start": true,
+    "command": [
+      "uv",
+      "run",
+      "python",
+      "/agent/services/metrics_daemon.py"
+    ],
+    "started": null,
+    "stdout_log": "/agent/memory/logs/service-metrics_daemon.stdout.log",
+    "stderr_log": "/agent/memory/logs/service-metrics_daemon.stderr.log"
+  },
+  "telegram_bridge": {
+    "pid": null,
+    "port": null,
+    "command": [
+      "uv",
+      "run",
+      "python",
+      "/agent/services/telegram_bridge.py"
+    ],
+    "started": null,
+    "stdout_log": "/agent/memory/logs/service-telegram_bridge.stdout.log",
+    "stderr_log": "/agent/memory/logs/service-telegram_bridge.stderr.log"
+  },
+  "slack_bridge": {
+    "pid": null,
+    "port": null,
+    "command": [
+      "uv",
+      "run",
+      "python",
+      "/agent/services/slack_bridge.py"
+    ],
+    "started": null,
+    "stdout_log": "/agent/memory/logs/service-slack_bridge.stdout.log",
+    "stderr_log": "/agent/memory/logs/service-slack_bridge.stderr.log"
+  },
+  "claude_remote": {
+    "pid": null,
+    "port": null,
+    "command": [
+      "bash",
+      "-c",
+      "echo y | claude remote-control --name \"${CONTAINER_NAME:-myagent}\" --permission-mode bypassPermissions --spawn same-dir"
+    ],
+    "started": null,
+    "stdout_log": "/agent/memory/logs/service-claude_remote.stdout.log",
+    "stderr_log": "/agent/memory/logs/service-claude_remote.stderr.log"
+  }
+}

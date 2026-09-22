@@ -11,10 +11,28 @@ from datetime import datetime, timezone
 from app.data._cache import _cache_clear_all
 from app.data._helpers import _read_json_safe
 from app.shared import (
-    AGENT_DIR, MEMORY_DIR, LOGS_DIR, MESSAGES_DIR, SCRIPTS_DIR,
-    GOALS_PATH, PORTAL_CONFIG_PATH, SCHEDULED_TASKS_PATH,
-    _write_json_atomic, _append_history, AtomicJSON,
+    AGENT_DIR,
+    MEMORY_DIR,
+    LOGS_DIR,
+    MESSAGES_DIR,
+    SCRIPTS_DIR,
+    GOALS_PATH,
+    PORTAL_AUDIT_LOG_PATH,
+    PORTAL_CONFIG_PATH,
+    SCHEDULED_TASKS_PATH,
+    _write_json_atomic,
+    AtomicJSON,
 )
+
+
+def _append_portal_audit(entry: dict) -> None:
+    """Append one JSON line to the portal audit log. Best-effort; never raises."""
+    try:
+        os.makedirs(os.path.dirname(PORTAL_AUDIT_LOG_PATH), exist_ok=True)
+        with open(PORTAL_AUDIT_LOG_PATH, "a") as f:
+            f.write(json.dumps(entry, default=str) + "\n")
+    except OSError:
+        pass
 
 
 def save_portal_config(key: str, value):
@@ -25,43 +43,72 @@ def save_portal_config(key: str, value):
 
 
 def queue_to_inbox(content, cmd_type, timestamp, priority=3):
-    """Append a command to inbox.json and record in history.
+    """Append a command to inbox.json and write an audit-log line.
 
     Uses AtomicJSON for exclusive file locking to prevent race conditions
     when both the Streamlit UI and a heartbeat cycle access inbox.json.
     Priority: 1 (highest) to 5 (lowest), default 3.
     """
     inbox_path = f"{MESSAGES_DIR}/inbox.json"
-    body = {"type": cmd_type, "content": content, "timestamp": timestamp,
-            "received_at": datetime.now(timezone.utc).isoformat(),
-            "priority": max(1, min(5, int(priority)))}
+    body = {
+        "type": cmd_type,
+        "content": content,
+        "timestamp": timestamp,
+        "received_at": datetime.now(timezone.utc).isoformat(),
+        "priority": max(1, min(5, int(priority))),
+        # source="portal" (origin). No transport — the portal writes directly to
+        # the inbox, so source already says how it arrived (no duplication). The
+        # operator is the owner; inlined to avoid a cross-root import.
+        "from": {"source": "portal", "role": "owner"},
+    }
     with AtomicJSON(inbox_path, default=[]) as inbox:
         inbox.append(body)
-    _append_history({"type": cmd_type, "content": content, "timestamp": timestamp, "result": "queued"})
+    _append_portal_audit(
+        {
+            "timestamp": timestamp,
+            "type": cmd_type,
+            "priority": body["priority"],
+            "content": content,
+        }
+    )
     _cache_clear_all()
-
 
 
 def run_script(script_name, args=None):
     """Run a whitelisted utility script synchronously (30s timeout)."""
-    if not script_name or '/' in script_name or '..' in script_name or script_name.startswith('.'):
+    if (
+        not script_name
+        or "/" in script_name
+        or ".." in script_name
+        or script_name.startswith(".")
+    ):
         return {"ok": False, "error": "Invalid script name"}
     script_path = os.path.join(SCRIPTS_DIR, script_name)
     if not os.path.isfile(script_path):
         return {"ok": False, "error": f"Script not found: {script_name}"}
-    if script_name.endswith('.py'):
+    if script_name.endswith(".py"):
         cmd = ["uv", "run", "python", script_path]
-    elif script_name.endswith('.sh'):
+    elif script_name.endswith(".sh"):
         cmd = ["bash", script_path]
     else:
         return {"ok": False, "error": "Unsupported script type"}
     if args:
-        cmd.extend(str(a) for a in args[:30])
+
+        def _strip_quotes(v):
+            s = str(v)
+            if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+                return s[1:-1]
+            return s
+
+        cmd.extend(_strip_quotes(a) for a in args[:30])
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=AGENT_DIR)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30, cwd=AGENT_DIR
+        )
         _cache_clear_all()
         return {
-            "ok": True, "script": script_name,
+            "ok": True,
+            "script": script_name,
             "exit_code": result.returncode,
             "stdout": result.stdout[:20000],
             "stderr": result.stderr[:5000],
@@ -116,6 +163,50 @@ def update_goal_status(goal_index: int, new_status: str):
     _cache_clear_all()
 
 
+def is_archivable_goal(g: dict) -> bool:
+    """True when a goal is a short-term completed/failed entry safe to archive.
+
+    Long-term goals use ids prefixed with 'goal' and are preserved regardless
+    of status so the agent keeps re-reading them as durable context.
+    """
+    return g.get("status") in ("completed", "failed") and not str(
+        g.get("id", "")
+    ).startswith("goal")
+
+
+def archive_goals():
+    """Archive completed/failed short-term goals to goal_history.json.
+
+    Preserves long-term goals (id prefixed with 'goal') regardless of status.
+    Returns the number of goals archived.
+    """
+    history_path = f"{MEMORY_DIR}/goal_history.json"
+    archived_count = 0
+
+    with AtomicJSON(GOALS_PATH, default=[]) as goals:
+        to_archive = [g for g in goals if is_archivable_goal(g)]
+        if to_archive:
+            with AtomicJSON(history_path, default=[]) as history:
+                existing_keys = {
+                    (e.get("id"), e.get("created_at"))
+                    for e in history
+                    if isinstance(e, dict) and e.get("id")
+                }
+                for g in to_archive:
+                    key = (g.get("id"), g.get("created_at"))
+                    if g.get("id") and key in existing_keys:
+                        continue
+                    history.append(g)
+                    if g.get("id"):
+                        existing_keys.add(key)
+
+            goals[:] = [g for g in goals if not is_archivable_goal(g)]
+            archived_count = len(to_archive)
+
+    _cache_clear_all()
+    return archived_count
+
+
 def delete_inbox_item(item_index: int):
     """Delete a single inbox item by index."""
     inbox_path = f"{MESSAGES_DIR}/inbox.json"
@@ -128,7 +219,9 @@ def delete_inbox_item(item_index: int):
 def clear_outbox():
     """Archive outbox messages to outbox_history.json, then clear outbox."""
     outbox_path = f"{MESSAGES_DIR}/outbox.json"
-    history_path = f"{MEMORY_DIR}/outbox_history.json"
+    # outbox_history lives alongside the other messaging artifacts under
+    # /agent/messages/ (inbox.json, inbox_history.json, outbox.json).
+    history_path = f"{MESSAGES_DIR}/outbox_history.json"
 
     # Read current outbox
     outbox_data = _read_json_safe(outbox_path, [])
@@ -174,9 +267,8 @@ def remove_service(name):
     if not _valid_service_name(name):
         return {"ok": False, "error": "Invalid service name"}
     try:
-        if "/agent" not in sys.path:
-            sys.path.insert(0, "/agent")
         from scripts.service_manager import cmd_remove
+
         result = _call_svc(cmd_remove, name)
         _cache_clear_all()
         if result["ok"]:
@@ -187,7 +279,13 @@ def remove_service(name):
 
 
 def _valid_service_name(name):
-    return name and '/' not in name and '..' not in name and not name.startswith('-') and '\x00' not in name
+    return (
+        name
+        and "/" not in name
+        and ".." not in name
+        and not name.startswith("-")
+        and "\x00" not in name
+    )
 
 
 def stop_service(name):
@@ -195,9 +293,8 @@ def stop_service(name):
     if not _valid_service_name(name):
         return {"ok": False, "error": "Invalid service name"}
     try:
-        if "/agent" not in sys.path:
-            sys.path.insert(0, "/agent")
         from scripts.service_manager import cmd_stop
+
         result = _call_svc(cmd_stop, name)
         _cache_clear_all()
         return result
@@ -225,9 +322,8 @@ def start_service(name):
             return {"ok": False, "error": f"Invalid port value for '{name}'"}
 
     try:
-        if "/agent" not in sys.path:
-            sys.path.insert(0, "/agent")
         from scripts.service_manager import cmd_start
+
         result = _call_svc(cmd_start, name, port, command)
         _cache_clear_all()
         return result

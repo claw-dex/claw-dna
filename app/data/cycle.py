@@ -11,15 +11,40 @@ import re
 import time
 from datetime import datetime, timezone
 
-from app.data._cache import _mfile_cache, _mmfile_cache, _register_cache
+from app.data._cache import _mmfile_cache, _register_cache
 from app.data._helpers import _read_json_safe
-from app.shared import MEMORY_DIR, LOGS_DIR, HISTORY_PATH
+from app.shared import MEMORY_DIR, LOGS_DIR, MESSAGES_DIR, message_source
 
 
-@_mfile_cache(lambda: f"{MEMORY_DIR}/cycles.json", list)
-def load_cycles(data):
-    """Load cycles from cycles.json — mtime-cached."""
-    return data if isinstance(data, list) else []
+@_mmfile_cache(
+    [
+        lambda: f"{MEMORY_DIR}/cycles.json",
+        lambda: f"{MEMORY_DIR}/cycles_archive.json",
+    ]
+)
+def load_cycles():
+    """Load cycles from cycles.json + cycles_archive.json — mtime-cached.
+
+    Merges active + archive, dedup by cycle_number (active takes precedence),
+    sorted by cycle_number ascending so downstream slicing (`[-30:]`, `[-10:]`)
+    keeps yielding the most recent entries.
+    """
+    from scripts.repair_memory_files import migrate_cycles_list
+
+    active = _read_json_safe(f"{MEMORY_DIR}/cycles.json", [])
+    if not isinstance(active, list):
+        active = []
+    migrate_cycles_list(active)
+    archived = _read_json_safe(f"{MEMORY_DIR}/cycles_archive.json", [])
+    if not isinstance(archived, list):
+        archived = []
+    migrate_cycles_list(archived)
+    active_cycles = {e.get("cycle_number") for e in active}
+    merged = active + [
+        e for e in archived if e.get("cycle_number") not in active_cycles
+    ]
+    merged.sort(key=lambda e: e.get("cycle_number", 0))
+    return merged
 
 
 @_mmfile_cache([lambda: f"{MEMORY_DIR}/cycles.json"])
@@ -33,7 +58,11 @@ def load_cycle_velocity():
     """
     try:
         cycles_data = load_cycles() or []
-        completed = [c for c in cycles_data if c.get("status") == "completed" and c.get("start")]
+        completed = [
+            c
+            for c in cycles_data
+            if c.get("cycle_status") == "completed" and c.get("start")
+        ]
         if len(completed) < 2:
             return None
         recent = sorted(completed, key=lambda c: c.get("start", ""), reverse=True)[:10]
@@ -87,7 +116,14 @@ def load_cycle_logs():
             except OSError:
                 size_bytes = 0
                 file_mtime = 0
-            cycle_logs.append({"cycle": cycle_num, "path": path, "size": size_bytes, "mtime": file_mtime})
+            cycle_logs.append(
+                {
+                    "cycle": cycle_num,
+                    "path": path,
+                    "size": size_bytes,
+                    "mtime": file_mtime,
+                }
+            )
     cycle_logs.sort(key=lambda x: x["cycle"], reverse=True)
 
     _CYCLE_LOGS_CACHE["data"] = (cycle_logs, dir_mtime)
@@ -176,21 +212,35 @@ def load_balance():
         cycles = []
     categories = {}
     recent_categories = {}
-    evolve_cycles = [c for c in cycles if c.get("type") == "evolve" and c.get("category")]
+    evolve_cycles = [
+        c for c in cycles if c.get("cycle_type") == "evolve" and c.get("cycle_category")
+    ]
     for c in evolve_cycles:
-        cat = c["category"]
+        cat = c["cycle_category"]
         categories[cat] = categories.get(cat, 0) + 1
     for c in evolve_cycles[-10:]:
-        cat = c["category"]
+        cat = c["cycle_category"]
         recent_categories[cat] = recent_categories.get(cat, 0) + 1
     total = sum(categories.values())
-    all_cats = ["reliability", "observability", "capability", "efficiency", "prompt_evolution"]
+    all_cats = [
+        "reliability",
+        "observability",
+        "capability",
+        "efficiency",
+        "prompt_evolution",
+    ]
 
     # ── Load dynamic weights from evolution_weights.json (written by cycle_start.py) ──
     weights_data = _read_json_safe(weights_path, {})
     weights = weights_data.get("weights", {}) if isinstance(weights_data, dict) else {}
-    goal_signals = weights_data.get("goal_signals", []) if isinstance(weights_data, dict) else []
-    maturity_signals = weights_data.get("maturity_signals", {}) if isinstance(weights_data, dict) else {}
+    goal_signals = (
+        weights_data.get("goal_signals", []) if isinstance(weights_data, dict) else []
+    )
+    maturity_signals = (
+        weights_data.get("maturity_signals", {})
+        if isinstance(weights_data, dict)
+        else {}
+    )
 
     # Use weights-based suggestion if available, else fall back to least-done
     suggestion = None
@@ -219,30 +269,41 @@ def load_balance():
     return result
 
 
-@_mmfile_cache([lambda: HISTORY_PATH, lambda: f"{MEMORY_DIR}/cycles.json"])
+@_mmfile_cache(
+    [lambda: f"{MESSAGES_DIR}/inbox_history.json", lambda: f"{MEMORY_DIR}/cycles.json"]
+)
 def load_activity():
-    """Merge command history + cycle events into a unified activity feed (newest 50).
+    """Merge inbox history + cycle events into a unified activity feed (newest 50).
 
-    Uses @_mmfile_cache keyed on command_history.json + cycles.json mtimes. Previously
-    used hand-rolled _ACTIVITY_CACHE; now auto-registered in _MFILE_CACHES for auto-clear.
-    TTL=5s caused full re-merge every 5s — ~0 re-merges between cycle boundaries now.
+    Sourced from inbox_history.json (archived inbox items from cycle_close) so
+    portal-queued commands, Telegram inputs, and any other inbox producers all
+    show up in the feed.
     """
-    from app.data.message import load_history
+    from app.data.message import load_inbox_history
 
     events = []
     type_map = {"goal": "goal", "message": "message", "bash": "bash_cmd"}
-    history = load_history()
-    for h in history:
+    for h in load_inbox_history():
+        if not isinstance(h, dict):
+            continue
         ts = h.get("timestamp")
         if not ts:
             continue
         etype = type_map.get(h.get("type"), "bash_cmd")
-        events.append({
-            "time": ts,
-            "type": etype,
-            "summary": (h.get("content") or "")[:120],
-            "detail": h.get("result", ""),
-        })
+        content = h.get("content") or ""
+        if not isinstance(content, str):
+            try:
+                content = json.dumps(content, default=str)
+            except Exception:
+                content = str(content)
+        events.append(
+            {
+                "time": ts,
+                "type": etype,
+                "summary": content[:120],
+                "detail": message_source(h) or h.get("channel") or "",
+            }
+        )
     cycles = load_cycles()
     if isinstance(cycles, list):
         # Only scan the most recent 30 cycles — activity feed only shows 50 events total,
@@ -251,19 +312,23 @@ def load_activity():
         recent_cycles = cycles[-30:] if len(cycles) > 30 else cycles
         for c in recent_cycles:
             if c.get("start"):
-                events.append({
-                    "time": c["start"],
-                    "type": "cycle_start",
-                    "summary": f"Cycle {c.get('cycle', '')} started",
-                    "detail": (c.get("goal") or "")[:120],
-                })
+                events.append(
+                    {
+                        "time": c["start"],
+                        "type": "cycle_start",
+                        "summary": f"Cycle {c.get('cycle_number', '')} started",
+                        "detail": (c.get("cycle_goal") or "")[:120],
+                    }
+                )
             if c.get("end"):
                 dur = c.get("duration_seconds", "?")
-                events.append({
-                    "time": c["end"],
-                    "type": "cycle_end",
-                    "summary": f"Cycle {c.get('cycle', '')} completed ({dur}s)",
-                    "detail": (c.get("goal") or "")[:120],
-                })
+                events.append(
+                    {
+                        "time": c["end"],
+                        "type": "cycle_end",
+                        "summary": f"Cycle {c.get('cycle_number', '')} completed ({dur}s)",
+                        "detail": (c.get("cycle_goal") or "")[:120],
+                    }
+                )
     events.sort(key=lambda e: e.get("time", ""), reverse=True)
     return events[:50]

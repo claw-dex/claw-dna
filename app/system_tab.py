@@ -1,11 +1,11 @@
 """Tab 4: System — health, errors, validation, run-script, scripts, cycle logs."""
 
+import html
 import json
 import os
 from datetime import datetime, timezone
 
 import streamlit as st
-
 
 _CATEGORY_ORDER = [
     "Cycle Management",
@@ -37,11 +37,31 @@ _SCRIPT_ARGS: dict[str, list] = {
         {"flag": "--clear-all-errors", "help": "Purge ALL tab errors"},
     ],
     "cycle_close.py": [
-        {"flag": "--type", "help": "evolve | goal | self-heal", "placeholder": "evolve"},
-        {"flag": "--summary", "help": "1-2 sentence summary (required)", "placeholder": "text"},
-        {"flag": "--cycle", "help": "Cycle number (auto-detect if omitted)", "placeholder": "N"},
-        {"flag": "--category", "help": "For evolve: reliability | observability | capability | efficiency", "placeholder": "capability"},
-        {"flag": "--status", "help": "completed (default) | failed", "placeholder": "completed"},
+        {
+            "flag": "--type",
+            "help": "evolve | goal | self-heal | dream",
+            "placeholder": "evolve",
+        },
+        {
+            "flag": "--summary",
+            "help": "1-2 sentence summary (required)",
+            "placeholder": "text",
+        },
+        {
+            "flag": "--cycle",
+            "help": "Cycle number (auto-detect if omitted)",
+            "placeholder": "N",
+        },
+        {
+            "flag": "--category",
+            "help": "evolve: reliability | observability | capability | efficiency | prompt_evolution; dream: memory_consolidation | deep_sleep",
+            "placeholder": "capability",
+        },
+        {
+            "flag": "--status",
+            "help": "completed (default) | failed",
+            "placeholder": "completed",
+        },
         {"flag": "--no-normalize", "help": "Skip cycles.json normalization step"},
         {"flag": "--dry-run", "help": "Preview what would be written"},
     ],
@@ -50,60 +70,81 @@ _SCRIPT_ARGS: dict[str, list] = {
         {"flag": "--format", "help": "Output format: md or json", "placeholder": "md"},
     ],
     # Memory
-    "memory_stats.py": [
-        {"flag": "--json", "help": "Machine-readable JSON output"},
-        {"flag": "--short", "help": "One-liner summary only"},
-    ],
-    "memory_repair.py": [
+    "repair_memory_files.py": [
         {"flag": "--dry-run", "help": "Scan only, no writes"},
         {"flag": "--backup", "help": "Create backups only (no repair)"},
         {"flag": "--quiet", "help": "Only print summary line"},
         {"flag": "--json", "help": "Machine-readable JSON output"},
-    ],
-    "memory_backup.py": [
-        {"flag": "--list", "help": "List all backups"},
-        {"flag": "--check", "help": "Show age of most recent backup"},
-        {"flag": "--dry-run", "help": "Preview what restore would do"},
-        {"flag": "--json", "help": "Output as JSON"},
-        {"flag": "--quiet", "help": "Suppress output"},
-        {"flag": "--restore", "help": "Restore a backup (timestamp or 'latest')", "placeholder": "latest"},
-        {"flag": "--prune", "help": "Keep only N most recent backups", "placeholder": "5"},
-        {"flag": "--label", "help": "Label for the backup", "placeholder": "pre-deploy"},
     ],
     "journal_archive.py": [
         {"flag": "--dry-run", "help": "Preview without modifying files"},
         {"flag": "--list", "help": "Show entry counts and file sizes"},
         {"flag": "--json", "help": "Output as JSON"},
         {"flag": "--keep", "help": "Keep N most recent entries", "placeholder": "20"},
-        {"flag": "--search", "help": "Search across journal by keyword", "placeholder": "keyword"},
+        {
+            "flag": "--search",
+            "help": "Search across journal by keyword",
+            "placeholder": "keyword",
+        },
     ],
     "memory_ask.py": [
         {"flag": "--k", "help": "Max retrieval results", "placeholder": "20"},
-        {"flag": "--context-only", "help": "Show retrieved context without Claude synthesis"},
+        {
+            "flag": "--min-score",
+            "help": "Drop hits below this fraction of the top score (0-1)",
+            "placeholder": "0.5",
+        },
+        {
+            "flag": "--context-only",
+            "help": "Show retrieved context without Claude synthesis",
+        },
         {"flag": "--json", "help": "Output as JSON"},
     ],
     "memory_recall.py": [
         {"flag": "--k", "help": "Number of results to return", "placeholder": "5"},
-        {"flag": "--timeline", "help": "Show timeline entries instead of semantic search"},
-        {"flag": "--since", "help": "Filter entries since date (ISO format)", "placeholder": "2024-01-01"},
-        {"flag": "--until", "help": "Filter entries until date (ISO format)", "placeholder": "2024-12-31"},
+        {
+            "flag": "--timeline",
+            "help": "Show timeline entries instead of semantic search",
+        },
+        {
+            "flag": "--since",
+            "help": "Filter entries since date (ISO format)",
+            "placeholder": "2024-01-01",
+        },
+        {
+            "flag": "--until",
+            "help": "Filter entries until date (ISO format)",
+            "placeholder": "2024-12-31",
+        },
         {"flag": "--json", "help": "Output as JSON"},
     ],
     "memory_ingest.py": [
-        {"type": "select", "label": "Mode", "options": [
-            ("--build", "Rebuild .mv2 index from scratch"),
-            ("--append-json", "Append a single entry (JSON string or @file.json)"),
-            ("--append-text", "Ingest raw text directly"),
-            ("--append-file", "Ingest a file (PDF, DOCX, TXT, MD, etc.)"),
-        ]},
-        {"flag": "--title", "help": "Title for appended entry", "placeholder": "My note"},
+        {
+            "type": "select",
+            "label": "Mode",
+            "options": [
+                ("--build", "Rebuild the LanceDB index from scratch"),
+                ("--append-json", "Append a single entry (JSON string or @file.json)"),
+                ("--append-text", "Ingest raw text directly"),
+                ("--append-file", "Ingest a text file (TXT, MD, JSON, etc.)"),
+            ],
+        },
+        {
+            "flag": "--title",
+            "help": "Title for appended entry",
+            "placeholder": "My note",
+        },
         {"flag": "--dry-run", "help": "Preview without writing"},
         {"flag": "--json", "help": "Output as JSON"},
         {"flag": "--quiet", "help": "Suppress progress output"},
     ],
-    "memory_sync.py": [
+    "sync_memory_files.py": [
         {"flag": "--dry-run", "help": "Preview only, do not write .md files"},
-        {"flag": "--only", "help": "Comma-separated sync targets", "placeholder": "capabilities,services,state"},
+        {
+            "flag": "--only",
+            "help": "Comma-separated sync targets",
+            "placeholder": "capabilities,services,state",
+        },
     ],
     # Diagnostics
     "self_test.py": [
@@ -112,13 +153,25 @@ _SCRIPT_ARGS: dict[str, list] = {
         {"flag": "--fail-fast", "help": "Stop on first failure"},
         {"flag": "--quiet", "help": "Only print summary"},
         {"flag": "--list-suites", "help": "List available test suites"},
-        {"flag": "--suite", "help": "Run specific test suite only", "placeholder": "suite_name"},
-        {"flag": "--cycle", "help": "Cycle number for failure recording", "placeholder": "N"},
+        {
+            "flag": "--suite",
+            "help": "Run specific test suite only",
+            "placeholder": "suite_name",
+        },
+        {
+            "flag": "--cycle",
+            "help": "Cycle number for failure recording",
+            "placeholder": "N",
+        },
     ],
     "maintain.py": [
         {"flag": "--fix", "help": "Run checks and apply fixes (default: report only)"},
         {"flag": "--json", "help": "Output results as JSON"},
-        {"flag": "--check", "help": "Run specific check only", "placeholder": "check_name"},
+        {
+            "flag": "--check",
+            "help": "Run specific check only",
+            "placeholder": "check_name",
+        },
     ],
     "metrics_collector.py": [
         {"flag": "--report", "help": "Print last snapshots as table"},
@@ -132,45 +185,78 @@ _SCRIPT_ARGS: dict[str, list] = {
     ],
     # Services / Portal
     "service_manager.py": [
-        {"type": "select", "label": "Command", "options": [
-            ("list", "Show all managed services"),
-            ("health", "Health check all services"),
-            ("cleanup", "Remove dead entries"),
-            ("start", "Start a service (add: name port -- cmd...)"),
-            ("stop", "Stop a service (add: name)"),
-            ("status", "Check one service (add: name)"),
-        ]},
+        {
+            "type": "select",
+            "label": "Command",
+            "options": [
+                ("list", "Show all managed services"),
+                ("health", "Health check all services"),
+                ("cleanup", "Remove dead entries"),
+                ("start", "Start a service (add: name port -- cmd...)"),
+                ("stop", "Stop a service (add: name)"),
+                ("status", "Check one service (add: name)"),
+            ],
+        },
     ],
     "portal_config.py": [
-        {"type": "select", "label": "Subcommand", "options": [
-            ("hostname", "Manage public hostname"),
-            ("timezone", "Manage timezone"),
-            ("auth", "Manage authentication"),
-        ]},
-        {"flag": "--set", "help": "Set value (hostname URL, timezone, or auth user:pass)", "placeholder": "value"},
+        {
+            "type": "select",
+            "label": "Subcommand",
+            "options": [
+                ("hostname", "Manage public hostname"),
+                ("timezone", "Manage timezone"),
+                ("auth", "Manage authentication"),
+            ],
+        },
+        {
+            "flag": "--set",
+            "help": "Set value (hostname URL, timezone, or auth user:pass)",
+            "placeholder": "value",
+        },
         {"flag": "--show", "help": "Show current value"},
         {"flag": "--clear", "help": "Clear value (hostname/timezone only)"},
-        {"flag": "--enable", "help": "Enable auth (auth subcommand only)", "placeholder": "user:pass"},
+        {
+            "flag": "--enable",
+            "help": "Enable auth (auth subcommand only)",
+            "placeholder": "user:pass",
+        },
         {"flag": "--disable", "help": "Disable auth (auth subcommand only)"},
-        {"flag": "--reapply", "help": "Re-apply auth from saved creds (auth subcommand only)"},
-        {"flag": "--rollback", "help": "Force-remove auth route (auth subcommand only)"},
+        {
+            "flag": "--reapply",
+            "help": "Re-apply auth from saved creds (auth subcommand only)",
+        },
+        {
+            "flag": "--rollback",
+            "help": "Force-remove auth route (auth subcommand only)",
+        },
     ],
     "scheduler.py": [
-        {"type": "select", "label": "Action", "options": [
-            ("--check", "Evaluate and inject due tasks"),
-            ("--list", "List all scheduled tasks"),
-        ]},
+        {
+            "type": "select",
+            "label": "Action",
+            "options": [
+                ("--check", "Evaluate and inject due tasks"),
+                ("--list", "List all scheduled tasks"),
+            ],
+        },
     ],
     "keepass.py": [
-        {"type": "select", "label": "Command", "options": [
-            ("init", "Create KeePass database"),
-            ("list", "List all entries"),
-            ("get", "Get entry (add: title)"),
-            ("store", "Store credential (add: --title T --username U --password P)"),
-            ("delete", "Delete entry (add: title)"),
-            ("groups", "List all groups"),
-            ("search", "Search entries (add: query)"),
-        ]},
+        {
+            "type": "select",
+            "label": "Command",
+            "options": [
+                ("init", "Create KeePass database"),
+                ("list", "List all entries"),
+                ("get", "Get entry (add: title)"),
+                (
+                    "store",
+                    "Store credential (add: --title T --username U --password P)",
+                ),
+                ("delete", "Delete entry (add: title)"),
+                ("groups", "List all groups"),
+                ("search", "Search entries (add: query)"),
+            ],
+        },
         {"flag": "--json", "help": "Output as JSON"},
     ],
     "milestone_report.py": [
@@ -181,17 +267,21 @@ _SCRIPT_ARGS: dict[str, list] = {
     ],
     # Notes / Reminders / Emails
     "notes.py": [
-        {"type": "select", "label": "Subcommand", "options": [
-            ("add", "Add a new note"),
-            ("list", "List notes"),
-            ("get", "Get a note by ID"),
-            ("search", "Search notes"),
-            ("edit", "Edit a note"),
-            ("delete", "Delete a note"),
-            ("tags", "List all tags"),
-            ("export", "Export notes"),
-            ("stats", "Show statistics"),
-        ]},
+        {
+            "type": "select",
+            "label": "Subcommand",
+            "options": [
+                ("add", "Add a new note"),
+                ("list", "List notes"),
+                ("get", "Get a note by ID"),
+                ("search", "Search notes"),
+                ("edit", "Edit a note"),
+                ("delete", "Delete a note"),
+                ("tags", "List all tags"),
+                ("export", "Export notes"),
+                ("stats", "Show statistics"),
+            ],
+        },
         {"flag": "--id", "help": "Note ID", "placeholder": "abc123"},
         {"flag": "--title", "help": "Note title", "placeholder": "My note"},
         {"flag": "--content", "help": "Note body", "placeholder": "text"},
@@ -203,14 +293,22 @@ _SCRIPT_ARGS: dict[str, list] = {
         {"flag": "--json", "help": "Output as JSON"},
     ],
     "reminder.py": [
-        {"type": "select", "label": "Subcommand", "options": [
-            ("add", "Add a reminder"),
-            ("list", "List reminders"),
-            ("delete", "Delete a reminder"),
-            ("clear", "Remove all fired/disabled reminders"),
-        ]},
+        {
+            "type": "select",
+            "label": "Subcommand",
+            "options": [
+                ("add", "Add a reminder"),
+                ("list", "List reminders"),
+                ("delete", "Delete a reminder"),
+                ("clear", "Remove all fired/disabled reminders"),
+            ],
+        },
         {"flag": "--text", "help": "Reminder message", "placeholder": "text"},
-        {"flag": "--at", "help": "Fire once at this time (ISO 8601)", "placeholder": "2024-06-01T09:00:00"},
+        {
+            "flag": "--at",
+            "help": "Fire once at this time (ISO 8601)",
+            "placeholder": "2024-06-01T09:00:00",
+        },
         {"flag": "--every", "help": "Fire every N minutes", "placeholder": "60"},
         {"flag": "--cron", "help": "Cron schedule pattern", "placeholder": "0 9 * * 1"},
         {"flag": "--priority", "help": "Priority 1-5 (1=highest)", "placeholder": "1"},
@@ -218,145 +316,259 @@ _SCRIPT_ARGS: dict[str, list] = {
         {"flag": "--json", "help": "Output as JSON"},
     ],
     "email_imap.py": [
-        {"type": "select", "label": "Subcommand", "options": [
-            ("auth", "Verify IMAP credentials"),
-            ("fetch", "Fetch emails"),
-            ("search", "Search emails"),
-            ("delete", "Delete emails by UID"),
-        ]},
+        {
+            "type": "select",
+            "label": "Subcommand",
+            "options": [
+                ("auth", "Verify IMAP credentials"),
+                ("fetch", "Fetch emails"),
+                ("search", "Search emails"),
+                ("delete", "Delete emails by UID"),
+            ],
+        },
         {"flag": "--mailbox", "help": "IMAP mailbox", "placeholder": "INBOX"},
-        {"flag": "--filter", "help": "Email filter: unseen, seen, or all", "placeholder": "all"},
+        {
+            "flag": "--filter",
+            "help": "Email filter: unseen, seen, or all",
+            "placeholder": "all",
+        },
         {"flag": "--max", "help": "Max emails to fetch", "placeholder": "20"},
         {"flag": "--query", "help": "Search query text", "placeholder": "keyword"},
-        {"flag": "--field", "help": "Field to search: subject, from, or text", "placeholder": "text"},
-        {"flag": "--uid", "help": "One or more IMAP UIDs to delete (space-separated)", "placeholder": "123 456"},
+        {
+            "flag": "--field",
+            "help": "Field to search: subject, from, or text",
+            "placeholder": "text",
+        },
+        {
+            "flag": "--uid",
+            "help": "One or more IMAP UIDs to delete (space-separated)",
+            "placeholder": "123 456",
+        },
         {"flag": "--json", "help": "Output as JSON"},
-    ]
+    ],
 }
 
 
 _MEMORY_FILE_LABELS = {
-    "state.json":                 ("Agent State", "Core agent status, cycle number, last heartbeat"),
-    "goal.json":                  ("Goals", "Pending / completed goals from user"),
-    "journal.json":               ("Journal (active)", "Recent cycle journal entries"),
-    "journal-archive.json":       ("Journal (archive)", "Archived older journal entries"),
-    "cycles.json":                ("Cycles", "Complete cycle history with durations"),
-    "outbox.json":                ("Outbox", "Pending messages for the user"),
-    "outbox_history.json":        ("Outbox History", "All past agent→user messages"),
-    "server_errors.json":         ("Tab Errors", "Portal tab crash errors"),
-    "bootstrap.json":             ("Bootstrap Config", "First-cycle initialization data (stable)"),
-    "command_history.json":       ("Command History", "Agent Console command history"),
-    "link_cache.json":            ("Link Cache", "URL health check cache (link-checker.py)"),
+    "state.json": ("Agent State", "Core agent status, cycle number, last heartbeat"),
+    "goal.json": ("Goals", "Pending / completed goals from user"),
+    "journal.json": ("Journal (active)", "Recent cycle journal entries"),
+    "journal_archive.json": ("Journal (archive)", "Archived older journal entries"),
+    "cycles.json": ("Cycles", "Complete cycle history with durations"),
+    "outbox.json": ("Outbox", "Pending messages for the user"),
+    "server_errors.json": ("Tab Errors", "Portal tab crash errors"),
+    "bootstrap.json": ("Bootstrap Config", "First-cycle initialization data (stable)"),
+    "link_cache.json": ("Link Cache", "URL health check cache (link-checker.py)"),
 }
 
-_MEMORY_SIZE_WARN_KB = 500   # warn if file exceeds this
-_MEMORY_SIZE_CRIT_KB = 2000  # critical if file exceeds this
-_MEMORY_AGE_WARN_HOURS = 24  # warn if file not updated in this many hours
-_MEMORY_AGE_CRIT_HOURS = 72  # critical if not updated in this many hours
-
-# Files that are intentionally infrequently updated — skip age checks for these
-_MEMORY_AGE_EXEMPT = {
-    "bootstrap.json", "link_cache.json",
-    "command_history.json", "outbox_history.json",
-}
+# Size/age thresholds and the age-exempt list now live in scripts/metrics_db.py,
+# which grades every memory file at collection time (MEMORY_SIZE_WARN_KB etc.).
 
 
-def _count_json_entries(path: str) -> str:
-    """Return a human-readable entry count for a JSON file (list len or dict key count)."""
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            data = json.load(f)
-        if isinstance(data, list):
-            return f"{len(data)} entries"
-        if isinstance(data, dict):
-            # For state.json and similar, key count isn't useful; skip
-            if len(data) <= 5:
-                return f"{len(data)} keys"
-            return f"{len(data)} keys"
-    except Exception:
-        return "parse err"
-    return "?"
+def _format_tokens(n) -> str:
+    """Compact token count: 812, 44.1K, 4.63M."""
+    n = n or 0
+    if n < 1000:
+        return str(int(n))
+    if n < 1_000_000:
+        return f"{n / 1000:.1f}K"
+    return f"{n / 1_000_000:.2f}M"
+
+
+def _render_collector_health():
+    """Collector freshness and per-handler state.
+
+    Without this, a handler that fails to import, is rejected for a table
+    clash, or raises is invisible: its tables are simply empty, and a panel
+    renders "0" as a fact.
+    """
+    from app.data.metrics import built_at, load_handler_status
+    from app.shared import parse_dt
+
+    stamp = built_at()
+    handlers = load_handler_status()
+    if not stamp and not handlers:
+        st.warning(
+            "Metrics store unavailable — run `uv run python scripts/metrics_db.py "
+            "--rebuild`, or check that the `metrics_daemon` service is running."
+        )
+        return
+
+    failed = [h for h in handlers if not h.get("ok")]
+    for handler in failed:
+        st.warning(
+            f"Metrics handler `{handler.get('name')}` failed: {handler.get('error')}"
+        )
+
+    if stamp:
+        collected = ", ".join(
+            f"{h['name']} ({h.get('state') or '?'})" for h in handlers
+        )
+        age = ""
+        parsed = parse_dt(stamp)
+        if parsed is not None:
+            minutes = int((datetime.now(timezone.utc) - parsed).total_seconds() // 60)
+            # The daemon polls every 5 minutes; well past that means it is down.
+            age = f" ({minutes}m ago)" if minutes >= 0 else ""
+            if minutes > 30:
+                st.warning(
+                    f"Metrics store last built {minutes}m ago — the "
+                    "`metrics_daemon` service may not be running."
+                )
+        st.caption(
+            f"Metrics collected {stamp[:16].replace('T', ' ')} UTC{age}"
+            + (f" · handlers: {collected}" if collected else " · no handlers")
+        )
+
+
+def _render_token_usage():
+    """Token usage parsed from cycle transcripts by services/metrics/usage.py."""
+    from app.data.metrics import (
+        load_handler_status,
+        load_usage_daily,
+        load_usage_totals,
+    )
+
+    st.subheader("Token Usage")
+
+    # Only this panel's handler; every other handler is covered by the
+    # collector-health strip above.
+    for handler in load_handler_status():
+        if handler.get("name") == "usage" and not handler.get("ok"):
+            st.warning(f"Usage metrics handler failed: {handler.get('error')}")
+
+    totals = load_usage_totals()
+    if not totals["available"] or not totals["transcripts"]:
+        st.caption(
+            "No usage data yet — the `usage` handler collects it from "
+            "`/agent/memory/transcripts/` on the next metrics build."
+        )
+        return
+
+    if totals.get("pending"):
+        st.info(
+            f"Backfilling — {totals['pending']} transcript(s) still to read. "
+            "The numbers below cover what has been processed so far and will "
+            "fill in over the next few collector runs."
+        )
+
+    models = ", ".join(html.escape(m) for m in totals["models"])
+    collected = totals.get("collected_at") or ""
+    st.caption(
+        f"Deduplicated API responses across the last {totals['transcripts']} cycle "
+        f"transcript(s){' · ' + models if models else ''}"
+        # The handler collects on its own interval, not the daemon's, so say
+        # when these numbers were last measured.
+        + (f" · collected {collected[:16].replace('T', ' ')} UTC" if collected else "")
+    )
+
+    u1, u2, u3, u4 = st.columns(4)
+    with u1:
+        st.metric("Total Tokens", _format_tokens(totals["total_tokens"]))
+        st.caption(f"{totals['requests']} requests")
+    with u2:
+        st.metric("Output", _format_tokens(totals["output_tokens"]))
+    with u3:
+        st.metric("Cache Read", _format_tokens(totals["cache_read_input_tokens"]))
+        st.caption("billed at a discount")
+    with u4:
+        st.metric("Cache Write", _format_tokens(totals["cache_creation_input_tokens"]))
+        st.caption(f"input {_format_tokens(totals['input_tokens'])}")
+
+    daily = load_usage_daily(limit=14)
+    if not daily:
+        return
+
+    # Per-day bars, newest last so the chart reads left-to-right in time.
+    rows = list(reversed(daily))
+    max_total = max((r["total_tokens"] or 0) for r in rows) or 1
+    bar_w, gap, svg_h = 22, 4, 60
+    svg_w = len(rows) * (bar_w + gap) + 20
+    parts = [
+        f'<svg width="{svg_w}" height="{svg_h + 18}" xmlns="http://www.w3.org/2000/svg">'
+    ]
+    for i, r in enumerate(rows):
+        total = r["total_tokens"] or 0
+        x = 10 + i * (bar_w + gap)
+        bar_h = max(3, int(total / max_total * 46))
+        y = svg_h - bar_h
+        # `day` comes from a transcript timestamp — escape before it goes into
+        # markup rendered with unsafe_allow_html.
+        day = html.escape(str(r["day"] or ""))
+        parts.append(
+            f'<rect x="{x}" y="{y}" width="{bar_w}" height="{bar_h}" '
+            f'fill="#9C27B0" rx="2" opacity="0.8">'
+            f"<title>{day}: {_format_tokens(total)} tokens over "
+            f'{int(r["requests"] or 0)} request(s) in '
+            f'{int(r["cycles"] or 0)} cycle(s)</title></rect>'
+        )
+        parts.append(
+            f'<text x="{x + bar_w // 2}" y="{svg_h + 12}" text-anchor="middle" '
+            f'font-size="8" fill="#888">{day[5:]}</text>'
+        )
+    parts.append("</svg>")
+    st.markdown(
+        f'<div style="overflow-x:auto;padding:4px 0">{"".join(parts)}</div>'
+        f'<div><small style="color:#888">Total tokens per day — '
+        f"last {len(rows)} day(s) with activity</small></div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _format_age(age_hours: float) -> str:
+    """Human-readable 'time since last write' for a memory file."""
+    if age_hours < 1:
+        return f"{int(age_hours * 60)}m ago"
+    if age_hours < 24:
+        return f"{age_hours:.1f}h ago"
+    return f"{age_hours / 24:.1f}d ago"
 
 
 def _render_memory_files_health():
-    """Render a compact health table for all JSON files in /agent/memory/."""
-    memory_dir = "/agent/memory"
-    now_utc = datetime.now(timezone.utc)
+    """Render a compact health table for all JSON files in /agent/memory/.
 
-    try:
-        all_files = sorted(
-            f for f in os.listdir(memory_dir)
-            if f.endswith(".json") and not f.endswith(".backup")
+    Sizes, ages, entry counts, and the ok/warn/crit classification are all
+    pre-computed by scripts/metrics_db.py — deriving them here meant an
+    os.listdir + os.stat + full json.load for every file on every render.
+    """
+    from app.data.metrics import load_memory_file_health
+
+    health_data = load_memory_file_health()
+    rows = health_data["rows"]
+
+    if not health_data["available"]:
+        st.warning(
+            "Metrics store unavailable — memory-file health cannot be shown. "
+            "Run `uv run python scripts/metrics_db.py --rebuild`, or check that "
+            "the `metrics_daemon` service is running."
         )
-    except OSError:
-        st.error("Could not read /agent/memory/ directory.")
         return
 
-    if not all_files:
+    if not rows:
         st.caption("No JSON files found in /agent/memory/.")
         return
 
-    # Collect stats
-    rows = []
-    total_kb = 0.0
-    warn_count = 0
-    crit_count = 0
+    # Presentation-only enrichment: labels, descriptions, and formatted age.
+    for r in rows:
+        label, desc = _MEMORY_FILE_LABELS.get(
+            r["fname"], (r["fname"].replace(".json", ""), "")
+        )
+        r["label"] = label
+        r["desc"] = desc
+        r["age_str"] = _format_age(r["age_hours"])
+        count = r.get("entry_count")
+        r["entry_count"] = (
+            f"{count} {r.get('entry_kind') or 'entries'}"
+            if count is not None
+            else (r.get("entry_kind") or "?")
+        )
 
-    for fname in all_files:
-        fpath = os.path.join(memory_dir, fname)
-        try:
-            stat = os.stat(fpath)
-        except OSError:
-            continue
-
-        size_bytes = stat.st_size
-        size_kb = size_bytes / 1024
-        total_kb += size_kb
-        mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
-        age_hours = (now_utc - mtime).total_seconds() / 3600
-
-        label, desc = _MEMORY_FILE_LABELS.get(fname, (fname.replace(".json", ""), ""))
-        entry_count = _count_json_entries(fpath)
-
-        # Health status — exempt files skip age checks (intentionally infrequent)
-        age_exempt = fname in _MEMORY_AGE_EXEMPT
-        size_crit = size_kb >= _MEMORY_SIZE_CRIT_KB
-        size_warn = size_kb >= _MEMORY_SIZE_WARN_KB
-        age_crit = not age_exempt and age_hours >= _MEMORY_AGE_CRIT_HOURS
-        age_warn = not age_exempt and age_hours >= _MEMORY_AGE_WARN_HOURS
-
-        if size_crit or age_crit:
-            health = "crit"
-            crit_count += 1
-        elif size_warn or age_warn:
-            health = "warn"
-            warn_count += 1
-        else:
-            health = "ok"
-
-        if age_hours < 1:
-            age_str = f"{int(age_hours * 60)}m ago"
-        elif age_hours < 24:
-            age_str = f"{age_hours:.1f}h ago"
-        else:
-            age_str = f"{age_hours / 24:.1f}d ago"
-
-        rows.append({
-            "fname": fname,
-            "label": label,
-            "desc": desc,
-            "size_kb": size_kb,
-            "entry_count": entry_count,
-            "age_str": age_str,
-            "age_hours": age_hours,
-            "age_exempt": age_exempt,
-            "health": health,
-            "size_warn": size_warn or size_crit,
-            "age_warn": age_warn or age_crit,
-        })
+    total_kb = health_data["total_kb"]
+    warn_count = health_data["warn"]
+    crit_count = health_data["crit"]
+    ok_count = health_data["ok"]
 
     # Summary strip
-    ok_count = len(rows) - warn_count - crit_count
     ms1, ms2, ms3, ms4 = st.columns(4)
     with ms1:
         st.metric("Memory Files", len(rows))
@@ -372,34 +584,33 @@ def _render_memory_files_health():
         else:
             st.metric("Issues", "None ✓")
 
-    # File table using HTML for compact display
+    # Sizes and ages are frozen at collection time — surface when that was, so a
+    # stopped collector is visible rather than silently showing stale ages.
+    if health_data.get("built_at"):
+        st.caption(f"Collected {health_data['built_at'][:16].replace('T', ' ')} UTC")
+
+    # File table using HTML for compact display. The collector grades size and
+    # age independently, so the thresholds live in one place only.
     health_icons = {"ok": "🟢", "warn": "🟡", "crit": "🔴"}
+    health_colors = {"ok": "#888", "warn": "#ff9800", "crit": "#f44336"}
 
     rows_html = []
     for r in rows:
-        icon = health_icons[r["health"]]
+        icon = health_icons.get(r["health"], "🟢")
         size_str = f"{r['size_kb']:.1f} KB"
-        size_color = (
-            "#f44336" if r["size_kb"] >= _MEMORY_SIZE_CRIT_KB
-            else "#ff9800" if r["size_kb"] >= _MEMORY_SIZE_WARN_KB
-            else "#888"
-        )
-        age_color = (
-            "#f44336" if r["age_hours"] >= _MEMORY_AGE_CRIT_HOURS
-            else "#ff9800" if r["age_hours"] >= _MEMORY_AGE_WARN_HOURS
-            else "#888"
-        )
+        size_color = health_colors.get(r["size_health"], "#888")
+        age_color = health_colors.get(r["age_health"], "#888")
         rows_html.append(
-            f'<tr>'
+            f"<tr>"
             f'<td style="padding:3px 8px;font-size:12px">{icon}</td>'
             f'<td style="padding:3px 8px;font-size:12px;font-weight:600;white-space:nowrap">'
             f'<code style="background:#1a1a1a;padding:1px 4px;border-radius:3px">{r["fname"]}</code>'
-            f'</td>'
+            f"</td>"
             f'<td style="padding:3px 8px;font-size:11px;color:#aaa">{r["label"]}</td>'
             f'<td style="padding:3px 8px;font-size:11px;color:{size_color};text-align:right">{size_str}</td>'
             f'<td style="padding:3px 8px;font-size:11px;color:#888;text-align:right">{r["entry_count"]}</td>'
             f'<td style="padding:3px 8px;font-size:11px;color:{age_color};text-align:right;white-space:nowrap">{r["age_str"]}</td>'
-            f'</tr>'
+            f"</tr>"
         )
 
     st.markdown(
@@ -412,10 +623,10 @@ def _render_memory_files_health():
         f'<th style="padding:4px 8px;font-size:11px;color:#666;text-align:right">Size</th>'
         f'<th style="padding:4px 8px;font-size:11px;color:#666;text-align:right">Entries</th>'
         f'<th style="padding:4px 8px;font-size:11px;color:#666;text-align:right">Updated</th>'
-        f'</tr></thead>'
+        f"</tr></thead>"
         f'<tbody>{"".join(rows_html)}</tbody>'
-        f'</table>'
-        f'</div>',
+        f"</table>"
+        f"</div>",
         unsafe_allow_html=True,
     )
 
@@ -424,11 +635,11 @@ def _render_memory_files_health():
     if issues:
         st.markdown("")
         for r in issues:
-            icon = health_icons[r["health"]]
+            icon = health_icons.get(r["health"], "🟡")
             reasons = []
-            if r["size_warn"]:
+            if r["size_health"] != "ok":
                 reasons.append(f"large ({r['size_kb']:.0f} KB)")
-            if r["age_warn"]:
+            if r["age_health"] != "ok":
                 reasons.append(f"stale ({r['age_str']})")
             msg = f"{icon} **{r['fname']}** — {', '.join(reasons)}."
             if r["desc"]:
@@ -438,9 +649,14 @@ def _render_memory_files_health():
 
 def render():
     from app.data import (
-        load_system_info, load_errors, load_validate,
-        load_scripts, run_script, load_cycle_logs,
+        load_system_info,
+        load_errors,
+        load_validate,
+        load_scripts,
+        run_script,
+        load_cycle_logs,
     )
+    from app.data.metrics import load_workspace_mb
     from app.shared import ERROR_LOG_PATH, _write_json_atomic
 
     # ── System health ─────────────────────────────────────────
@@ -453,7 +669,9 @@ def render():
         mem = info.get("memory")
         if mem:
             pct = mem.get("percent", 0)
-            st.metric("Memory", f"{mem.get('used_mb', 0)} MB / {mem.get('total_mb', 0)} MB")
+            st.metric(
+                "Memory", f"{mem.get('used_mb', 0)} MB / {mem.get('total_mb', 0)} MB"
+            )
             st.progress(min(pct / 100, 1.0), text=f"{pct}% used")
         else:
             st.caption("Memory: N/A")
@@ -462,7 +680,9 @@ def render():
         disk = info.get("disk")
         if disk:
             pct = disk.get("percent", 0)
-            st.metric("Disk", f"{disk.get('used_gb', 0)} GB / {disk.get('total_gb', 0)} GB")
+            st.metric(
+                "Disk", f"{disk.get('used_gb', 0)} GB / {disk.get('total_gb', 0)} GB"
+            )
             st.progress(min(pct / 100, 1.0), text=f"{pct}% used")
         else:
             st.caption("Disk: N/A")
@@ -475,9 +695,19 @@ def render():
             st.caption(f"5m: {load_avg.get('5m')} | 15m: {load_avg.get('15m')}")
         if uptime:
             st.metric("Uptime", uptime.get("human", "—"))
-        ws_mb = info.get("workspace_mb")
+        # Pre-computed: deriving this walked every file under /agent/workspace
+        # (a directory that grows toward its 1 GB limit) on the render path.
+        ws_mb = load_workspace_mb()
         if ws_mb is not None:
             st.metric("Workspace", f"{ws_mb} MB")
+
+    st.divider()
+
+    # ── Metrics collector health ──────────────────────────────
+    _render_collector_health()
+
+    # ── Token usage ───────────────────────────────────────────
+    _render_token_usage()
 
     st.divider()
 
@@ -488,10 +718,14 @@ def render():
             st.caption("No scripts found in /agent/scripts/")
         else:
             script_names = [s["name"] for s in scripts]
-            selected_script = st.selectbox("Script", script_names, key="run_script_select")
+            selected_script = st.selectbox(
+                "Script", script_names, key="run_script_select"
+            )
 
             # Show script description
-            script_info = next((s for s in scripts if s["name"] == selected_script), None)
+            script_info = next(
+                (s for s in scripts if s["name"] == selected_script), None
+            )
             if script_info and script_info.get("description"):
                 st.caption(script_info["description"])
 
@@ -581,6 +815,7 @@ def render():
     else:
         # Separate resolved (old) from recent errors (last 24h)
         from datetime import timedelta
+
         now_utc = datetime.now(timezone.utc)
         recent, older = [], []
         for err in errors:
@@ -604,7 +839,7 @@ def render():
             st.download_button(
                 "Download all errors (JSON)",
                 data=json.dumps(errors, indent=2, default=str),
-                file_name="portal_errors.json",
+                file_name="server_errors.json",
                 mime="application/json",
             )
         with col_clr:
@@ -737,7 +972,9 @@ def render():
         st.caption(f"{total_logs} cycle logs · {total_kb:.0f} KB total")
 
         # Selector: choose a cycle to view
-        cycle_options = [f"Cycle {c['cycle']} ({c['size'] // 1024 or 1} KB)" for c in cycle_logs]
+        cycle_options = [
+            f"Cycle {c['cycle']} ({c['size'] // 1024 or 1} KB)" for c in cycle_logs
+        ]
         selected_idx = st.selectbox(
             "Select cycle to view",
             range(len(cycle_options)),
@@ -764,4 +1001,3 @@ def render():
             key=f"dl_cycle_log_{selected['cycle']}",
         )
         st.code(log_content, language="markdown")
-

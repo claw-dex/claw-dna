@@ -4,6 +4,8 @@ fileWatcherType = "poll"
 port = 8081
 address = "0.0.0.0"
 headless = true
+maxUploadSize = 4096
+maxMessageSize = 4096
 
 [browser]
 gatherUsageStats = false

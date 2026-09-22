@@ -4,7 +4,22 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="refresh" content="10">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate, max-age=0">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
   <title>First Run Setup — Autonomous AI Agent</title>
+  <script>
+    (function () {
+      if (!window.location.search.includes('_=')) {
+        var sep = window.location.search ? '&' : '?';
+        window.history.replaceState(null, '', window.location.pathname + window.location.search + sep + '_=' + Date.now() + window.location.hash);
+      }
+      setTimeout(function () {
+        var url = window.location.pathname + '?_=' + Date.now() + window.location.hash;
+        window.location.replace(url);
+      }, 10000);
+    })();
+  </script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -140,7 +155,7 @@
         you need to authenticate the AI coding agent. Run the following command
         in your terminal and complete the login flow:
       </p>
-      <div class="code-block">docker exec -it myagent claude</div>
+      <div class="code-block">docker exec -it __CONTAINER_NAME__ claude</div>
       <div class="info-label">ℹ NEXT STEPS</div>
       <p class="info-text">
         Once authentication is complete, this page will automatically redirect

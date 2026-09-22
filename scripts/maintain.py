@@ -29,13 +29,17 @@ MEMORY_DIR = Path("/agent/memory")
 WORKSPACE_DIR = Path("/agent/workspace")
 SCRIPTS_DIR = Path("/agent/scripts")
 JOURNAL_PATH = MEMORY_DIR / "journal.json"
-JOURNAL_ARCHIVE = MEMORY_DIR / "journal-archive.json"
+JOURNAL_ARCHIVE = MEMORY_DIR / "journal_archive.json"
+CYCLES_PATH = MEMORY_DIR / "cycles.json"
+CYCLES_ARCHIVE = MEMORY_DIR / "cycles_archive.json"
 LOGS_DIR = MEMORY_DIR / "logs"
 
 # Thresholds
 JOURNAL_KEEP_ENTRIES = 20
+CYCLES_KEEP_ENTRIES = 100
 LOG_KEEP_CYCLES = 50
 JOURNAL_SIZE_WARN_KB = 30
+CYCLES_SIZE_WARN_KB = 100
 MEMORY_SIZE_WARN_KB = 100
 HEARTBEAT_STALE_MINUTES = 15
 
@@ -44,7 +48,7 @@ def check_memory_integrity():
     """Validate all memory JSON files."""
     results = []
     json_files = {
-        "state.json": {"required": ["cycle_number", "status", "last_heartbeat"]},
+        "state.json": {"required": ["cycle_number", "agent_status", "last_heartbeat"]},
         "cycles.json": {"required": None},  # array
         "goal.json": {"required": None},  # array
     }
@@ -59,11 +63,19 @@ def check_memory_integrity():
             if spec["required"] and isinstance(data, dict):
                 missing = [k for k in spec["required"] if k not in data]
                 if missing:
-                    results.append({"file": fname, "status": "warning", "msg": f"missing keys: {missing}"})
+                    results.append(
+                        {
+                            "file": fname,
+                            "status": "warning",
+                            "msg": f"missing keys: {missing}",
+                        }
+                    )
                     continue
             results.append({"file": fname, "status": "ok", "msg": "valid"})
         except json.JSONDecodeError as e:
-            results.append({"file": fname, "status": "error", "msg": f"invalid JSON: {e}"})
+            results.append(
+                {"file": fname, "status": "error", "msg": f"invalid JSON: {e}"}
+            )
 
     # Check journal exists
     if JOURNAL_PATH.exists():
@@ -78,11 +90,13 @@ def check_memory_integrity():
         if cycles:
             max_cycle = max(c["cycle"] for c in cycles)
             if state.get("cycle_number") != max_cycle:
-                results.append({
-                    "file": "cross-check",
-                    "status": "warning",
-                    "msg": f"state.cycle_number={state.get('cycle_number')} != max(cycles)={max_cycle}",
-                })
+                results.append(
+                    {
+                        "file": "cross-check",
+                        "status": "warning",
+                        "msg": f"state.cycle_number={state.get('cycle_number')} != max(cycles)={max_cycle}",
+                    }
+                )
     except Exception:
         pass
 
@@ -94,11 +108,13 @@ def check_memory_integrity():
             hb_dt = datetime.fromisoformat(hb)
             age_min = (datetime.now(timezone.utc) - hb_dt).total_seconds() / 60
             if age_min > HEARTBEAT_STALE_MINUTES:
-                results.append({
-                    "file": "heartbeat",
-                    "status": "warning",
-                    "msg": f"stale: {age_min:.0f}m ago (threshold: {HEARTBEAT_STALE_MINUTES}m)",
-                })
+                results.append(
+                    {
+                        "file": "heartbeat",
+                        "status": "warning",
+                        "msg": f"stale: {age_min:.0f}m ago (threshold: {HEARTBEAT_STALE_MINUTES}m)",
+                    }
+                )
     except Exception:
         pass
 
@@ -108,16 +124,25 @@ def check_memory_integrity():
 def check_journal_size():
     """Check if journal needs archival."""
     if not JOURNAL_PATH.exists():
-        return {"name": "journal_size", "results": [{"status": "error", "msg": "journal.json missing"}]}
+        return {
+            "name": "journal_size",
+            "results": [{"status": "error", "msg": "journal.json missing"}],
+        }
 
     try:
         content = JOURNAL_PATH.read_text()
         data = json.loads(content)
     except (json.JSONDecodeError, OSError) as e:
-        return {"name": "journal_size", "results": [{"status": "error", "msg": f"invalid JSON: {e}"}]}
+        return {
+            "name": "journal_size",
+            "results": [{"status": "error", "msg": f"invalid JSON: {e}"}],
+        }
 
     if not isinstance(data, list):
-        return {"name": "journal_size", "results": [{"status": "error", "msg": "journal.json is not a list"}]}
+        return {
+            "name": "journal_size",
+            "results": [{"status": "error", "msg": "journal.json is not a list"}],
+        }
 
     size_kb = len(content.encode()) / 1024
     entry_count = len(data)
@@ -126,37 +151,104 @@ def check_journal_size():
     results.append({"status": "info", "msg": f"{size_kb:.1f}KB, {entry_count} entries"})
 
     if entry_count > JOURNAL_KEEP_ENTRIES + 5:
-        results.append({
-            "status": "action",
-            "msg": f"{entry_count - JOURNAL_KEEP_ENTRIES} entries can be archived (keeping {JOURNAL_KEEP_ENTRIES})",
-            "fix": "journal_archive",
-        })
+        results.append(
+            {
+                "status": "action",
+                "msg": f"{entry_count - JOURNAL_KEEP_ENTRIES} entries can be archived (keeping {JOURNAL_KEEP_ENTRIES})",
+                "fix": "journal_archive",
+            }
+        )
     elif size_kb > JOURNAL_SIZE_WARN_KB:
-        results.append({"status": "warning", "msg": f"journal is {size_kb:.0f}KB (threshold: {JOURNAL_SIZE_WARN_KB}KB)"})
+        results.append(
+            {
+                "status": "warning",
+                "msg": f"journal is {size_kb:.0f}KB (threshold: {JOURNAL_SIZE_WARN_KB}KB)",
+            }
+        )
     else:
         results.append({"status": "ok", "msg": "size within limits"})
 
     return {"name": "journal_size", "results": results}
 
 
+def check_cycles_size():
+    """Check if cycles.json needs archival."""
+    if not CYCLES_PATH.exists():
+        return {
+            "name": "cycles_size",
+            "results": [{"status": "error", "msg": "cycles.json missing"}],
+        }
+
+    try:
+        content = CYCLES_PATH.read_text()
+        data = json.loads(content)
+    except (json.JSONDecodeError, OSError) as e:
+        return {
+            "name": "cycles_size",
+            "results": [{"status": "error", "msg": f"invalid JSON: {e}"}],
+        }
+
+    if not isinstance(data, list):
+        return {
+            "name": "cycles_size",
+            "results": [{"status": "error", "msg": "cycles.json is not a list"}],
+        }
+
+    size_kb = len(content.encode()) / 1024
+    entry_count = len(data)
+
+    results = []
+    results.append({"status": "info", "msg": f"{size_kb:.1f}KB, {entry_count} entries"})
+
+    if entry_count > CYCLES_KEEP_ENTRIES + 20:
+        results.append(
+            {
+                "status": "action",
+                "msg": f"{entry_count - CYCLES_KEEP_ENTRIES} entries can be archived (keeping {CYCLES_KEEP_ENTRIES})",
+                "fix": "cycles_archive",
+            }
+        )
+    elif size_kb > CYCLES_SIZE_WARN_KB:
+        results.append(
+            {
+                "status": "warning",
+                "msg": f"cycles.json is {size_kb:.0f}KB (threshold: {CYCLES_SIZE_WARN_KB}KB)",
+            }
+        )
+    else:
+        results.append({"status": "ok", "msg": "size within limits"})
+
+    return {"name": "cycles_size", "results": results}
+
+
 def check_log_files():
     """Check bash log files for cleanup opportunities."""
     if not LOGS_DIR.exists():
-        return {"name": "log_files", "results": [{"status": "ok", "msg": "no logs directory"}]}
+        return {
+            "name": "log_files",
+            "results": [{"status": "ok", "msg": "no logs directory"}],
+        }
 
     log_files = list(LOGS_DIR.glob("bash-*.json"))
     total_size = sum(f.stat().st_size for f in log_files)
 
     results = []
-    results.append({"status": "info", "msg": f"{len(log_files)} log files, {total_size / 1024:.1f}KB total"})
+    results.append(
+        {
+            "status": "info",
+            "msg": f"{len(log_files)} log files, {total_size / 1024:.1f}KB total",
+        }
+    )
 
     if len(log_files) > LOG_KEEP_CYCLES:
         excess = len(log_files) - LOG_KEEP_CYCLES
-        results.append({
-            "status": "action",
-            "msg": f"{excess} log files can be archived",
-            "fix": "log_cleanup",
-        })
+        results.append(
+            {
+                "status": "action",
+                "msg": f"{excess} log files can be archived",
+                "fix": "log_cleanup",
+            }
+        )
     else:
         results.append({"status": "ok", "msg": "within limits"})
 
@@ -173,12 +265,18 @@ def check_cycle_prompt_logs():
     glob operations in load_cycle_logs().
     """
     if not LOGS_DIR.exists():
-        return {"name": "cycle_prompt_logs", "results": [{"status": "ok", "msg": "no logs directory"}]}
+        return {
+            "name": "cycle_prompt_logs",
+            "results": [{"status": "ok", "msg": "no logs directory"}],
+        }
 
     # Find max cycle number from .log files
     cycle_logs = list(LOGS_DIR.glob("cycle-*.log"))
     if not cycle_logs:
-        return {"name": "cycle_prompt_logs", "results": [{"status": "ok", "msg": "no cycle logs yet"}]}
+        return {
+            "name": "cycle_prompt_logs",
+            "results": [{"status": "ok", "msg": "no cycle logs yet"}],
+        }
 
     max_cycle = 0
     for f in cycle_logs:
@@ -197,14 +295,21 @@ def check_cycle_prompt_logs():
 
     total_size = sum(f.stat().st_size for f in old_files)
     results = []
-    results.append({"status": "info", "msg": f"{len(old_files)} old prompt/system log files, {total_size / 1024:.1f}KB"})
+    results.append(
+        {
+            "status": "info",
+            "msg": f"{len(old_files)} old prompt/system log files, {total_size / 1024:.1f}KB",
+        }
+    )
 
     if old_files:
-        results.append({
-            "status": "action",
-            "msg": f"{len(old_files)} files from cycles <{cutoff} can be deleted (keeping last {LOG_KEEP_CYCLES})",
-            "fix": "cycle_prompt_cleanup",
-        })
+        results.append(
+            {
+                "status": "action",
+                "msg": f"{len(old_files)} files from cycles <{cutoff} can be deleted (keeping last {LOG_KEEP_CYCLES})",
+                "fix": "cycle_prompt_cleanup",
+            }
+        )
     else:
         results.append({"status": "ok", "msg": "within limits"})
 
@@ -217,19 +322,29 @@ def check_stale_processes():
     try:
         out = subprocess.run(
             ["pgrep", "-af", "python3.*server.py"],
-            capture_output=True, text=True, timeout=5
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
-        lines = [l for l in out.stdout.strip().split("\n") if l and "pgrep" not in l and not l.startswith("1 ")]
+        lines = [
+            l
+            for l in out.stdout.strip().split("\n")
+            if l and "pgrep" not in l and not l.startswith("1 ")
+        ]
         if len(lines) > 1:
             pids = [l.split()[0] for l in lines]
-            results.append({
-                "status": "warning",
-                "msg": f"multiple server.py processes: PIDs {pids}",
-                "fix": "kill_stale",
-            })
+            results.append(
+                {
+                    "status": "warning",
+                    "msg": f"multiple server.py processes: PIDs {pids}",
+                    "fix": "kill_stale",
+                }
+            )
         elif len(lines) == 1:
             pid = lines[0].split()[0]
-            results.append({"status": "ok", "msg": f"single server process (PID {pid})"})
+            results.append(
+                {"status": "ok", "msg": f"single server process (PID {pid})"}
+            )
         else:
             results.append({"status": "warning", "msg": "no server.py process found"})
     except Exception as e:
@@ -241,12 +356,15 @@ def check_stale_processes():
 def check_disk_usage():
     """Report disk usage for key directories."""
     results = []
-    for label, path in [("memory", MEMORY_DIR), ("workspace", WORKSPACE_DIR), ("web", Path("/agent/web"))]:
+    for label, path in [
+        ("memory", MEMORY_DIR),
+        ("workspace", WORKSPACE_DIR),
+        ("web", Path("/agent/web")),
+    ]:
         if path.exists():
             try:
                 out = subprocess.run(
-                    ["du", "-sb", str(path)],
-                    capture_output=True, text=True, timeout=5
+                    ["du", "-sb", str(path)], capture_output=True, text=True, timeout=5
                 )
                 size_bytes = int(out.stdout.split()[0])
                 size_mb = size_bytes / (1024 * 1024)
@@ -255,7 +373,9 @@ def check_disk_usage():
                 status = "warning" if size_mb > warn_mb else "ok"
                 results.append({"status": status, "msg": f"{label}: {size_mb:.1f}MB"})
             except Exception:
-                results.append({"status": "error", "msg": f"{label}: could not measure"})
+                results.append(
+                    {"status": "error", "msg": f"{label}: could not measure"}
+                )
 
     return {"name": "disk_usage", "results": results}
 
@@ -264,20 +384,30 @@ def apply_fix(fix_name):
     """Apply a specific fix."""
     if fix_name == "journal_archive":
         try:
-            if "/agent" not in sys.path:
-                sys.path.insert(0, "/agent")
             from scripts.journal_archive import cmd_archive
+
             cmd_archive(keep=JOURNAL_KEEP_ENTRIES)
             return "archived"
         except Exception as e:
             return f"journal_archive failed: {e}"
+
+    elif fix_name == "cycles_archive":
+        try:
+            from scripts.cycles_archive import cmd_archive as cycles_cmd_archive
+
+            cycles_cmd_archive(keep=CYCLES_KEEP_ENTRIES)
+            return "archived"
+        except Exception as e:
+            return f"cycles_archive failed: {e}"
 
     elif fix_name == "log_cleanup":
         script = SCRIPTS_DIR / "log_cleanup.sh"
         if script.exists():
             result = subprocess.run(
                 ["bash", str(script), "--keep", str(LOG_KEEP_CYCLES)],
-                capture_output=True, text=True, timeout=30
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
             return result.stdout.strip() or "cleaned"
         return "log_cleanup.sh not found"
@@ -311,9 +441,15 @@ def apply_fix(fix_name):
     elif fix_name == "kill_stale":
         out = subprocess.run(
             ["pgrep", "-af", "python3.*server.py"],
-            capture_output=True, text=True, timeout=5
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
-        lines = [l for l in out.stdout.strip().split("\n") if l and "pgrep" not in l and not l.startswith("1 ")]
+        lines = [
+            l
+            for l in out.stdout.strip().split("\n")
+            if l and "pgrep" not in l and not l.startswith("1 ")
+        ]
         if len(lines) > 1:
             # Keep the newest PID, kill the rest
             pids = [int(l.split()[0]) for l in lines]
@@ -343,6 +479,7 @@ def main():
     checks = [
         ("memory_integrity", check_memory_integrity),
         ("journal_size", check_journal_size),
+        ("cycles_size", check_cycles_size),
         ("log_files", check_log_files),
         ("cycle_prompt_logs", check_cycle_prompt_logs),
         ("stale_processes", check_stale_processes),
@@ -353,7 +490,9 @@ def main():
         checks = [(n, f) for n, f in checks if n == specific]
         if not checks:
             print(f"Unknown check: {specific}")
-            print(f"Available: memory_integrity, journal_size, log_files, cycle_prompt_logs, stale_processes, disk_usage")
+            print(
+                f"Available: memory_integrity, journal_size, cycles_size, log_files, cycle_prompt_logs, stale_processes, disk_usage"
+            )
             sys.exit(1)
 
     all_results = []
@@ -370,11 +509,21 @@ def main():
                     fixes_applied.append({"fix": r["fix"], "result": fix_result})
 
     if as_json:
-        output = {"checks": all_results, "fixes_applied": fixes_applied, "timestamp": datetime.now(timezone.utc).isoformat()}
+        output = {
+            "checks": all_results,
+            "fixes_applied": fixes_applied,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
         print(json.dumps(output, indent=2))
     else:
         # Human-readable output
-        status_icons = {"ok": "+", "warning": "!", "error": "X", "info": "~", "action": ">"}
+        status_icons = {
+            "ok": "+",
+            "warning": "!",
+            "error": "X",
+            "info": "~",
+            "action": ">",
+        }
         for check in all_results:
             print(f"\n=== {check['name']} ===")
             for r in check.get("results", []):
@@ -391,7 +540,9 @@ def main():
         errors = all_statuses.count("error")
         warnings = all_statuses.count("warning")
         actions = all_statuses.count("action")
-        print(f"\nSummary: {errors} errors, {warnings} warnings, {actions} actions available")
+        print(
+            f"\nSummary: {errors} errors, {warnings} warnings, {actions} actions available"
+        )
         if actions and not do_fix:
             print("Run with --fix to apply available fixes")
 

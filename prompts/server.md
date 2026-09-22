@@ -6,8 +6,11 @@
 
 ```
 User Browser → localhost:8080 (Caddy Gateway)
-                  ├── /          → redirect to /app/
-                  └── /app/*     → localhost:8081 (Streamlit, baseUrlPath=/app/)
+                  ├── /              → /agent/web/index.html (home page)
+                  ├── /web/*         → /agent/web/* (static files from /agent/web/)
+                  ├── /_/*           → /* (file browser)
+                  ├── /webhook/*     → localhost:8082 (webhook receiver)
+                  └── /app/*         → localhost:8081 (Streamlit, baseUrlPath=/app/)
 
 bootstrap.sh (PID 1) — process manager with watchdog
   ├── caddy run (port 8080, admin API on 2019)
@@ -16,7 +19,7 @@ bootstrap.sh (PID 1) — process manager with watchdog
 
 | Service | Port | URL Path | Notes |
 |---------|------|----------|-------|
-| Caddy | 8080 | `/` (redirect), `/app/*` | Gateway, admin API on 2019 |
+| Caddy | 8080 | `/` (home), `/web/*`, `/_/*`, `/app/*` | Gateway, admin API on 2019 |
 | Streamlit | 8081 | `/app/` (via Caddy) | Hot-reload, baseUrlPath=/app/ |
 
 **Caddy admin API:** `http://localhost:2019/config/` (JSON API for dynamic route configuration, internal only)
@@ -46,7 +49,8 @@ app/
   memory_tab.py    — Memory tab (journal, logs, goals, memory files, search)
   system_tab.py    — System tab (health, diagnostics, scripts)
   services_tab.py  — Services & Cron tab (service management, scheduled tasks)
-  overview_tab.py  — Agent Overview tab (activity, goal stats, evolution balance)
+  overview_tab.py  — Overview tab (activity, goal stats, evolution balance)
+  agents_tab.py    — Agents tab (per-agent chat history, inbox, config, send-message + clear-chat/clear-session)
   workspace_tab.py — Workspace tab (file upload, Caddy file browser)
   credential_tab.py — Credentials tab (KeePass database management)
   emails_tab.py    — Email tab (Google Workspace OAuth setup)
@@ -78,18 +82,21 @@ Two modules render above the tab strip in `server.py` (after the header, before 
 
 ### Tab Registry (TAB_REGISTRY in server.py ~line 20)
 
-8 tabs in 2 groups. Each entry is `(label, module, display_name[, group])`. The 4th `group` element is optional (defaults to `"General"`). With multiple groups, a `st.segmented_control` bar lets users switch groups, with `st.tabs` inside each group.
+9 tabs in 2 groups. Each entry is `(label, module, display_name[, group])`. The 4th `group` element is optional (defaults to `"General"`). With multiple groups, a `st.segmented_control` bar lets users switch groups, with `st.tabs` inside each group.
 
 | Label | Module | Group |
 |-------|--------|-------|
 | Command Center | commands_tab | Agent Console |
 | Memory | memory_tab | Agent Console |
-| System | system_tab | Agent Console |
-| Services & Cron | services_tab | Agent Console |
-| Agent Overview | overview_tab | Agent Console |
+| Overview | overview_tab | Agent Console |
+| Agents | agents_tab | Agent Console |
 | Workspace | workspace_tab | Core |
 | Credentials | credential_tab | Core |
 | Email | emails_tab | Core |
+| System | system_tab | Core |
+| Services & Cron | services_tab | Core |
+
+The **Agents** tab surfaces every entry in `memory/agents.json` (internal + external). Per-agent it shows: chat history (or for external agents, a synthesized inbox+outbox transcript), live + archived inbox traffic, raw config, and operator actions (send-message, clear-chat, clear-session). All actions go through `services.shared.set_agent_control_flag` / `write_to_inbox`, the same code paths as `scripts/interact_with_agent.py`.
 
 ### Header Metrics
 
@@ -97,7 +104,7 @@ Two modules render above the tab strip in `server.py` (after the header, before 
 
 | Metric | Source | Notes |
 |--------|--------|-------|
-| Status | `state.json` → `status` | Color-coded pill (idle=yellow, running=green, healing=red, bootstrapping=blue, awaiting_first_heartbeat=white) |
+| Status | `state.json` → `agent_status` | Color-coded pill (idle=yellow, running=green, healing=red, bootstrapping=blue, awaiting_first_heartbeat=white) |
 | Cycle | `state.json` → `cycle_number` | Current cycle number |
 | Heartbeat | `state.json` → `last_heartbeat` | Freshness icon: green <5m, yellow 5-30m, red >30m |
 | Velocity | `load_cycle_velocity()` | Cycles per hour (rolling last 10 completed) |
@@ -108,6 +115,7 @@ Two modules render above the tab strip in `server.py` (after the header, before 
 ### Auto-Refresh
 
 `streamlit-autorefresh` polls at two rates:
+
 - **1 second** when `st.session_state["chat_streaming"]` is `True` (fast polling during chat)
 - **60 seconds** otherwise (normal idle refresh)
 
@@ -136,9 +144,9 @@ Defined in `app/shared.py`:
 | `MESSAGES_DIR`         | `/agent/messages`                    | Inbox/outbox message queues      |
 | `SCRIPTS_DIR`          | `/agent/scripts`                     | Utility scripts (.py, .sh)       |
 | `GOALS_PATH`           | `/agent/memory/goal.json`            | Persistent goal tracker          |
-| `HISTORY_PATH`         | `/agent/memory/command_history.json` | Command history (last 50)        |
+| `PORTAL_AUDIT_LOG_PATH`| `/agent/memory/logs/portal_commands.log` | Append-only JSONL audit log of portal form submissions |
 | `ERROR_LOG_PATH`       | `/agent/memory/server_errors.json`   | Server error log (last 20)       |
-| `CHAT_HISTORY_PATH`    | `/agent/memory/chat_history.json`    | Chat message history (max 200)   |
+| `CHAT_HISTORY_PATH`    | `/agent/memory/chat/main/chat_history.json` | Portal chat history (max 200) — internal agents use the same `/agent/memory/chat/<name>/` layout |
 | `PORTAL_CONFIG_PATH`   | `/agent/memory/portal_config.json`   | Portal settings (timezone, etc.) |
 | `AGENT_CREDENTIALS_PATH` | `/home/agent/.claude/.credentials.json` | Claude SDK credentials       |
 
@@ -175,8 +183,7 @@ Most data loading uses **mtime-based caching** (re-reads only when the source fi
 | `load_inbox()` | `message.py` | `inbox.json` |
 | `load_outbox()` | `message.py` | `outbox.json` |
 | `load_outbox_history()` | `message.py` | `outbox_history.json` |
-| `load_history()` | `message.py` | `command_history.json` |
-| `load_journal(limit, offset)` | `journal.py` | `journal.json` + `journal-archive.json` (both mtimes) |
+| `load_journal(limit, offset)` | `journal.py` | `journal.json` + `journal_archive.json` (both mtimes) |
 | `load_errors()` | `system.py` | `server_errors.json` |
 | `load_validate()` | `system.py` | 6 memory files + 30s heartbeat bucket |
 | `load_plugins()` | `system.py` | `.claude/settings.json` |
@@ -203,7 +210,7 @@ Most data loading uses **mtime-based caching** (re-reads only when the source fi
 |----------|--------|-----------|
 | `load_cycle_velocity()` | `cycle.py` | `cycles.json` mtime |
 | `load_goal_stats()` | `goal.py` | `goal.json` + `cycles.json` mtimes |
-| `load_activity()` | `cycle.py` | `command_history.json` + `cycles.json` mtimes |
+| `load_activity()` | `cycle.py` | `inbox_history.json` + `cycles.json` mtimes |
 | `load_balance()` | `cycle.py` | `cycles.json` + `journal.json` + `evolution_weights.json` mtimes (hand-rolled `_register_cache`) |
 
 #### Write Actions (`app/data/write.py`)
@@ -213,7 +220,7 @@ All write functions call `_cache_clear_all()` after mutation.
 | Function | Purpose |
 |----------|---------|
 | `save_portal_config(key, value)` | Update a single key in `portal_config.json` (AtomicJSON) |
-| `queue_to_inbox(content, cmd_type, timestamp, priority)` | Append to `inbox.json` + history (AtomicJSON, priority 1-5) |
+| `queue_to_inbox(content, cmd_type, timestamp, priority)` | Append to `inbox.json` + JSONL audit-log line to `logs/portal_commands.log` (AtomicJSON, priority 1-5) |
 | `run_script(script_name, args)` | Execute whitelisted script (30s timeout, 20KB stdout cap) |
 | `write_first_goal(content, timestamp)` | Write first goal to `goal.json` on bootstrap (no-op if exists) |
 | `trigger_bootstrap_heartbeat()` | Fire `heartbeat.sh` in background for bootstrap cycle |
@@ -230,6 +237,7 @@ All write functions call `_cache_clear_all()` after mutation.
 ### Startup Check (`app/shared.py`)
 
 `_startup_check()` runs once via `@st.cache_resource` in server.py:
+
 1. Creates missing critical directories
 2. Creates or repairs critical JSON files (backs up corrupt as `.corrupt`)
 3. Removes stale `.tmp` files older than 30 seconds
@@ -241,6 +249,7 @@ All JSON mutations use `_write_json_atomic()` from `app/shared.py` — writes to
 ### Tab Crash Isolation
 
 `_safe_render(module, tab_name)` in `server.py` wraps every module's `render()` call (including always-visible sections and all tabs) in a try/except so one broken section cannot crash the portal. Errors are:
+
 - Displayed inline (user sees error in that section/tab only)
 - Logged to `server_errors.json` (agent detects on next cycle, last 20 kept)
 - Special case: Streamlit cache LRU eviction KeyErrors are silently retried once
@@ -249,10 +258,9 @@ All JSON mutations use `_write_json_atomic()` from `app/shared.py` — writes to
 
 | File | Default |
 |------|---------|
-| `state.json` | `{cycle_number: 0, status: "idle", current_goal: null, last_cycle_summary: null, created_at: null, last_heartbeat: null, last_cycle_run: null, last_cycle_end: null, services: {}}` |
+| `state.json` | `{cycle_number: 0, agent_status: "idle", current_goal: null, last_cycle_summary: null, last_heartbeat: null, last_cycle_run: null, services: {}}` |
 | `cycles.json` | `[]` |
 | `goal.json` | `[]` |
-| `command_history.json` | `[]` |
 | `server_errors.json` | `[]` |
 | `inbox.json` | `[]` |
 | `outbox.json` | `[]` |
@@ -284,6 +292,7 @@ All data displayed on the portal **must** include a clear indicator label when t
 | Estimated/projected data | **(Estimated)** | "Balance (Estimated)" |
 
 **Rules:**
+
 - The indicator label must appear **inline** with or immediately adjacent to the data display (e.g., in the section header, metric label, or chart title) — not hidden in a tooltip or footnote.
 - Use `st.caption` or parenthetical text in the `st.metric`/`st.header`/`st.subheader` label to show the indicator.
 - When the data source transitions from non-real to real data, the indicator label must be removed automatically.

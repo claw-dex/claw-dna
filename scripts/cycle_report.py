@@ -62,16 +62,31 @@ def main():
             print(f"Unknown argument: {args[i]}")
             sys.exit(1)
 
+    from scripts.repair_memory_files import (
+        migrate_cycles_list,
+        migrate_journal_list,
+        migrate_state_dict,
+    )
+
     state = load_json(MEMORY_DIR / "state.json") or {}
+    migrate_state_dict(state)
     cycles = load_json(MEMORY_DIR / "cycles.json") or []
+    migrate_cycles_list(cycles)
     goals = load_json(MEMORY_DIR / "goal.json") or []
     journal = load_json(MEMORY_DIR / "journal.json") or []
-    failures = {"failures": [e for e in journal if isinstance(e, dict) and e.get("status") == "failed"]}
+    migrate_journal_list(journal)
+    failures = {
+        "failures": [
+            e
+            for e in journal
+            if isinstance(e, dict) and e.get("cycle_status") == "failed"
+        ]
+    }
 
     if last_n:
         cycles = cycles[-last_n:]
 
-    completed = [c for c in cycles if c.get("status") == "completed"]
+    completed = [c for c in cycles if c.get("cycle_status") == "completed"]
     durations = [c["duration_seconds"] for c in completed if c.get("duration_seconds")]
 
     now = datetime.now(timezone.utc)
@@ -82,23 +97,29 @@ def main():
     report = {
         "generated_at": now.isoformat(),
         "current_cycle": state.get("cycle_number", "?"),
-        "agent_status": state.get("status", "?"),
+        "agent_status": state.get("agent_status", "?"),
         "session_duration": format_duration(session_elapsed),
         "total_cycles": len(cycles),
         "completed_cycles": len(completed),
-        "avg_cycle_duration": format_duration(sum(durations) / len(durations)) if durations else "N/A",
+        "avg_cycle_duration": (
+            format_duration(sum(durations) / len(durations)) if durations else "N/A"
+        ),
         "min_cycle_duration": format_duration(min(durations)) if durations else "N/A",
         "max_cycle_duration": format_duration(max(durations)) if durations else "N/A",
-        "utilization": f"{(total_active / session_elapsed * 100):.1f}%" if session_elapsed > 0 else "N/A",
+        "utilization": (
+            f"{(total_active / session_elapsed * 100):.1f}%"
+            if session_elapsed > 0
+            else "N/A"
+        ),
         "capabilities_count": 0,
         "tools_count": 0,
         "total_goals": len(goals) if isinstance(goals, list) else 0,
         "failure_count": len(failures.get("failures", [])),
         "cycles": [
             {
-                "num": c.get("cycle"),
-                "summary": (c.get("summary") or c.get("goal") or "?"),
-                "status": c.get("status", "?"),
+                "num": c.get("cycle_number"),
+                "summary": (c.get("summary") or c.get("cycle_goal") or "?"),
+                "status": c.get("cycle_status", "?"),
                 "duration": format_duration(c.get("duration_seconds")),
             }
             for c in cycles
@@ -118,10 +139,18 @@ def main():
     print(f"- **Status:** {report['agent_status']}")
     print(f"- **Session duration:** {report['session_duration']}")
     print(f"- **Utilization:** {report['utilization']}")
-    print(f"- **Cycles:** {report['completed_cycles']} completed / {report['total_cycles']} total")
-    print(f"- **Avg cycle:** {report['avg_cycle_duration']} (min: {report['min_cycle_duration']}, max: {report['max_cycle_duration']})")
-    print(f"- **Capabilities:** {report['capabilities_count']} | Tools: {report['tools_count']}")
-    print(f"- **Goals tracked:** {report['total_goals']} | Failures: {report['failure_count']}")
+    print(
+        f"- **Cycles:** {report['completed_cycles']} completed / {report['total_cycles']} total"
+    )
+    print(
+        f"- **Avg cycle:** {report['avg_cycle_duration']} (min: {report['min_cycle_duration']}, max: {report['max_cycle_duration']})"
+    )
+    print(
+        f"- **Capabilities:** {report['capabilities_count']} | Tools: {report['tools_count']}"
+    )
+    print(
+        f"- **Goals tracked:** {report['total_goals']} | Failures: {report['failure_count']}"
+    )
     print()
     print(f"## Cycle History")
     print(f"| # | Duration | Status | Goal |")

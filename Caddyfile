@@ -11,7 +11,7 @@
 
     # File browser for entire filesystem
     handle /_/* {
-        @blocked_credentials path /home/agent/.config/gws /home/agent/.config/gws/* /home/agent/.keepass /home/agent/.keepass/* /home/agent/.ssh /home/agent/.ssh/*
+        @blocked_credentials path /home/agent/.keepass /home/agent/.keepass/* /home/agent/.ssh /home/agent/.ssh/*
         respond @blocked_credentials 403
 
         root * /
@@ -25,6 +25,12 @@
     handle /webhook/* {
         uri strip_prefix /webhook
         reverse_proxy localhost:8082
+    }
+
+    # External agent API (basic auth applied here, not in the service)
+    handle /external-agent/* {
+        uri strip_prefix /external-agent
+        reverse_proxy localhost:8083
     }
 
     # Home page

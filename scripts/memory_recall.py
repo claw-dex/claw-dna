@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-memory_recall.py — Query long-term semantic memory (memvid CLI).
+memory_recall.py — Query long-term semantic memory (LanceDB).
 
 Searches the agent's long-term memory store for entries matching a
-natural-language question using the `memvid` CLI (hybrid lexical + semantic).
+natural-language question using hybrid retrieval: BM25 full-text search fused
+with bge-small vector similarity (see scripts/memory_store.py).
 
 Usage:
     uv run python scripts/memory_recall.py "What did I work on last week?"
@@ -16,34 +17,28 @@ Required:
     QUESTION          Natural-language query (first positional argument)
 
 Optional:
-    --mv2 PATH        Path to the .mv2 file (default: /agent/memory/long_term_memory.mv2)
+    --db PATH         Path to the LanceDB store (default: /agent/memory/long_term_memory.lancedb)
     --k N             Number of results to return (default: 5)
+    --min-score F     Drop results scoring below F of the top hit, 0..1 (default: 0 = keep all)
     --json            Output as JSON instead of formatted text
     --timeline        Show timeline entries instead of semantic search
     --since DATE      Filter entries since DATE (ISO format or unix timestamp)
     --until DATE      Filter entries until DATE (ISO format or unix timestamp)
 
-Exit codes: 0 = success, 1 = error (missing args, file not found, CLI error)
+Exit codes: 0 = success, 1 = error (missing args, store not found, query error)
 """
 
 import json
-import shutil
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-MEMORY = Path("/agent/memory")
-MV2_PATH = MEMORY / "long_term_memory.mv2"
-MEMVID_BIN = "memvid"
+from scripts import memory_store as store
+from scripts.memory_store import DEFAULT_DB
 
-
-def _check_memvid():
-    """Ensure the memvid CLI is available."""
-    if not shutil.which(MEMVID_BIN):
-        print("ERROR: memvid CLI not found. Install with:", file=sys.stderr)
-        print("  curl -fsSL https://raw.githubusercontent.com/memvid/preflight-installer/main/install.sh | bash", file=sys.stderr)
-        sys.exit(1)
+# Kept as a module-level name so callers and tests can point the library
+# `recall()` helper at a different store.
+DB_PATH = DEFAULT_DB
 
 
 def parse_args(argv):
@@ -51,7 +46,8 @@ def parse_args(argv):
     result = {
         "question": None,
         "k": 5,
-        "mv2": None,
+        "db": None,
+        "min_score": 0.0,
         "json_mode": False,
         "timeline": False,
         "since": None,
@@ -68,11 +64,23 @@ def parse_args(argv):
             try:
                 result["k"] = int(args[i])
             except ValueError:
-                print(f"ERROR: --k must be an integer, got: {args[i]!r}", file=sys.stderr)
+                print(
+                    f"ERROR: --k must be an integer, got: {args[i]!r}", file=sys.stderr
+                )
                 sys.exit(1)
-        elif a == "--mv2" and i + 1 < len(args):
+        elif a == "--min-score" and i + 1 < len(args):
             i += 1
-            result["mv2"] = args[i]
+            try:
+                result["min_score"] = float(args[i])
+            except ValueError:
+                print(
+                    f"ERROR: --min-score must be a number, got: {args[i]!r}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+        elif a == "--db" and i + 1 < len(args):
+            i += 1
+            result["db"] = args[i]
         elif a == "--json":
             result["json_mode"] = True
         elif a == "--timeline":
@@ -89,44 +97,61 @@ def parse_args(argv):
     return result
 
 
-def _run_cmd(cmd):
-    """Run a memvid CLI command, return parsed JSON output."""
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    if result.returncode != 0:
-        print(f"ERROR: {' '.join(cmd[:3])} failed: {result.stderr.strip()}", file=sys.stderr)
-        sys.exit(1)
-    return json.loads(result.stdout)
+def _parse_date_to_unix(value, strict: bool = True):
+    """Convert a date string (ISO format) or integer to a unix timestamp int.
 
-
-def _parse_date_to_unix(value):
-    """Convert a date string (ISO format) or integer to a unix timestamp string.
-
-    Returns the string representation of the unix timestamp, or exits on error.
+    strict=True (CLI): exit on invalid input. strict=False (library): return None.
     """
+    if value is None:
+        return None
     try:
-        return str(int(value))
-    except ValueError:
+        return int(value)
+    except (TypeError, ValueError):
         pass
     try:
-        dt = datetime.fromisoformat(value)
+        dt = datetime.fromisoformat(str(value))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        return str(int(dt.timestamp()))
+        return int(dt.timestamp())
     except ValueError:
-        print(f"ERROR: Invalid date format: {value!r}. Use ISO format (2026-03-25) or unix timestamp.", file=sys.stderr)
-        sys.exit(1)
+        if strict:
+            print(
+                f"ERROR: Invalid date format: {value!r}. Use ISO format (2026-03-25) or unix timestamp.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        return None
 
 
-def _clean_snippet(text):
-    """Strip internal memvid metadata lines from snippet text."""
-    lines = []
-    for line in text.splitlines():
-        if line.startswith(("uri: mv2://", "tags: ", "labels: ",
-                            "category: ", "extractous_metadata:", "memvid.",
-                            "metadata: {")):
-            continue
-        lines.append(line)
-    return "\n".join(lines).strip()
+def _result_to_dict(row: dict, rank: int) -> dict:
+    """Shape a store result into the dict this script prints and returns.
+
+    `snippet` is simply the stored text: LanceDB returns the document column
+    verbatim, so there is no embedded metadata to strip.
+    """
+    return {
+        "rank": rank,
+        "score": row.get("score", 0.0),
+        "title": row.get("title") or "",
+        "snippet": row.get("text") or "",
+        "tags": list(row.get("tags") or []),
+        "id": row.get("id"),
+        "metadata": dict(row.get("metadata") or {}),
+    }
+
+
+def search_store(db_path, query: str, k: int, since=None, until=None, min_score=0.0):
+    """Run hybrid search and return (items, total_hits).
+
+    Raises FileNotFoundError when the store is missing so callers can choose
+    between a hard error (CLI) and an empty list (library).
+    """
+    tbl = store.open_table(db_path)
+    if tbl is None:
+        raise FileNotFoundError(str(db_path))
+    rows = store.search(tbl, query, k=k, since=since, until=until, min_score=min_score)
+    items = [_result_to_dict(r, i) for i, r in enumerate(rows, 1)]
+    return items, len(items)
 
 
 def main():
@@ -137,77 +162,76 @@ def main():
         sys.exit(0)
 
     if not opts["timeline"] and not opts["question"]:
-        print("ERROR: QUESTION is required (first positional argument)", file=sys.stderr)
-        print("Usage: uv run python scripts/memory_recall.py \"your question here\"", file=sys.stderr)
+        print(
+            "ERROR: QUESTION is required (first positional argument)", file=sys.stderr
+        )
+        print(
+            'Usage: uv run python scripts/memory_recall.py "your question here"',
+            file=sys.stderr,
+        )
         sys.exit(1)
 
-    mv2 = Path(opts["mv2"]) if opts["mv2"] else MV2_PATH
-    if not mv2.exists():
-        print(f"ERROR: {mv2} not found. Run at least one cycle-close to create it.", file=sys.stderr)
+    db_path = Path(opts["db"]) if opts["db"] else DB_PATH
+    if not db_path.exists():
+        print(
+            f"ERROR: {db_path} not found. Run at least one cycle-close to create it.",
+            file=sys.stderr,
+        )
         sys.exit(1)
-
-    _check_memvid()
 
     if opts["timeline"]:
-        _run_timeline(opts, mv2)
+        _run_timeline(opts, db_path)
     else:
-        _run_query(opts, mv2)
+        _run_query(opts, db_path)
 
 
-def _run_query(opts, mv2):
-    """Run hybrid search via memvid CLI."""
+def _run_query(opts, db_path):
+    """Run hybrid search against the LanceDB store."""
     question = opts["question"]
     k = opts["k"]
+    since = _parse_date_to_unix(opts.get("since"))
+    until = _parse_date_to_unix(opts.get("until"))
 
-    cmd = [
-        MEMVID_BIN, "find", str(mv2),
-        "--query", question,
-        "--top-k", str(k),
-        "--json",
-    ]
-    if opts.get("since"):
-        cmd.extend(["--since", _parse_date_to_unix(opts["since"])])
-    if opts.get("until"):
-        cmd.extend(["--until", _parse_date_to_unix(opts["until"])])
-    data = _run_cmd(cmd)
-    hits = data.get("hits", [])
-    total = data.get("metadata", {}).get("total_hits", len(hits))
-
-    # Sort by score descending
-    hits.sort(key=lambda h: h.get("score", 0), reverse=True)
+    try:
+        items, total = search_store(
+            db_path,
+            question,
+            k,
+            since=since,
+            until=until,
+            min_score=opts.get("min_score", 0.0),
+        )
+    except Exception as e:
+        print(f"ERROR: memory search failed: {e}", file=sys.stderr)
+        sys.exit(1)
 
     if opts["json_mode"]:
-        items = []
-        for i, h in enumerate(hits, 1):
-            items.append({
-                "rank": i,
-                "score": h.get("score"),
-                "title": h.get("title", ""),
-                "snippet": _clean_snippet(h.get("text", "")),
-                "tags": h.get("metadata", {}).get("tags", []),
-                "frame_id": h.get("frame_id"),
-            })
-        print(json.dumps({
-            "query": question,
-            "k": k,
-            "total_hits": total,
-            "results": items,
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "query": question,
+                    "k": k,
+                    "total_hits": total,
+                    "results": items,
+                },
+                indent=2,
+            )
+        )
     else:
         print(f'[MEMORY RECALL] "{question}" (k={k})\n')
-        if not hits:
+        if not items:
             print("No matching memories found.")
         else:
-            for i, h in enumerate(hits, 1):
-                score = h.get("score", 0)
-                title = h.get("title", "untitled")
-                snippet = _clean_snippet(h.get("text", ""))
-                tags = h.get("metadata", {}).get("tags", [])
+            for item in items:
+                score = item["score"] or 0
+                title = item["title"] or "untitled"
+                snippet = item["snippet"]
+                tags = item["tags"]
 
                 cycle_tag = next((t for t in tags if t.startswith("cycle:")), "")
                 date_tag = next((t for t in tags if t.startswith("date:")), "")
 
-                header = f"── Result {i}/{len(hits)} (score: {score:.4f})"
+                header = f"── Result {item['rank']}/{len(items)} (score: {score:.4f})"
                 if cycle_tag:
                     header += f" | {cycle_tag}"
                 if date_tag:
@@ -221,84 +245,108 @@ def _run_query(opts, mv2):
                     if len(lines) > 4:
                         print(f"    ... ({len(lines) - 4} more lines)")
                 print()
-        print(f"[MEMORY RECALL] {len(hits)} result(s) returned (total matches: {total}).")
+        print(
+            f"[MEMORY RECALL] {len(items)} result(s) returned (total matches: {total})."
+        )
 
 
-def _run_timeline(opts, mv2):
-    """Show timeline entries via memvid CLI."""
+def _timeline_entry(row: dict) -> dict:
+    """Shape a store timeline row for output.
+
+    Unlike semantic search the store returns every column in one scan, so
+    title and tags need no follow-up lookup per entry.
+    """
+    tags = list(row.get("tags") or [])
+    entry = {
+        "id": row.get("id"),
+        "timestamp": row.get("ts"),
+        "date": row.get("date") or "",
+        "title": row.get("title") or "",
+        "label": row.get("label") or "",
+        "source": row.get("source") or "",
+        "tags": tags,
+        "preview": row.get("text") or "",
+    }
+    cycle_tag = next((t for t in tags if t.startswith("cycle:")), "")
+    if cycle_tag:
+        entry["cycle"] = cycle_tag.split(":", 1)[1]
+    return entry
+
+
+def _run_timeline(opts, db_path):
+    """Show timeline entries newest-first."""
     k = opts["k"]
     since = opts["since"]
+    since_unix = _parse_date_to_unix(since)
+    until_unix = _parse_date_to_unix(opts.get("until"))
 
-    cmd = [MEMVID_BIN, "timeline", str(mv2), "--json", "--limit", str(k)]
-    if since:
-        cmd.extend(["--since", _parse_date_to_unix(since)])
-    if opts.get("until"):
-        cmd.extend(["--until", _parse_date_to_unix(opts["until"])])
+    try:
+        tbl = store.open_table(db_path)
+        if tbl is None:
+            raise FileNotFoundError(str(db_path))
+        rows = store.timeline(tbl, limit=k, since=since_unix, until=until_unix)
+    except Exception as e:
+        print(f"ERROR: memory timeline failed: {e}", file=sys.stderr)
+        sys.exit(1)
 
-    items = _run_cmd(cmd)
-    # CLI returns a JSON array for timeline
-    if isinstance(items, dict):
-        items = items.get("entries", [])
+    items = [_timeline_entry(r) for r in rows]
 
     if opts["json_mode"]:
-        print(json.dumps({
-            "mode": "timeline",
-            "count": len(items),
-            "since": since,
-            "entries": items,
-        }, indent=2, default=str))
+        print(
+            json.dumps(
+                {
+                    "mode": "timeline",
+                    "count": len(items),
+                    "since": since,
+                    "entries": items,
+                },
+                indent=2,
+                default=str,
+            )
+        )
     else:
-        print(f"[MEMORY TIMELINE] {len(items)} entries" +
-              (f" (since {since})" if since else ""))
+        print(
+            f"[MEMORY TIMELINE] {len(items)} entries"
+            + (f" (since {since})" if since else "")
+        )
         print()
         for entry in items:
             ts = entry.get("timestamp", "")
-            frame_id = entry.get("frame_id", "?")
-            preview = entry.get("preview", "")[:80]
-            uri = entry.get("uri", "")
-            print(f"  [ts={ts}] Frame {frame_id}: {preview}")
-        print(f"\n[MEMORY TIMELINE] Done.")
+            title = entry.get("title") or "untitled"
+            tags = entry.get("tags") or []
+            cycle_tag = next((t for t in tags if t.startswith("cycle:")), "")
+            date_tag = next((t for t in tags if t.startswith("date:")), "")
+            header = f"  [ts={ts}] {entry.get('label') or 'entry'}"
+            if cycle_tag:
+                header += f" | {cycle_tag}"
+            if date_tag:
+                header += f" | {date_tag}"
+            print(f"{header}")
+            print(f"    {title}")
+            preview = " ".join((entry.get("preview") or "").split())[:160]
+            if preview:
+                print(f"    {preview}")
+        print("\n[MEMORY TIMELINE] Done.")
 
 
 def recall(query: str, k: int = 5, until=None, json_mode: bool = False) -> list:
     """Query long-term memory and return results as a list of dicts.
 
-    Returns a list of result dicts (rank, score, title, snippet, tags, frame_id).
-    Returns empty list on any error (file not found, memvid unavailable, etc.).
-    Does not print or call sys.exit().
+    Returns a list of result dicts (rank, score, title, snippet, tags, id,
+    metadata). Returns an empty list on any error (store not found, backend
+    unavailable, etc.). Does not print or call sys.exit().
+
+    SystemExit is caught alongside Exception on purpose: the store's dependency
+    guards exit rather than raise, and this helper runs inside cycle_start's
+    thread pool, where an escaping SystemExit would abort the whole briefing
+    over a missing optional dependency.
     """
-    if not MV2_PATH.exists():
-        return []
-    if not shutil.which(MEMVID_BIN):
-        return []
-    cmd = [
-        MEMVID_BIN, "find", str(MV2_PATH),
-        "--query", query,
-        "--top-k", str(k),
-        "--json",
-    ]
-    if until:
-        cmd.extend(["--until", _parse_date_to_unix(until)])
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        if result.returncode != 0:
-            return []
-        data = json.loads(result.stdout)
-    except Exception:
+        until_unix = _parse_date_to_unix(until, strict=False)
+        items, _ = search_store(DB_PATH, query, k, until=until_unix)
+        return items
+    except (Exception, SystemExit):
         return []
-    hits = data.get("hits", [])
-    hits.sort(key=lambda h: h.get("score", 0), reverse=True)
-    return [
-        {
-            "rank": i,
-            "score": h.get("score"),
-            "title": h.get("title", ""),
-            "snippet": _clean_snippet(h.get("text", "")),
-            "tags": h.get("metadata", {}).get("tags", []),
-            "frame_id": h.get("frame_id"),
-        }
-        for i, h in enumerate(hits, 1)
-    ]
 
 
 if __name__ == "__main__":

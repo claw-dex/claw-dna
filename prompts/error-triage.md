@@ -12,7 +12,7 @@ If server changes aren't taking effect or you get connection refused:
 bash /agent/scripts/server_restart.sh --verify
 ```
 
-This triggers a Streamlit hot-reload (touches server.py) and verifies health via /_stcore/health.
+This triggers a Streamlit hot-reload (touches `server.py`) and verifies health via /_stcore/health.
 If it doesn't resolve the issue, continue with full triage below.
 
 ## Triage Steps
@@ -20,6 +20,7 @@ If it doesn't resolve the issue, continue with full triage below.
 ### 1. Capture the Error
 
 Before doing anything else, record:
+
 - **What failed:** exact command, URL, or operation
 - **Error message:** full text, not a summary
 - **Context:** what were you doing when it failed? What cycle? What goal?
@@ -49,6 +50,7 @@ Use the utility scripts before manual debugging (all in `/agent/scripts/`):
 ### 3a. Streamlit-Specific Errors
 
 **Tab crash (module import fails):**
+
 ```bash
 # Check which tab is broken:
 cat /agent/memory/server_errors.json
@@ -59,25 +61,28 @@ uv run python scripts/cycle_start.py --clear-old-errors
 ```
 
 **`@st.cache_data` / TTLCache KeyError (banned pattern):**
+
 - Never use `@st.cache_data` in `app/data.py`
 - Most functions now use mtime-based caching (see `prompts/server.md` Data Layer section)
 - For dynamic/computed data, use `@_cache(ttl=N)` from `app/data.py`
 - Write ops must call `_cache_clear_all()`
 
 **Streamlit hot-reload not picking up changes:**
+
 ```bash
 bash /agent/scripts/server_restart.sh --verify
 ```
 
 **New package not found after adding to pyproject.toml:**
+
 ```bash
 uv sync  # must run after editing pyproject.toml
 ```
 
 ### 4. Check Known Issues
 
-- Check auto memory `failures.md` — has this happened before?
-- Check journal for similar symptoms in past cycles
+- Check `/agent/memory/failures.json` — has this happened before?
+- Check `/agent/memory/journal.json` for similar symptoms in past cycles
 
 ### 5. Fix
 
@@ -87,7 +92,8 @@ uv sync  # must run after editing pyproject.toml
 
 ### 6. Record
 
-After fixing, update auto memory `failures.md` with the failure pattern:
+After fixing, update `/agent/memory/failures.json` with the failure pattern:
+
 - Cycle number
 - Symptom: what happened
 - Diagnosis: root cause

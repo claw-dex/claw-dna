@@ -1,6 +1,6 @@
 ---
 name: server-restart
-description: Trigger a Streamlit hot-reload by touching server.py, causing Streamlit's file-watcher to reload the app without a full process restart. Use after editing portal code to apply changes, when the portal is stale or showing old UI, or with --verify to confirm the portal responds after reload.
+description: Trigger the Streamlit portal hot-reload by touching server.py, causing Streamlit's file-watcher to reload the app without a full process restart. Use after editing portal code to apply changes, when the portal is stale or showing old UI, or with --verify to confirm the portal responds after reload.
 ---
 
 # server-restart

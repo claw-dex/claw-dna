@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Archive old journal entries to keep journal.json lean.
 
-Moves entries older than --keep N cycles into journal-archive.json.
+Moves entries older than --keep N cycles into journal_archive.json.
 Keeps the active journal.json small for fast loading by cycle_start.py and the portal.
 
 Usage:
@@ -12,7 +12,7 @@ Usage:
   uv run python scripts/journal_archive.py --search Q  # search active + archive
   uv run python scripts/journal_archive.py --json      # output stats as JSON
 
-Archive: /agent/memory/journal-archive.json (sorted by cycle ascending)
+Archive: /agent/memory/journal_archive.json (sorted by cycle ascending)
 """
 
 import argparse
@@ -23,8 +23,18 @@ from pathlib import Path
 
 MEMORY_DIR = Path("/agent/memory")
 JOURNAL = MEMORY_DIR / "journal.json"
-ARCHIVE = MEMORY_DIR / "journal-archive.json"
+ARCHIVE = MEMORY_DIR / "journal_archive.json"
+LEGACY_ARCHIVE = MEMORY_DIR / "journal-archive.json"
 DEFAULT_KEEP = 20
+
+
+def _migrate_legacy_archive():
+    """One-shot rename of legacy hyphenated archive to underscored name."""
+    try:
+        if LEGACY_ARCHIVE.exists() and not ARCHIVE.exists():
+            LEGACY_ARCHIVE.rename(ARCHIVE)
+    except OSError:
+        pass
 
 
 def _load_json(path, default=None):
@@ -42,6 +52,9 @@ def _write_json_atomic(path, data):
 
 
 def cmd_archive(keep=DEFAULT_KEEP, dry_run=False):
+    from scripts.repair_memory_files import migrate_journal_list
+
+    _migrate_legacy_archive()
     entries = _load_json(JOURNAL, [])
     if not isinstance(entries, list):
         print("journal.json is not a list — aborting", file=sys.stderr)
@@ -50,7 +63,8 @@ def cmd_archive(keep=DEFAULT_KEEP, dry_run=False):
         print("Journal is empty — nothing to archive.")
         return 0
 
-    entries.sort(key=lambda e: e.get("cycle", 0))
+    migrate_journal_list(entries)
+    entries.sort(key=lambda e: e.get("cycle_number", 0))
     total = len(entries)
 
     if total <= keep:
@@ -61,25 +75,31 @@ def cmd_archive(keep=DEFAULT_KEEP, dry_run=False):
     to_keep = entries[total - keep :]
 
     print(f"Journal: {total} entries total")
-    print(f"  Archive: {len(to_archive)} entries  "
-          f"(cycles {to_archive[0].get('cycle')}–{to_archive[-1].get('cycle')})")
-    print(f"  Keep:    {len(to_keep)} entries  "
-          f"(cycles {to_keep[0].get('cycle')}–{to_keep[-1].get('cycle')})")
+    print(
+        f"  Archive: {len(to_archive)} entries  "
+        f"(cycles {to_archive[0].get('cycle_number')}–{to_archive[-1].get('cycle_number')})"
+    )
+    print(
+        f"  Keep:    {len(to_keep)} entries  "
+        f"(cycles {to_keep[0].get('cycle_number')}–{to_keep[-1].get('cycle_number')})"
+    )
 
     if dry_run:
         size_before = JOURNAL.stat().st_size if JOURNAL.exists() else 0
         approx_size_after = int(size_before * len(to_keep) / total)
-        print(f"\n  journal.json size: {size_before // 1024} KB → ~{approx_size_after // 1024} KB")
+        print(
+            f"\n  journal.json size: {size_before // 1024} KB → ~{approx_size_after // 1024} KB"
+        )
         print("\n[DRY RUN] No files were modified.")
         return 0
 
     existing_archive = _load_json(ARCHIVE, [])
     if not isinstance(existing_archive, list):
         existing_archive = []
+    migrate_journal_list(existing_archive)
 
     new_archive = sorted(
-        existing_archive + to_archive,
-        key=lambda e: e.get("cycle", 0)
+        existing_archive + to_archive, key=lambda e: e.get("cycle_number", 0)
     )
 
     _write_json_atomic(ARCHIVE, new_archive)
@@ -87,11 +107,12 @@ def cmd_archive(keep=DEFAULT_KEEP, dry_run=False):
 
     print(f"\n✓ Archived {len(to_archive)} entries → {ARCHIVE}")
     print(f"  journal.json now has {len(to_keep)} entries (was {total})")
-    print(f"  journal-archive.json now has {len(new_archive)} entries total")
+    print(f"  journal_archive.json now has {len(new_archive)} entries total")
     return len(to_archive)
 
 
 def cmd_list():
+    _migrate_legacy_archive()
     active = _load_json(JOURNAL, [])
     archive = _load_json(ARCHIVE, [])
 
@@ -105,9 +126,11 @@ def cmd_list():
     print("-" * 55)
     print(f"{'journal.json':<35} {active_count:>8}  {journal_size // 1024:>7} KB")
     if ARCHIVE.exists():
-        print(f"{'journal-archive.json':<35} {archive_count:>8}  {archive_size // 1024:>7} KB")
+        print(
+            f"{'journal_archive.json':<35} {archive_count:>8}  {archive_size // 1024:>7} KB"
+        )
     else:
-        print(f"{'journal-archive.json':<35} {'—':>8}  {'(not created)':>12}")
+        print(f"{'journal_archive.json':<35} {'—':>8}  {'(not created)':>12}")
     print("-" * 55)
     total = active_count + archive_count
     total_size = journal_size + archive_size
@@ -122,31 +145,37 @@ def cmd_list():
 
 
 def cmd_search(query):
+    from scripts.repair_memory_files import migrate_journal_list
+
+    _migrate_legacy_archive()
     q = query.lower()
     results = []
 
     def matches(entry):
-        text = " ".join([
-            str(entry.get("goal", "")),
-            str(entry.get("summary", "")),
-            str(entry.get("outcome", "")),
-            " ".join(entry.get("actions", [])),
-        ]).lower()
+        text = " ".join(
+            [
+                str(entry.get("cycle_goal", "")),
+                str(entry.get("summary", "")),
+                " ".join(entry.get("actions", [])),
+            ]
+        ).lower()
         return q in text
 
     active = _load_json(JOURNAL, [])
     if isinstance(active, list):
+        migrate_journal_list(active)
         for e in active:
             if matches(e):
                 results.append(("active", e))
 
     archived = _load_json(ARCHIVE, [])
     if isinstance(archived, list):
+        migrate_journal_list(archived)
         for e in archived:
             if matches(e):
                 results.append(("archive", e))
 
-    results.sort(key=lambda r: r[1].get("cycle", 0))
+    results.sort(key=lambda r: r[1].get("cycle_number", 0))
 
     if not results:
         print(f"No results for '{query}' in active journal or archive.")
@@ -155,45 +184,66 @@ def cmd_search(query):
     print(f"Found {len(results)} result(s) for '{query}':\n")
     for source, e in results:
         tag = "[archived]" if source == "archive" else "[active]  "
-        cycle = e.get("cycle", "?")
+        cycle = e.get("cycle_number", "?")
         ts = e.get("timestamp", "")[:10]
-        goal = (e.get("goal", "") or e.get("summary", ""))[:80]
+        goal = (e.get("cycle_goal", "") or e.get("summary", ""))[:80]
         print(f"  {tag}  Cycle {str(cycle):>3}  {ts}  {goal}")
 
 
 def cmd_json(keep=DEFAULT_KEEP):
+    _migrate_legacy_archive()
     active = _load_json(JOURNAL, [])
     archive = _load_json(ARCHIVE, [])
     active_count = len(active) if isinstance(active, list) else 0
     archive_count = len(archive) if isinstance(archive, list) else 0
     journal_size = JOURNAL.stat().st_size if JOURNAL.exists() else 0
     archive_size = ARCHIVE.stat().st_size if ARCHIVE.exists() else 0
-    print(json.dumps({
-        "active_entries": active_count,
-        "archived_entries": archive_count,
-        "total_entries": active_count + archive_count,
-        "journal_size_kb": round(journal_size / 1024, 1),
-        "archive_size_kb": round(archive_size / 1024, 1),
-        "would_archive": max(0, active_count - keep),
-        "keep_setting": keep,
-        "needs_archive": active_count > keep,
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "active_entries": active_count,
+                "archived_entries": archive_count,
+                "total_entries": active_count + archive_count,
+                "journal_size_kb": round(journal_size / 1024, 1),
+                "archive_size_kb": round(archive_size / 1024, 1),
+                "would_archive": max(0, active_count - keep),
+                "keep_setting": keep,
+                "needs_archive": active_count > keep,
+            },
+            indent=2,
+        )
+    )
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="Archive old journal entries to keep journal.json small."
     )
-    parser.add_argument("--keep", type=int, default=DEFAULT_KEEP, metavar="N",
-                        help=f"Keep N most recent entries in journal.json (default: {DEFAULT_KEEP})")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Preview what would be archived without modifying files")
-    parser.add_argument("--list", action="store_true",
-                        help="Show entry counts and file sizes for active journal + archive")
-    parser.add_argument("--search", metavar="QUERY",
-                        help="Search across active journal and archive by keyword")
-    parser.add_argument("--json", action="store_true",
-                        help="Output stats as JSON without archiving")
+    parser.add_argument(
+        "--keep",
+        type=int,
+        default=DEFAULT_KEEP,
+        metavar="N",
+        help=f"Keep N most recent entries in journal.json (default: {DEFAULT_KEEP})",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview what would be archived without modifying files",
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="Show entry counts and file sizes for active journal + archive",
+    )
+    parser.add_argument(
+        "--search",
+        metavar="QUERY",
+        help="Search across active journal and archive by keyword",
+    )
+    parser.add_argument(
+        "--json", action="store_true", help="Output stats as JSON without archiving"
+    )
     args = parser.parse_args()
 
     if args.list:

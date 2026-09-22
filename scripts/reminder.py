@@ -11,6 +11,8 @@ reminders (interval-based or cron-based).
 
 Usage:
     uv run python scripts/reminder.py add --text "Call dentist" --at "2026-03-27T15:00"
+    uv run python scripts/reminder.py add --text "Stretch" --in 30m       # one-shot, 30 min from now
+    uv run python scripts/reminder.py add --text "Tea" --in 2h            # one-shot, 2 hours from now
     uv run python scripts/reminder.py add --text "Stand up" --every 60
     uv run python scripts/reminder.py add --text "Weekly review" --cron "0 9 * * 1"
     uv run python scripts/reminder.py list
@@ -22,6 +24,7 @@ Options for 'add':
     --text TEXT        Reminder message (required)
     --at DATETIME      Fire once at this time (ISO 8601, e.g. 2026-03-27T15:00)
                        Interpreted in agent's configured timezone if no offset given
+    --in DURATION      Fire once N from now. Format: Nm | Nh | Nd (minutes/hours/days)
     --every MINUTES    Fire every N minutes (recurring)
     --cron PATTERN     Fire on cron schedule (min hour dom mon dow)
     --priority N       Priority 1-5 (default 1 = highest)
@@ -29,70 +32,59 @@ Options for 'add':
 Exit codes: 0 = success, 1 = error
 """
 
-import fcntl
 import hashlib
 import json
 import os
 import sys
-import tempfile
-import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
-TASKS_PATH = Path("/agent/memory/scheduled_tasks.json")
-LOCK_PATH = str(TASKS_PATH) + ".lock"
-LOCK_TIMEOUT_SECONDS = 10
+from scheduler import TASKS_PATH, _load_tasks, timed_flock, write_atomic
+
+
+def _parse_duration_to_minutes(value: str) -> int:
+    """Parse '30m' / '2h' / '1d' (or bare integer = minutes) into minutes.
+
+    Raises ValueError on bad input or non-positive durations.
+    """
+    if not value:
+        raise ValueError("empty duration")
+    v = value.strip().lower()
+    if v.endswith("m"):
+        n = int(v[:-1])
+    elif v.endswith("h"):
+        n = int(v[:-1]) * 60
+    elif v.endswith("d"):
+        n = int(v[:-1]) * 1440
+    else:
+        n = int(v)
+    if n <= 0:
+        raise ValueError(f"duration must be positive: {value!r}")
+    return n
+
+
+def _resolve_in_to_isoformat(duration: str) -> str:
+    """Convert a relative duration (e.g. '30m', '2h') to an absolute ISO datetime.
+
+    Anchored to now() in the agent's configured timezone when available, else UTC.
+    """
+    minutes = _parse_duration_to_minutes(duration)
+    try:
+        import zoneinfo
+
+        tz = zoneinfo.ZoneInfo(os.environ.get("TZ", "UTC"))
+    except Exception:
+        tz = timezone.utc
+    return (datetime.now(tz) + timedelta(minutes=minutes)).isoformat()
 
 
 @contextmanager
 def _tasks_lock():
-    """Acquire the same flock scheduler.py uses for scheduled_tasks.json.
-
-    Uses LOCK_NB + busy-wait (safe in multi-threaded callers, unlike SIGALRM).
-    """
-    with open(LOCK_PATH, "a+") as lock_f:
-        try:
-            deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
-            while True:
-                try:
-                    fcntl.flock(lock_f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError:
-                    if time.monotonic() >= deadline:
-                        raise TimeoutError(
-                            f"Could not acquire tasks lock within {LOCK_TIMEOUT_SECONDS}s"
-                        )
-                    time.sleep(0.05)
+    """Acquire the scheduled_tasks.json flock using scheduler's timed_flock."""
+    lock_path = str(TASKS_PATH) + ".lock"
+    with open(lock_path, "a+") as lock_f:
+        with timed_flock(lock_f):
             yield
-        finally:
-            try:
-                fcntl.flock(lock_f, fcntl.LOCK_UN)
-            except (OSError, ValueError):
-                pass
-
-
-def load_tasks() -> list:
-    try:
-        return json.loads(TASKS_PATH.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
-
-
-def save_tasks(tasks: list):
-    tmp_fd, tmp_path = tempfile.mkstemp(dir=str(TASKS_PATH.parent), suffix=".tmp")
-    try:
-        with os.fdopen(tmp_fd, "w") as f:
-            json.dump(tasks, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, str(TASKS_PATH))
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
 
 
 def generate_id(text: str) -> str:
@@ -108,6 +100,7 @@ def parse_datetime(s: str) -> str:
         # Try to use the agent's configured timezone
         try:
             import zoneinfo
+
             tz_name = os.environ.get("TZ", "UTC")
             tz = zoneinfo.ZoneInfo(tz_name)
             dt = dt.replace(tzinfo=tz)
@@ -119,6 +112,7 @@ def parse_datetime(s: str) -> str:
 def cmd_add(args: list) -> int:
     text = None
     at_time = None
+    in_duration = None
     every_min = None
     cron_pat = None
     priority = 1
@@ -130,6 +124,9 @@ def cmd_add(args: list) -> int:
             i += 2
         elif args[i] == "--at" and i + 1 < len(args):
             at_time = args[i + 1]
+            i += 2
+        elif args[i] == "--in" and i + 1 < len(args):
+            in_duration = args[i + 1]
             i += 2
         elif args[i] == "--every" and i + 1 < len(args):
             every_min = int(args[i + 1])
@@ -148,10 +145,25 @@ def cmd_add(args: list) -> int:
         print("Error: --text is required", file=sys.stderr)
         return 1
 
+    # --in is just a relative spelling of --at; resolve it now.
+    if in_duration is not None:
+        if at_time is not None:
+            print("Error: --in and --at are mutually exclusive", file=sys.stderr)
+            return 1
+        try:
+            at_time = _resolve_in_to_isoformat(in_duration)
+        except ValueError as e:
+            print(
+                f"Error: invalid --in value {in_duration!r} ({e}). "
+                "Use Nm, Nh, or Nd (e.g. 30m, 2h, 1d).",
+                file=sys.stderr,
+            )
+            return 1
+
     # Exactly one schedule type required
     schedule_count = sum(1 for x in [at_time, every_min, cron_pat] if x is not None)
     if schedule_count == 0:
-        print("Error: specify --at, --every, or --cron", file=sys.stderr)
+        print("Error: specify --at, --in, --every, or --cron", file=sys.stderr)
         return 1
     if schedule_count > 1:
         print("Error: specify only one of --at, --every, --cron", file=sys.stderr)
@@ -179,9 +191,9 @@ def cmd_add(args: list) -> int:
         task["schedule"] = cron_pat
 
     with _tasks_lock():
-        tasks = load_tasks()
+        tasks = _load_tasks()
         tasks.append(task)
-        save_tasks(tasks)
+        write_atomic(TASKS_PATH, tasks)
 
     print(f"Created reminder: {rid}")
     print(f"  Text: {text}")
@@ -196,8 +208,12 @@ def cmd_add(args: list) -> int:
 
 def cmd_list(args: list) -> int:
     as_json = "--json" in args
-    tasks = load_tasks()
-    reminders = [t for t in tasks if t.get("source") == "reminder" or t.get("id", "").startswith("reminder-")]
+    tasks = _load_tasks()
+    reminders = [
+        t
+        for t in tasks
+        if t.get("source") == "reminder" or t.get("id", "").startswith("reminder-")
+    ]
 
     if not reminders:
         if as_json:
@@ -244,7 +260,7 @@ def cmd_delete(args: list) -> int:
         return 1
 
     with _tasks_lock():
-        tasks = load_tasks()
+        tasks = _load_tasks()
         original_len = len(tasks)
         tasks = [t for t in tasks if t.get("id") != rid]
 
@@ -252,7 +268,7 @@ def cmd_delete(args: list) -> int:
             print(f"Reminder not found: {rid}", file=sys.stderr)
             return 1
 
-        save_tasks(tasks)
+        write_atomic(TASKS_PATH, tasks)
     print(f"Deleted: {rid}")
     return 0
 
@@ -260,17 +276,21 @@ def cmd_delete(args: list) -> int:
 def cmd_clear(args: list) -> int:
     """Remove all fired/disabled reminders."""
     with _tasks_lock():
-        tasks = load_tasks()
+        tasks = _load_tasks()
         before = len(tasks)
         tasks = [
-            t for t in tasks
+            t
+            for t in tasks
             if not (
-                (t.get("source") == "reminder" or t.get("id", "").startswith("reminder-"))
+                (
+                    t.get("source") == "reminder"
+                    or t.get("id", "").startswith("reminder-")
+                )
                 and not t.get("enabled", True)
             )
         ]
         removed = before - len(tasks)
-        save_tasks(tasks)
+        write_atomic(TASKS_PATH, tasks)
     print(f"Cleared {removed} fired reminder(s)")
     return 0
 
@@ -300,20 +320,30 @@ def main():
 
 # --- Public API (for direct import by services) ---
 
+
 def add_reminder(
     text: str,
     *,
     at: str | None = None,
+    in_: str | None = None,
     every: int | None = None,
     cron: str | None = None,
     priority: int = 1,
 ) -> str | None:
     """Add a reminder programmatically. Returns the reminder ID on success, None on error.
 
-    Exactly one of *at* (ISO datetime string), *every* (minutes), or *cron* (pattern)
-    must be provided.
+    Exactly one of *at* (ISO datetime string), *in_* (relative duration like '30m',
+    '2h', '1d'), *every* (minutes), or *cron* (pattern) must be provided. *in_* is
+    a one-shot reminder resolved to an absolute datetime relative to now.
     """
     try:
+        if in_ is not None:
+            if at is not None:
+                return None
+            try:
+                at = _resolve_in_to_isoformat(in_)
+            except ValueError:
+                return None
         schedule_count = sum(1 for x in [at, every, cron] if x is not None)
         if not text or schedule_count != 1:
             return None
@@ -339,9 +369,9 @@ def add_reminder(
             task["schedule"] = cron
 
         with _tasks_lock():
-            tasks = load_tasks()
+            tasks = _load_tasks()
             tasks.append(task)
-            save_tasks(tasks)
+            write_atomic(TASKS_PATH, tasks)
         return rid
     except Exception:
         return None

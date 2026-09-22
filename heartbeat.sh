@@ -9,9 +9,15 @@
 #    2. Portal unhealthy                → SELF-HEAL prompt (fix portal)
 #    3. User command in inbox           → GOAL prompt (do user's task)
 #    4. Active goal in progress         → GOAL prompt (continue working)
-#    5. No evolve in last 5 cycles      → EVOLVE prompt (prevent starvation)
-#    6. Last N evolves in a row         → SKIP cycle (prevent evolve loop)
-#    7. Otherwise                       → EVOLVE prompt (self-improve)
+#    5. No idle-cycle in last 5 cycles  → IDLE prompt (prevent starvation)
+#    6. Last N idle-cycles in a row     → SKIP cycle (prevent idle loop)
+#    7. Otherwise                       → IDLE prompt (self-improve / consolidate)
+#
+#  The "idle" prompt is EVOLVE by default; with --agent-sleep it becomes DREAM
+#  (nightly reflection/consolidation, see prompts/dream.md) only between
+#  00:00 and 08:00 in the user's timezone — outside that window the idle
+#  prompt stays EVOLVE even when --agent-sleep is set. The consecutive cap
+#  is --max-evolve (default 5) for evolve and --max-dream (default 5) for dream.
 #
 #  Uses:
 #    --system-prompt         → fixed context (constitution, memory, container info)
@@ -22,34 +28,74 @@ set -uo pipefail
 
 # ── Prevent concurrent heartbeats (flock guard) ────────────
 LOCK_FILE="/agent/memory/.heartbeat.lock"
+SKIP_FILE="/agent/memory/.heartbeat_skips"
+
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
-    echo "[$(date -Is)] Another heartbeat is already running. Skipping."
-    exit 0
+    SKIPS=$(cat "$SKIP_FILE" 2>/dev/null)
+    if ! [[ "$SKIPS" =~ ^[0-9]+$ ]]; then
+        SKIPS=0
+    fi
+    SKIPS=$((SKIPS + 1))
+    
+    if [ "$SKIPS" -ge 6 ]; then
+        echo "[$(date -Is)] Heartbeat lock held for too long (${SKIPS} consecutive skips). Forcefully cleaning up lock..."
+        rm -f "$SKIP_FILE"
+        
+        if command -v fuser >/dev/null 2>&1; then
+            fuser -k -9 "$LOCK_FILE" 2>/dev/null || true
+        elif command -v lsof >/dev/null 2>&1; then
+            lsof -t "$LOCK_FILE" 2>/dev/null | xargs kill -9 2>/dev/null || true
+        fi
+        
+        # Recreate the lock file inode to bypass the stuck one
+        rm -f "$LOCK_FILE"
+        exec 9>"$LOCK_FILE"
+        flock -n 9 || true
+    else
+        echo "$SKIPS" > "$SKIP_FILE"
+        echo "[$(date -Is)] Another heartbeat is already running. Skipping."
+        exit 0
+    fi
+else
+    rm -f "$SKIP_FILE"
 fi
-# Lock is held for the duration of the script via fd 9
+# Lock is held for the duration of the script via fd 9.
+# The file is intentionally NOT removed on exit — it's a stable rendezvous
+# inode; flock auto-releases the advisory lock when fd 9 closes at process
+# exit, and keeping the path stable avoids a brief overlap race where a
+# concurrent heartbeat could create a fresh inode at the same path.
 
 # ── Parse arguments ──────────────────────────────────────────
 AGENT_SLEEP=false
-MAX_CONSECUTIVE_EVOLVE=5
+MAX_EVOLVE=5
+MAX_DREAM=5
+AGENT_TIMEOUT=1800
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --agent-sleep) AGENT_SLEEP=true; shift ;;
-        --max-evolve) MAX_CONSECUTIVE_EVOLVE="$2"; shift 2 ;;
+        --max-evolve) MAX_EVOLVE="$2"; shift 2 ;;
+        --max-dream) MAX_DREAM="$2"; shift 2 ;;
+        --agent-timeout) AGENT_TIMEOUT="$2"; shift 2 ;;
         *) shift ;;
     esac
 done
 
-# ── Guard: kill stale agent process from a previous crashed heartbeat ──
-# If a previous heartbeat was killed (e.g., OOM, signal) without cleanup,
-# a leftover agent process can still be running. Detect via the cycle lock
-# file (written at cycle start, cleaned up on exit). If the PID in the lock
-# is still alive but the heartbeat that spawned it is gone, kill it so this
-# heartbeat can run cleanly — otherwise the leftover process keeps writing
-# to cycles.json while we start a new cycle, causing overlapping entries.
+# IDLE_MODE is set after USER_TZ is read below, since the dream window
+# (20:00–08:00) is evaluated in the user's local timezone.
+
+# ── Guard: kill stale agent process from a previous crashed/timed-out heartbeat ──
+# If a previous heartbeat was killed (e.g., OOM, signal) or timed out via
+# --agent-timeout without cleanup, a leftover agent process can still be
+# running. Detect via the cycle lock file (written at cycle start, cleaned up
+# on normal exit, preserved on timeout). If the PID in the lock is still
+# alive, kill it so this heartbeat can run cleanly — otherwise the leftover
+# process keeps writing to cycles.json while we start a new cycle, causing
+# overlapping entries.
 CYCLE_LOCK="/agent/memory/.cycle.lock"
 if [ -f "$CYCLE_LOCK" ]; then
     STALE_PID=$(jq -r '.pid // 0' "$CYCLE_LOCK" 2>/dev/null || echo 0)
+    : "${STALE_PID:=0}"
     if [ "$STALE_PID" -gt 0 ] && [ "$STALE_PID" != "$$" ]; then
         if kill -0 "$STALE_PID" 2>/dev/null; then
             echo "[$(date -Is)] Stale cycle process (PID $STALE_PID) still running from previous heartbeat. Killing..."
@@ -74,40 +120,56 @@ if [ -f /agent/memory/portal_config.json ]; then
 fi
 USER_TIME=$(TZ="$USER_TZ" date "+%Y-%m-%d %H:%M:%S %Z")
 
+# ── Idle mode selection (dream only at night when --agent-sleep is set) ──
+# Dream window: 00:00–08:00 in the user's timezone. Outside that window, even
+# with --agent-sleep on, the idle prompt falls back to evolve.
+if $AGENT_SLEEP; then
+    CURRENT_HOUR=$(TZ="$USER_TZ" date "+%H")
+    CURRENT_HOUR=${CURRENT_HOUR#0}  # strip leading zero for arithmetic
+    : "${CURRENT_HOUR:=0}"
+    if [ "$CURRENT_HOUR" -lt 8 ]; then
+        IDLE_MODE="dream"
+        MAX_CONSECUTIVE_IDLE="$MAX_DREAM"
+    else
+        IDLE_MODE="evolve"
+        MAX_CONSECUTIVE_IDLE="$MAX_EVOLVE"
+    fi
+else
+    IDLE_MODE="evolve"
+    MAX_CONSECUTIVE_IDLE="$MAX_EVOLVE"
+fi
+
 # ── Update last_heartbeat in state.json (fires every invocation, even during sleep) ──
 HEARTBEAT_TS=$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")
 TMP_STATE=$(mktemp /agent/memory/state.json.XXXXXX)
 jq --arg ts "$HEARTBEAT_TS" '.last_heartbeat = $ts' /agent/memory/state.json > "$TMP_STATE" 2>/dev/null && mv "$TMP_STATE" /agent/memory/state.json || rm -f "$TMP_STATE"
 
-# ── Sleep mode: skip cycle during 00:00–08:00 unless inbox has items ──
-if $AGENT_SLEEP; then
-    CURRENT_HOUR=$(TZ="$USER_TZ" date "+%H")
-    CURRENT_HOUR=${CURRENT_HOUR#0}  # strip leading zero for arithmetic
-    if [ "$CURRENT_HOUR" -lt 8 ]; then
-        inbox_count=$(jq 'length // 0' /agent/messages/inbox.json 2>/dev/null || echo 0)
-        [[ "$inbox_count" =~ ^[0-9]+$ ]] || inbox_count=0
-        if [ "$inbox_count" -eq 0 ]; then
-            echo "[$(date -Is)] Agent is sleeping (${USER_TIME}). No inbox items. Skipping cycle."
-            exit 0
-        fi
-        echo "[$(date -Is)] Agent is sleeping but inbox has ${inbox_count} item(s). Waking up."
-    fi
-fi
-
 CYCLE_NUM=$((CYCLE_NUM + 1))
 
 # ── Cycle lock file (tracks active cycle PID for crash detection) ──
 # Initially written with shell PID; updated with agent PID after launch.
+# NOT cleaned up via EXIT trap — on timeout we want the lock to survive so
+# the next heartbeat's stale-process guard can find and kill the leftover
+# agent. The lock is removed manually below on normal cycle completion.
 CYCLE_LOCK="/agent/memory/.cycle.lock"
 echo "{\"pid\": $$, \"cycle\": ${CYCLE_NUM}, \"started\": \"${TIMESTAMP}\"}" > "$CYCLE_LOCK"
-cleanup_cycle_lock() { rm -f "$CYCLE_LOCK"; }
-trap cleanup_cycle_lock EXIT
 
 echo "[$TIMESTAMP] ════════ Cycle #${CYCLE_NUM} ════════"
 
-# ── Scheduled Tasks (inject due tasks into inbox before prompt selection) ──
+# ── Scheduled Tasks (fallback: scheduler_daemon owns this normally; this
+#    in-line check ensures reminders still fire if the daemon is down) ──
 if [ -f /agent/memory/scheduled_tasks.json ]; then
     uv run python /agent/scripts/scheduler.py --check 2>/dev/null || true
+fi
+
+# ── Register the metrics daemon on deployments provisioned before it existed.
+#    seed/memory/services.json only applies to fresh installs, and auto-start
+#    reads the live registry — so register once, idempotently, then let
+#    auto-start own the lifecycle from here on. ──
+if ! grep -q '"metrics_daemon"' /agent/memory/services.json 2>/dev/null; then
+    uv run python /agent/scripts/service_manager.py start metrics_daemon \
+        --auto-start -- uv run python /agent/services/metrics_daemon.py \
+        2>/dev/null || true
 fi
 
 # ── Auto-start services (ensure services with auto_start:true are running) ──
@@ -158,6 +220,14 @@ select_prompt() {
     fi
     # exit 2 (timeout) or 3 (unavailable) → non-fatal, continue
 
+    # 3c. Server runtime errors
+    local server_errors_count
+    server_errors_count=$(jq 'length' /agent/memory/server_errors.json 2>/dev/null || echo 0)
+    if [ "$server_errors_count" -gt 0 ]; then
+        echo "heal:app_error"
+        return
+    fi
+
     # 4. User command waiting in inbox or active goal in progress
     #    (checked before starvation guard so active work always takes priority)
     local inbox_size
@@ -175,32 +245,40 @@ select_prompt() {
         return
     fi
 
-    # 5. Force evolve if none in the last 5 cycles (prevents starvation when idle)
-    #    Only reached when inbox is empty and no active goals exist.
-    local cycles_since_evolve
-    cycles_since_evolve=$(jq '
-        [.[] | select(.type == "evolve")] | last | .cycle // 0
-    ' /agent/memory/cycles.json 2>/dev/null || echo 0)
+    # 5. Force the idle prompt if none in the last 5 cycles (prevents starvation
+    #    when idle). IDLE_MODE = "evolve" normally, "dream" when --agent-sleep.
+    #    Dream cycles match either type=="dream" (current scheme) or the legacy
+    #    combo type=="evolve" & category=="prompt_evolution" (pre-dream-type closes).
+    local idle_match_jq
+    if [ "$IDLE_MODE" = "dream" ]; then
+        idle_match_jq='(.type == "dream") or (.type == "evolve" and .category == "prompt_evolution")'
+    else
+        idle_match_jq='.type == $m'
+    fi
+    local cycles_since_idle
+    cycles_since_idle=$(jq --arg m "$IDLE_MODE" "
+        [.[] | select($idle_match_jq)] | last | .cycle // 0
+    " /agent/memory/cycles.json 2>/dev/null || echo 0)
     local current_cycle
     current_cycle=$(jq -r '.cycle_number // 0' /agent/memory/state.json 2>/dev/null || echo 0)
-    local gap=$(( current_cycle - cycles_since_evolve ))
+    local gap=$(( current_cycle - cycles_since_idle ))
     if [ "$gap" -ge 5 ]; then
-        echo "evolve"
+        echo "$IDLE_MODE"
         return
     fi
 
-    # 6. All clear — self-evolve (skip if consecutive evolve limit reached)
-    local all_evolve
-    all_evolve=$(jq -r --argjson n "$MAX_CONSECUTIVE_EVOLVE" '
-        if length < $n then false
-        else (. | reverse | .[0:$n] | all(.type == "evolve"))
+    # 6. All clear — run the idle prompt (skip if consecutive idle limit reached).
+    local all_idle
+    all_idle=$(jq -r --argjson n "$MAX_CONSECUTIVE_IDLE" --arg m "$IDLE_MODE" "
+        if length < \$n then false
+        else (. | reverse | .[0:\$n] | all($idle_match_jq))
         end
-    ' /agent/memory/cycles.json 2>/dev/null || echo false)
-    if [ "$all_evolve" = "true" ]; then
+    " /agent/memory/cycles.json 2>/dev/null || echo false)
+    if [ "$all_idle" = "true" ]; then
         echo "skip"
         return
     fi
-    echo "evolve"
+    echo "$IDLE_MODE"
 }
 
 PROMPT_MODE=$(select_prompt)
@@ -208,7 +286,7 @@ echo "[$TIMESTAMP] Prompt mode: ${PROMPT_MODE}"
 
 # ── Skip mode: consecutive evolve limit reached ──────────────
 if [ "$PROMPT_MODE" = "skip" ]; then
-    echo "[$TIMESTAMP] Last ${MAX_CONSECUTIVE_EVOLVE} cycles were all evolve. Skipping cycle."
+    echo "[$TIMESTAMP] Last ${MAX_CONSECUTIVE_IDLE} cycles were all ${IDLE_MODE}. Skipping cycle."
     exit 0
 fi
 
@@ -216,9 +294,13 @@ fi
 
 build_system_prompt() {
     cat <<SYSTEM
+<agent_system_prompt>
 $(cat /agent/system.md 2>/dev/null)
-## Immutable Rules (Constitution)
+</agent_system_prompt>
+
+<agent_constitution>
 $(cat /agent/constitution.md 2>/dev/null || echo "No constitution found.")
+</agent_constitution>
 SYSTEM
 
     # Inject public hostname if configured
@@ -228,16 +310,17 @@ SYSTEM
         if [ -n "$public_url" ]; then
             cat <<PUBLIC
 
-## Public URL
-
+<public_url>
 This agent is accessible at: ${public_url}
 
 When sharing links with the user (portal, file explorer, workspace files, generated reports), use this public URL as the base instead of localhost:8080. For example:
 - Portal: ${public_url}/app/
+- Static Web: ${public_url}/web/ (static files from /agent/web/)
 - File Explorer: ${public_url}/_/
 - Workspace files: ${public_url}/_/agent/workspace/path/to/<filename>
 
 Note: For internal operations (curl, health checks, Caddy admin API), continue using localhost.
+</public_url>
 PUBLIC
         fi
     fi
@@ -248,71 +331,140 @@ PUBLIC
 build_task_prompt() {
     local mode="$1"
 
-    echo "This is cycle #${CYCLE_NUM}. Current date and time: ${USER_TIME} (${USER_TZ})."
-    echo ""
-    echo "CRITICAL: ONE cycle per heartbeat. Run cycle_start.py exactly once at the start"
-    echo "and cycle_close.py exactly once at the end. Never create additional cycle entries"
-    echo "in cycles.json. If you discover new goals or inbox items, leave them for the next"
-    echo "heartbeat. Overlapping cycles cause interruptions and lost work."
-    echo ""
+    # ── STATIC PREFIX (cache-friendly: identical across cycles for a given mode) ──
+    cat <<'CYCLE_RULES'
+CRITICAL: ONE cycle per heartbeat. Run cycle_start.py exactly once at the start
+and cycle_close.py exactly once at the end. Never create additional cycle entries
+in cycles.json. If you discover new goals or inbox items, leave them for the next
+heartbeat. Overlapping cycles cause interruptions and lost work.
+
+## Altering Cycle Start/Close Behavior
+
+Since modifying `scripts/cycle_start.py` and `scripts/cycle_close.py` directly is prohibited by the Hard Rules in the Constitution, any modifications or additions to the behaviors executed at cycle start or cycle close must be done by:
+
+1. Creating a new custom script containing the new behavior (optional if you just want to modify behavior via prompt).
+2. Modifying the appropriate prompt file(s) in `prompts/` (such as `prompts/goal.md`, `prompts/evolve.md`, `prompts/dream.md`, `prompts/cycle-close.md`, etc.) to invoke the new script during the cycle start or close sequence instead of modifying the core cycle scripts directly.
+
+## End-of-Cycle Requirements (MANDATORY)
+
+Before finishing, you MUST do ALL of the following:
+
+1. Update /agent/memory/state.json — set cycle_number, status, last_cycle_summary (last_heartbeat and last_cycle_run are set by heartbeat.sh; last_cycle_end is set by cycle_close.py)
+2. Append to /agent/memory/journal.json — see prompts/cycle-close.md Step 3 for the JSON schema
+3. If you modified `server.py` or `app/*.py` files, verify the portal is still up: `curl -s http://localhost:8081/app/_stcore/health`
+4. Write any questions you have for the user to /agent/messages/outbox.json
+5. Review & update AGENTS.md
+   - keep the Directory Structure tree accurate (add/remove/rename files with correct descriptions, stick to first level only)
+   - add/update mandatory instructions that user explicitly said you must follow
+   - add any new capabilities you have gained and update any changes to your operational parameters (e.g., new public URL, new services, etc.)
+
+CYCLE_RULES
 
     case "$mode" in
         bootstrap)
             cat /agent/prompts/bootstrap.md
             echo ""
-            echo "## Your Goal"
-            echo '```json'
-            cat /agent/memory/goal.json 2>/dev/null || echo '[]'
-            echo '```'
             echo "Read this goal carefully. Incorporate it into your bootstrap plan."
             echo "You MAY modify server.py and app/*.py to customise the Streamlit UI for this goal."
             ;;
-        heal:*)
-            local symptom="${mode#heal:}"
+        heal:app_error)
             cat /agent/prompts/self-heal.md
             echo ""
-            echo "## Detected Symptom"
-            echo "Health check result: \`${symptom}\`"
+            echo "The Streamlit server process is running but server.py raised an exception during headless render,"
+            echo "or there are unresolved server errors in server_errors.json."
+            echo "This means a broken import, syntax error, missing dependency, or runtime error in a Streamlit component or app."
             echo ""
-            case "$symptom" in
-                app_error)
-                    echo "The Streamlit server process is running but server.py raised an exception during headless render."
-                    echo "This means a broken import, missing dependency, or error in init."
-                    echo ""
-                    echo "App check result:"
-                    echo '```json'
-                    cat /agent/memory/app_check_result.json 2>/dev/null || echo "{}"
-                    echo '```'
-                    echo ""
-                    echo "Reproduce: cd /agent && uv run python scripts/app_check.py"
-                    ;;
-                *)
-                    echo "Streamlit health endpoint (/_stcore/health) did not return 'ok'."
-                    echo "Check that the Streamlit process is running on port 8081."
-                    echo "The process manager (PID 1) runs Caddy (8080) and Streamlit (8081)."
-                    ;;
-            esac
+            echo "Reproduce: cd /agent && uv run python scripts/app_check.py"
+            ;;
+        heal:server_down)
+            cat /agent/prompts/self-heal.md
+            echo ""
+            echo "Streamlit health endpoint (/_stcore/health) did not return 'ok'."
+            echo "Check that the Streamlit process is running on port 8081."
+            echo "The process manager (PID 1) runs Caddy (8080) and Streamlit (8081)."
             ;;
         goal)
             cat /agent/prompts/goal.md
-            echo ""
-            echo "## Current Inbox Contents (sorted by priority, 1=highest)"
-            echo '```json'
-            jq 'sort_by(.priority // 3)' /agent/messages/inbox.json 2>/dev/null || cat /agent/messages/inbox.json 2>/dev/null || echo '[]'
-            echo '```'
-            echo ""
-            echo "## Your Goal Statuses"
-            echo '```json'
-            cat /agent/memory/goal.json 2>/dev/null || echo '[]'
-            echo '```'
             ;;
         evolve)
             cat /agent/prompts/evolve.md
-            echo ""
-            echo "## Your Goal Statuses"
-            echo '```json'
+            ;;
+        dream)
+            cat /agent/prompts/dream.md
+            ;;
+    esac
+
+    # ── DYNAMIC SUFFIX (changes every cycle — kept at the end so prefix cache hits) ──
+    echo ""
+    echo "This is cycle #${CYCLE_NUM}. Current date and time: ${USER_TIME} (${USER_TZ})."
+    echo ""
+
+    case "$mode" in
+        bootstrap)
+            echo "<your_goals>"
             cat /agent/memory/goal.json 2>/dev/null || echo '[]'
+            echo "</your_goals>"
+            ;;
+        heal:app_error)
+            echo "## Detected Symptom"
+            echo "Health check result: \`app_error\`"
+            echo ""
+            echo "App check result:"
+            echo '```json'
+            cat /agent/memory/app_check_result.json 2>/dev/null || echo "{}"
             echo '```'
+            echo ""
+            echo "Server Errors (if any):"
+            echo '```json'
+            cat /agent/memory/server_errors.json 2>/dev/null || echo "[]"
+            echo '```'
+            # Clear the errors now that they are embedded in the prompt
+            # so we don't get stuck in a heal loop if the agent doesn't clear them
+            echo "[]" > /agent/memory/server_errors.json 2>/dev/null || true
+            ;;
+        heal:server_down)
+            echo "## Detected Symptom"
+            echo "Health check result: \`server_down\`"
+            ;;
+        goal)
+            echo "<your_inbox_messages>"
+            echo "(sorted by priority, 1=highest)"
+            jq '[.[] | select(.type != "goal")] | sort_by(.priority // 3)' /agent/messages/inbox.json 2>/dev/null || echo '[]'
+            echo "</your_inbox_messages>"
+            echo ""
+            echo "<new_goals_to_start>"
+            echo "(sorted by priority, 1=highest)"
+            jq '[.[] | select(.type == "goal")] | sort_by(.priority // 3)' /agent/messages/inbox.json 2>/dev/null || echo '[]'
+            echo "</new_goals_to_start>"
+            echo ""
+            echo "<previous_unfinished_goals>"
+            jq '[.[] | select(.status == "pending" or .status == "in-progress" or .status == "in_progress")] | sort_by(.created_at) | .[0:5]' /agent/memory/goal.json 2>/dev/null || echo '[]'
+            echo "</previous_unfinished_goals>"
+            ;;
+        evolve)
+            echo "<your_current_goals>"
+            echo "(active goals from goal.json — pending/in-progress)"
+            jq '[.[] | select(.status == "pending" or .status == "in-progress" or .status == "in_progress")]' /agent/memory/goal.json 2>/dev/null || echo '[]'
+            echo "</your_current_goals>"
+            echo ""
+            echo "<your_past_goals>"
+            echo "(all completed/failed from goal.json + up to 20 most recent from goal_history.json, sorted by created_at)"
+            jq -s '
+                ((.[0] // []) | map(select(.status == "completed" or .status == "failed")))
+                + ((.[1] // []) | sort_by(.created_at) | .[-20:])
+                | sort_by(.created_at)
+            ' /agent/memory/goal.json /agent/memory/goal_history.json 2>/dev/null || echo '[]'
+            echo "</your_past_goals>"
+            ;;
+        dream)
+            echo "<your_past_failed_goals>"
+            echo "(all failed goals from goal.json + goal_history.json, sorted by created_at)"
+            jq -s '
+                (((.[0] // []) + (.[1] // []))
+                 | map(select(.status == "failed"))
+                 | sort_by(.created_at))
+            ' /agent/memory/goal.json /agent/memory/goal_history.json 2>/dev/null || echo '[]'
+            echo "</your_past_failed_goals>"
             ;;
     esac
 }
@@ -344,7 +496,7 @@ jq --arg ts "$CYCLE_RUN_TS" '.last_cycle_run = $ts' /agent/memory/state.json > "
 
 # ── Sync JSON memory → .md files for agent auto-memory ──
 # Must run before the agent starts so auto-memory reflects current state.
-uv run python /agent/scripts/memory_sync.py 2>/dev/null || true
+uv run python /agent/scripts/sync_memory_files.py 2>/dev/null || true
 
 cd /agent
 # Run agent in background so we can capture its PID for crash detection.
@@ -356,15 +508,47 @@ if [ -n "$SESSION_ID" ] && [ "$SESSION_ID" != "null" ] && [ "$SESSION_ID" != "" 
 fi
 
 /agent/agent.sh --yolo \
-    -s "$SYSTEM_PROMPT" \
-    -p "$TASK_PROMPT" \
+    --system-prompt-file "/agent/memory/logs/cycle-${CYCLE_NUM}-system.md" \
+    --task-prompt-file "/agent/memory/logs/cycle-${CYCLE_NUM}-prompt.md" \
     $RESUME_OPT \
     --output-format text \
     2>&1 | tee "/agent/memory/logs/cycle-${CYCLE_NUM}.log" &
 AGENT_PID=$!
 echo "{\"pid\": ${AGENT_PID}, \"cycle\": ${CYCLE_NUM}, \"started\": \"${TIMESTAMP}\"}" > "$CYCLE_LOCK"
-wait $AGENT_PID
-EXIT_CODE=$?
+
+# ── Bounded wait: stop blocking after --agent-timeout seconds ──
+# A hung agent must not stall the heartbeat loop. On timeout we leave the
+# process running and preserve the cycle lock; the next heartbeat's
+# stale-process guard will kill it before starting a new cycle.
+AGENT_START_EPOCH=$(date +%s)
+AGENT_TIMED_OUT=false
+EXIT_CODE=0
+while kill -0 "$AGENT_PID" 2>/dev/null; do
+    NOW_EPOCH=$(date +%s)
+    ELAPSED=$(( NOW_EPOCH - AGENT_START_EPOCH ))
+    if [ "$ELAPSED" -ge "$AGENT_TIMEOUT" ]; then
+        AGENT_TIMED_OUT=true
+        break
+    fi
+    sleep 5
+done
+if $AGENT_TIMED_OUT; then
+    echo "[$(date -Is)] Agent timed out after ${ELAPSED}s (--agent-timeout=${AGENT_TIMEOUT}). Leaving PID ${AGENT_PID} running and cycle lock in place; it will be killed by the next heartbeat's stale-process guard."
+    EXIT_CODE=124
+else
+    wait "$AGENT_PID"
+    EXIT_CODE=$?
+    # Cycle finished normally — remove the lock so the next heartbeat sees
+    # a clean slate and doesn't try to kill an already-exited PID.
+    rm -f "$CYCLE_LOCK"
+fi
+
+# On timeout, exit immediately — the agent is still running and hasn't
+# written a final session, so transcript archiving is skipped this cycle.
+if $AGENT_TIMED_OUT; then
+    echo "[$(date -Is)] Cycle #${CYCLE_NUM} ended early due to agent timeout (exit code: ${EXIT_CODE})."
+    exit "$EXIT_CODE"
+fi
 
 # ── Archive transcript (preserve full reasoning chain before compaction) ──
 TRANSCRIPT_DIR="/agent/memory/transcripts"
