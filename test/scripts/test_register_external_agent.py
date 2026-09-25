@@ -252,7 +252,9 @@ def test_cmd_setup_prints_instruction(redirect_paths, monkeypatch, capsys):
     args = argparse.Namespace(setup="bot")
     assert rea.cmd_setup(args) == 0
     out = capsys.readouterr().out
-    assert "persistent Monitor" in out
+    assert "persistent" not in out
+    assert f"timeout_ms: {rea.MONITOR_TIMEOUT_MS}" in out
+    assert "re-arm" in out
     assert "PING_FAILED http=<code>" not in out
     assert "https://example.com/external-agent/ping" in out
     assert "https://example.com/external-agent/read-inbox" in out
@@ -276,7 +278,7 @@ def test_cmd_setup_loop_client(redirect_paths, monkeypatch, capsys):
     assert "```/loop 10m" in out
     assert "https://example.com/external-agent/ping" in out
     assert "user:pass" in out
-    assert "persistent Monitor" not in out
+    assert "timeout_ms" not in out
 
 
 @pytest.mark.parametrize("poll_seconds", [0, -5])
